@@ -13,14 +13,20 @@ Build order is chosen so each milestone is independently testable, backend-first
 | M3 Authentication | ✅ built + tested (login/logout/actor, lockout, `?next=`, CSRF, timing) |
 | M4 Admin action + API | ✅ built + tested (self-answer grant, last-admin guard, audit) |
 | M5 Self-service + forced change | ✅ built + tested (change-pw lockout, asgi_wrapper gate) |
-| M6 user-profiles seeding | ⬜ pending |
-| M7 Frontend (Svelte/Vite) | ⬜ pending — `routes/pages.py` ships minimal server-rendered HTML shells in the interim |
-| M8 Docs + polish | ⬜ pending |
+| M6 user-profiles seeding | ✅ built + tested (guarded seed hook, actor_id only) |
+| M7 Frontend (Svelte/Vite) | ✅ built (login/admin/account Svelte 5 pages, Vite build ships assets + manifest; base template mounts `#app-root`) |
+| M8 Docs + polish | ⬜ pending (README/deploy docs) |
 
-**21 tests green** (`uv run pytest`). Full bootstrap→admin→forced-change→disable
-flow verified end-to-end against an in-process Datasette 1.0a35. Build-time
-discoveries and resolved `← verify` flags are recorded in
+**22 tests green** (`uv run pytest`), ruff clean, `npm run check` (svelte-check +
+tsc) clean. Full bootstrap→admin→forced-change→disable flow verified end-to-end
+against an in-process Datasette 1.0a35; all three Svelte pages render and load
+their built bundles. Build-time discoveries and resolved `← verify` flags are in
 [`09-decisions-log.md`](09-decisions-log.md) (D17 + the resolution list).
+
+Frontend notes: pages call the JSON API via a small `postJSON` helper
+(`frontend/src/lib/api.ts`) rather than `openapi-fetch` — the endpoints are
+simple and this avoids depending on the alpha router's OpenAPI output; `api.d.ts`
+generation is therefore skipped. Ports: Datasette 8006 / Vite 5180.
 
 ## M0 — Scaffold
 - `pyproject.toml` (deps from [`01-architecture.md`](01-architecture.md)), entry point

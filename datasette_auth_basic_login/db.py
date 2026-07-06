@@ -78,6 +78,19 @@ async def list_users(db):
     return [dict(r) for r in result.rows]
 
 
+def to_user_row(r):
+    """Shape a users row into the UserRow presentation dict (adds `locked`)."""
+    return {
+        "id": r["id"],
+        "username": r["username"],
+        "is_admin": bool(r["is_admin"]),
+        "disabled": bool(r["disabled"]),
+        "must_change_password": bool(r["must_change_password"]),
+        "locked": bool(r["locked_until"] and r["locked_until"] > now_iso()),
+        "created_at": r["created_at"],
+    }
+
+
 async def list_sessions_for_user(db, actor_id):
     result = await db.execute(
         f"SELECT * FROM {SESSIONS} WHERE actor_id = ? ORDER BY last_seen_at DESC",

@@ -14,6 +14,7 @@ from ..page_data import (
     RevokeSessionRequest,
     SessionRow,
     TargetRequest,
+    UserRow,
 )
 from ..passwords import (
     PasswordLengthError,
@@ -177,6 +178,15 @@ async def change_password(
 # --------------------------------------------------------------------------
 # Admin operations
 # --------------------------------------------------------------------------
+
+
+@router.POST("/-/admin/api/list$")
+@require_admin
+async def admin_list(datasette, request):
+    internal = datasette.get_internal_database()
+    rows = await db.list_users(internal)
+    users = [UserRow(**db.to_user_row(r)).model_dump() for r in rows]
+    return Response.json({"ok": True, "users": users})
 
 
 @router.POST("/-/admin/api/create$", output=None)

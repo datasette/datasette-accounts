@@ -1,1 +1,33 @@
-{}
+{
+  "_api-CrkV2Iow.js": {
+    "file": "static/gen/api-CrkV2Iow.js",
+    "name": "api"
+  },
+  "src/pages/account/index.ts": {
+    "file": "static/gen/account-mGH3TZUu.js",
+    "name": "account",
+    "src": "src/pages/account/index.ts",
+    "isEntry": true,
+    "imports": [
+      "_api-CrkV2Iow.js"
+    ]
+  },
+  "src/pages/admin/index.ts": {
+    "file": "static/gen/admin-D1G6IIez.js",
+    "name": "admin",
+    "src": "src/pages/admin/index.ts",
+    "isEntry": true,
+    "imports": [
+      "_api-CrkV2Iow.js"
+    ]
+  },
+  "src/pages/login/index.ts": {
+    "file": "static/gen/login-NLO7olc1.js",
+    "name": "login",
+    "src": "src/pages/login/index.ts",
+    "isEntry": true,
+    "imports": [
+      "_api-CrkV2Iow.js"
+    ]
+  }
+}

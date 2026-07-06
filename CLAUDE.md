@@ -8,11 +8,15 @@ internal DB, an admin permission, and (M7, pending) a Svelte/Vite/TS frontend.
 Security review findings are in `todos/security-review/` (all applied + built).
 
 ## Build status
-- Backend M0–M5 built and tested (`uv run pytest`, 21 tests green).
-- M6 (user-profiles seeding) and M7 (Svelte frontend) pending. The pages in
-  `routes/pages.py` are minimal server-rendered HTML shells that drive the JSON
-  API; M7 replaces them with Svelte mounted on `#app-root` (the `#pageData`
-  bootstrap + route contracts are already in place).
+- M0–M7 built and tested (`uv run pytest`, 22 tests green; `npm run check` clean).
+  Only M8 (README/deploy docs) remains.
+- Frontend: Svelte 5 pages (`frontend/src/pages/{login,admin,account}`) built by
+  Vite into `datasette_auth_basic_login/static/gen/` + `manifest.json` (shipped).
+  `routes/pages.py` renders `templates/basic_login_base.html`, which mounts the
+  page bundle on `#app-root` and reads `#pageData`. Pages call the JSON API via
+  `frontend/src/lib/api.ts` (`postJSON`), not openapi-fetch.
+- Rebuild the frontend after changing Svelte/TS: `just frontend` (or `just types`
+  first if page-data models changed).
 
 ## Layout
 - `__init__.py` — hooks (routes, actions, permission SQL, startup, actor,

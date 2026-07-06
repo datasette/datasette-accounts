@@ -148,9 +148,26 @@ def actor_from_request(datasette, request):
 
 @hookimpl
 def menu_links(datasette, actor):
-    if actor:
-        return [{"href": datasette.urls.path("/-/logout"), "label": "Log out"}]
-    return [{"href": datasette.urls.path("/-/login"), "label": "Log in"}]
+    async def inner():
+        if not actor:
+            return [{"href": datasette.urls.path("/-/login"), "label": "Log in"}]
+        links = []
+        if await datasette.allowed(action=ADMIN_ACTION, actor=actor):
+            links.append(
+                {
+                    "href": datasette.urls.path("/-/admin/users"),
+                    "label": "Accounts",
+                }
+            )
+        links.append(
+            {"href": datasette.urls.path("/-/account"), "label": "Your account"}
+        )
+        links.append(
+            {"href": datasette.urls.path("/-/logout"), "label": "Log out"}
+        )
+        return links
+
+    return inner
 
 
 @hookimpl

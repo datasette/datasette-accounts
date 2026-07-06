@@ -1,24 +1,43 @@
 # datasette-auth-basic-login — dev recipes
+# Ports: Datasette 8006 / Vite 5180
 
-# Run the test suite
-test:
-    uv run pytest -q
+# Regenerate all TypeScript types (OpenAPI + page-data)
+types: types-pagedata
 
-# Lint + format check
-check:
-    uv run ruff check datasette_auth_basic_login tests
-
-# Format code
-format:
-    uv run ruff format datasette_auth_basic_login tests
-
-# Regenerate page-data JSON schemas (frontend typegen, M7)
+# Page-data JSON schemas -> TS (also compiled by the Vite buildStart plugin)
 types-pagedata:
     uv run python scripts/typegen-pagedata.py
 
-# Run a dev Datasette with a persistent internal DB
-dev:
-    uv run datasette --root --internal accounts.db --reload
+# Build the frontend for production (outputs into the package)
+frontend *flags:
+    npm run build --prefix frontend {{flags}}
+
+# Vite dev server (HMR)
+frontend-dev *flags:
+    npm run dev --prefix frontend -- --port 5180 {{flags}}
+
+# Datasette dev server with a persistent internal DB
+dev *flags:
+    uv run datasette --root -p 8006 --internal accounts.db {{flags}}
+
+# Datasette + Vite HMR (auto-restart on .py/.html changes)
+dev-with-hmr *flags:
+    DATASETTE_AUTH_BASIC_LOGIN_VITE_PATH=http://localhost:5180/ \
+    watchexec --stop-signal SIGKILL -e py,html --ignore '*.db' --restart --clear -- \
+      just dev {{flags}}
+
+# Tests
+test:
+    uv run pytest -q
+
+# Lint / format
+check:
+    uv run ruff check datasette_auth_basic_login tests
+    npm run check --prefix frontend
+
+format:
+    uv run ruff format datasette_auth_basic_login tests
+    npm run format --prefix frontend
 
 # Hash a password with the plugin's PBKDF2 scheme
 hash-password *ARGS:

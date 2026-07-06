@@ -8,3 +8,9 @@ build/
 .ruff_cache/
 node_modules/
 frontend/dist/
+
+# Generated frontend type artifacts (regenerate with `just types` / vite build)
+frontend/src/page_data/*_schema.json
+frontend/src/page_data/*.types.ts
+frontend/api.d.ts
+accounts.db
