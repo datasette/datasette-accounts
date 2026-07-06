@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>datasette-auth-basic-login — plan</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #5b6470; --line: #e3e6ea;
+    --accent: #2563eb; --accent-soft: #eff4ff; --code-bg: #f5f7fa;
+    --ok: #0a7c42; --warn: #a15c00; --warn-bg: #fff7e6; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --fg: #e6e9ee; --muted: #9aa4b2; --line: #2a2f38;
+      --accent: #7aa2ff; --accent-soft: #1b2335; --code-bg: #1b1f27;
+      --ok: #4ade80; --warn: #f2c266; --warn-bg: #2a2213; --chip: #232833;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 40px 24px 96px; }
+  header { border-bottom: 2px solid var(--line); padding-bottom: 20px; margin-bottom: 8px; }
+  h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.02em; }
+  h2 { font-size: 21px; margin: 40px 0 12px; padding-top: 8px; letter-spacing: -0.01em; }
+  h3 { font-size: 16px; margin: 24px 0 8px; }
+  .sub { color: var(--muted); font-size: 15px; margin: 0; }
+  .status { display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; }
+  p { margin: 10px 0; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 0.88em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.5;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  ul { margin: 10px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; background: var(--bg); }
+  .card h3 { margin-top: 0; }
+  .tablewrap { overflow-x: auto; margin: 12px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }
+  td.d { white-space: nowrap; font-weight: 600; }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--chip);
+    font-size: 12px; color: var(--muted); margin: 0 4px 4px 0; }
+  .warn { background: var(--warn-bg); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+    border-radius: 6px; padding: 10px 14px; margin: 14px 0; font-size: 14px; }
+  .warn strong { color: var(--warn); }
+  .rej { color: var(--muted); font-size: 13px; }
+  .kv { font-size: 14px; }
+  a { color: var(--accent); }
+  .toc { columns: 2; font-size: 14px; margin: 8px 0 0; }
+  @media (max-width: 640px) { .toc { columns: 1; } }
+  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>datasette-auth-basic-login</h1>
+  <p class="sub">Database-backed login for Datasette, with admin account management and a Svelte/Vite/TS frontend. Pre-build design spec.</p>
+  <span class="status">Awaiting Fable 5 review — no code written yet</span>
+</header>
+
+<p>This is the single-page render of the plan in <code>plans/start/*.md</code>. Every decision was made deliberately in a grilling session; alternatives and rationale are in the decisions log below and in <code>plans/start/09-decisions-log.md</code>.</p>
+
+<h2>What it is</h2>
+<p>A Datasette auth plugin modeled on <code>datasette-auth-passwords</code>, but with three departures the user asked for:</p>
+<ul>
+  <li><strong>Accounts in the internal database</strong> — created/managed at runtime, not hard-coded in plugin config.</li>
+  <li><strong>An admin permission</strong> — a Datasette 1.0 action that provisions accounts, revokes access, resets passwords, and grants admin.</li>
+  <li><strong>A Svelte 5 / Vite / TypeScript frontend</strong> — built per <code>datasette-alex-fullstack-skill</code> (login, admin dashboard, self-service account page).</li>
+</ul>
+<p><strong>Scope boundary:</strong> this plugin owns <em>identity</em> (accounts, passwords, sessions, one <code>is_admin</code> flag). It does <em>not</em> own resource-level authorization — that is delegated to <code>datasette-acl</code> / config <code>allow</code> blocks, which consume the actor we emit:</p>
+<pre>{ "id": "&lt;ULID&gt;", "username": "alice", "is_admin": true }</pre>
+<p><code>id</code> is an immutable ULID and the permanent join key to user-profiles and acl; <code>username</code> is the mutable login credential.</p>
+
+<h2>Architecture at a glance</h2>
+<div class="grid">
+  <div class="card"><h3>Targets</h3><p class="kv">Datasette ≥ 1.0a23 · Python ≥ 3.10 · 1.0 action API (<code>register_actions</code> / <code>datasette.allowed</code>)</p></div>
+  <div class="card"><h3>Backend</h3><p class="kv"><code>datasette-plugin-router</code> · Pydantic · <code>sqlite-migrate</code> · <code>python-ulid</code></p></div>
+  <div class="card"><h3>Frontend</h3><p class="kv">Svelte 5 runes · Vite 7 · <code>datasette-vite</code> · type-safe pipelines (Pydantic→TS, OpenAPI→TS)</p></div>
+  <div class="card"><h3>Hashing</h3><p class="kv">PBKDF2-HMAC-SHA256 (480k), copied verbatim from auth-passwords · stdlib, no new deps</p></div>
+</div>
+
+<h2>Data model — internal DB</h2>
+<p>Migration namespace <code>datasette-auth-basic-login.internal</code>. No collision with user-profiles' tables.</p>
+<div class="tablewrap">
+<table>
+  <tr><th>Table</th><th>Purpose</th><th>Key columns</th></tr>
+  <tr><td class="d">users</td><td>accounts (auth fields only)</td><td><code>id</code> (ULID PK), <code>username</code> UNIQUE, <code>password_hash</code>, <code>is_admin</code>, <code>disabled</code>, <code>must_change_password</code>, <code>failed_attempts</code>, <code>locked_until</code></td></tr>
+  <tr><td class="d">sessions</td><td>server-side sessions</td><td><code>token_sha256</code> PK, <code>actor_id</code>, <code>expires_at</code>, <code>last_seen_at</code>, <code>user_agent</code>, <code>ip</code></td></tr>
+  <tr><td class="d">login_audit</td><td>login history + lockout signal</td><td><code>username</code>, <code>ip</code>, <code>timestamp</code>, <code>success</code></td></tr>
+</table>
+</div>
+<p class="rej">display_name / email are <strong>not</strong> stored here — they live in datasette-user-profiles (decision D13).</p>
+
+<h2>Authentication flow</h2>
+<div class="grid">
+  <div class="card"><h3>Sessions</h3><p class="kv">Server-side, revocable. <code>token = secrets.token_urlsafe(32)</code>; store <code>sha256(token)</code>; cookie carries <code>sign(token)</code>; absolute 14-day expiry.</p></div>
+  <div class="card"><h3>Cookie</h3><p class="kv"><code>ds_auth_basic_login_session</code> (own, not <code>ds_actor</code>) · httponly · SameSite=Lax · Secure on HTTPS.</p></div>
+</div>
+<p><code>actor_from_request</code> re-checks the session + account on <strong>every request</strong> — so disabling an account or deleting a session logs the user out on the next request, and renames / admin-flag changes take effect live.</p>
+<pre>cookie → unsign → sha256 → sessions lookup → not expired?
+      → users lookup → not disabled? → {id, username, is_admin}</pre>
+<ul>
+  <li><strong>Login</strong>: Svelte <code>/-/login</code> → JSON POST → verify → mint session → set cookie → redirect.</li>
+  <li><strong>Logout</strong>: own <code>POST /-/logout</code> → DELETE the session row + clear cookie (core's <code>/-/logout</code> only clears <code>ds_actor</code>).</li>
+</ul>
+
+<h2>Admin &amp; permissions</h2>
+<ul>
+  <li>Register action <code>datasette-auth-basic-login-admin</code>, <strong>self-answered</strong> as <code>root OR users.is_admin=1</code> (via <code>permission_resources_sql</code>) — composable with acl/config, visible to introspection.</li>
+  <li><strong>Bootstrap</strong> via <code>datasette --root</code>: root is always admin, creates the first real admin, then steps back. No secrets in config.</li>
+  <li><strong>Admin UI</strong> (Svelte, <code>/-/admin/users</code>): create · reset-password · toggle-admin · disable (reversible, kills sessions) · hard-delete · unlock · list/revoke sessions · log-out-everywhere.</li>
+  <li><strong>Last-admin guard</strong>: refuses to disable/delete/demote the final admin (synchronous count-then-write, HTTP 409), like acl's last-manager guard.</li>
+</ul>
+
+<h2>Self-service &amp; brute force</h2>
+<div class="grid">
+  <div class="card"><h3>Self-service</h3><p class="kv">Users change their own password at <code>/-/account</code>. Admin-created accounts &amp; resets set <code>must_change_password</code>, forced at next login (enforced server-side too). Changing password revokes <em>other</em> sessions.</p></div>
+  <div class="card"><h3>Brute force — hard lockout</h3><p class="kv">5 failures → lock 15 min (both configurable). Auto-unlock on timeout; admin manual unlock. All attempts audited.</p></div>
+</div>
+<div class="warn"><strong>Accepted tradeoff (D15):</strong> account-keyed lockout enables a login-DoS — an attacker who knows a username can lock that real user out. Mitigations (IP-keying, soft throttle) are future and schema-compatible.</div>
+
+<h2>Compatibility with datasette-user-profiles</h2>
+<ul>
+  <li>Emit a stable string <code>id</code> = profiles' <code>actor_id</code> join key.</li>
+  <li>Seed the directory via the <code>datasette_user_profile_seeds</code> hook (fill-missing, idempotent); <strong>never write profiles' tables directly</strong>.</li>
+  <li>profiles owns display_name/email/bio/avatar as the editable directory copy.</li>
+  <li class="rej">Accepted consequence: runtime-created accounts appear in the directory only after a restart or the user's first self-edit (D13, Option 2).</li>
+  <li>Plugin works with or without user-profiles installed (guarded import).</li>
+</ul>
+
+<h2>Decisions log</h2>
+<div class="tablewrap">
+<table>
+  <tr><th>#</th><th>Decision</th><th>Chosen over</th></tr>
+  <tr><td class="d">D1</td><td>Accounts + admin flag only (delegate ACL)</td><td class="rej">group membership · full ACL</td></tr>
+  <tr><td class="d">D2</td><td>Server-side sessions</td><td class="rej">account-id cookie · stateless</td></tr>
+  <tr><td class="d">D3</td><td>Immutable ULID id + mutable username</td><td class="rej">username-as-id · email login</td></tr>
+  <tr><td class="d">D4</td><td>Bootstrap via <code>--root</code></td><td class="rej">create-admin CLI · config seed</td></tr>
+  <tr><td class="d">D5</td><td>Real action, self-answered</td><td class="rej">internal-only helper</td></tr>
+  <tr><td class="d">D6</td><td>Svelte everything (login incl.)</td><td class="rej">plain-form login</td></tr>
+  <tr><td class="d">D7</td><td>Reuse PBKDF2</td><td class="rej">argon2id</td></tr>
+  <tr><td class="d">D8</td><td>Internal DB + loud warning</td><td class="rej">named-DB escape hatch · hard-refuse</td></tr>
+  <tr><td class="d">D9</td><td>Hashed-at-rest + absolute expiry</td><td class="rej">plaintext · sliding idle</td></tr>
+  <tr><td class="d">D10</td><td>Own cookie + own logout</td><td class="rej">reuse ds_actor + core logout</td></tr>
+  <tr><td class="d">D11</td><td>Disable + delete, guarded</td><td class="rej">disable-only · no guard</td></tr>
+  <tr><td class="d">D12</td><td>Change-pw + forced first change</td><td class="rej">no forced flow · admin-only pw</td></tr>
+  <tr><td class="d">D13</td><td>Auth-only table, defer to profiles</td><td class="rej">store+feed · username-only</td></tr>
+  <tr><td class="d">D14</td><td>Name: datasette-auth-basic-login</td><td class="rej">-auth-accounts · -login</td></tr>
+  <tr><td class="d">D15</td><td>Hard lockout</td><td class="rej">nothing · soft throttle</td></tr>
+</table>
+</div>
+
+<h2>Open items to resolve during build</h2>
+<ul>
+  <li><strong>CSRF / cross-origin:</strong> JSON mutations rely on Datasette 1.0's header-based cross-origin middleware — confirm it's active in the pinned version; else add an explicit <code>Origin</code>/<code>Sec-Fetch-Site</code> check in the router decorator.</li>
+  <li>Confirm exact available <code>datasette-vite</code> / <code>datasette-plugin-router</code> alpha versions.</li>
+  <li><code>?next=</code> return-URL validation (same-origin path only).</li>
+</ul>
+
+<h2>Build order</h2>
+<p>
+  <span class="chip">M0 scaffold</span>
+  <span class="chip">M1 migrations + startup warning</span>
+  <span class="chip">M2 passwords + sessions</span>
+  <span class="chip">M3 auth (actor/login/logout)</span>
+  <span class="chip">M4 admin action + management API + last-admin guard</span>
+  <span class="chip">M5 self-service + forced change</span>
+  <span class="chip">M6 profiles seeding</span>
+  <span class="chip">M7 Svelte frontend</span>
+  <span class="chip">M8 docs + polish</span>
+</p>
+<p class="rej">Backend-first; each milestone independently testable via in-process <code>Datasette</code> + <code>ds.client</code>. Full detail in <code>plans/start/10-implementation-plan.md</code>.</p>
+
+<footer>
+  Design spec for review. Source of truth: <code>plans/start/*.md</code>. Reviewer: point Fable 5 at this file and the <code>plans/start/</code> directory.
+</footer>
+</div>
+</body>
+</html>
