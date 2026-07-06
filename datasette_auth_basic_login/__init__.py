@@ -17,6 +17,9 @@ from .sessions import token_sha256
 # Import route modules to register their handlers on the shared router.
 from .routes import api, pages  # noqa: E402
 
+# Re-exported so pluggy discovers the hookimpl on this plugin module (M6).
+from .seeds import datasette_user_profile_seeds  # noqa: E402,F401
+
 _ = (api, pages)
 
 

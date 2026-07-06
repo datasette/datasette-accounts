@@ -449,3 +449,23 @@ async def test_audit_retention_purges_old_rows():
         await internal.execute(f"SELECT COUNT(*) FROM {db.LOGIN_AUDIT}")
     ).single_value()
     assert count == 0
+
+
+# --------------------------------------------------------------------------
+# M6 — user-profiles seeding (skips if user-profiles is not installed)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_user_profiles_seeding():
+    pytest.importorskip("datasette_user_profiles")
+    from datasette_user_profiles.seed import apply_seeds
+
+    ds = await make_ds()
+    uid = await insert_user(ds, "alice")
+    await apply_seeds(ds)
+    internal = ds.get_internal_database()
+    rows = (
+        await internal.execute("SELECT actor_id FROM datasette_user_profiles")
+    ).rows
+    assert uid in [r[0] for r in rows]
