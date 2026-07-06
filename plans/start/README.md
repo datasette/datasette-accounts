@@ -9,9 +9,11 @@ The design was produced through a decision-by-decision grilling session. Every
 choice below is deliberate; rejected alternatives and rationale are recorded in
 [`09-decisions-log.md`](09-decisions-log.md).
 
-**Status:** the Fable 5 security review (2026-07-06) has been folded into the spec —
-all 11 findings in [`../../todos/security-review/`](../../todos/security-review/README.md)
-are applied. Ready for implementation.
+**Status:** ✅ **implemented.** All milestones M0–M8 are built and tested (see
+[`10-implementation-plan.md`](10-implementation-plan.md)); the Fable 5 security
+review (2026-07-06) was folded in and all 11 findings in
+[`../../todos/security-review/`](../../todos/security-review/README.md) are shipped
+with test coverage.
 
 ## Read in this order
 

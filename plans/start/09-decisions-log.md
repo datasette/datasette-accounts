@@ -172,10 +172,12 @@ via `@router.POST` still runs for a `GET`. Consequences, both handled:
   Origin/`Sec-Fetch-Site` unconditionally (D-security above / 03). Remaining
   action is defense-in-depth only: confirm core's cross-origin middleware is also
   active in the pinned version (we do not depend on it).
-- Confirm exact `datasette-vite` / `datasette-plugin-router` alpha versions available
-  in the target environment.
+- **Alpha versions:** ✅ *resolved* — built against `datasette==1.0a35`,
+  `datasette-plugin-router` (Router/Body/PermissionSQL), `datasette-vite`
+  (`vite_entry(datasette, plugin_package, manifest_dir=None)`).
 - **`?next=` validation:** ✅ *resolved* — concrete accept/reject rules specified
-  in [`03-authentication.md`](03-authentication.md).
-- ← *verify-during-build* flags remain for: forwarded-header normalization in the
-  pinned Datasette (`secure_cookie: auto`), `sign`/`unsign` signature, `base_url`
-  exposure for `?next=`, and whether `asgi_wrapper` can see the resolved actor (D16).
+  in [`03-authentication.md`](03-authentication.md) and implemented in
+  `security.validate_next` (uses `datasette.setting("base_url")`).
+- ← *verify-during-build* flags all resolved (see the resolution list above),
+  except the frontend Vite dev/HMR wiring, which is exercised via
+  `just dev-with-hmr` / `DATASETTE_AUTH_BASIC_LOGIN_VITE_PATH` but not automated.

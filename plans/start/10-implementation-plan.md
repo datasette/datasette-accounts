@@ -15,7 +15,9 @@ Build order is chosen so each milestone is independently testable, backend-first
 | M5 Self-service + forced change | ✅ built + tested (change-pw lockout, asgi_wrapper gate) |
 | M6 user-profiles seeding | ✅ built + tested (guarded seed hook, actor_id only) |
 | M7 Frontend (Svelte/Vite) | ✅ built (login/admin/account Svelte 5 pages, Vite build ships assets + manifest; base template mounts `#app-root`) |
-| M8 Docs + polish | ⬜ pending (README/deploy docs) |
+| M8 Docs + polish | ✅ README (install, `--root` bootstrap, `--internal`, config table, reverse-proxy guidance, security model, dev loop) |
+
+**All milestones M0–M8 complete.**
 
 **22 tests green** (`uv run pytest`), ruff clean, `npm run check` (svelte-check +
 tsc) clean. Full bootstrap→admin→forced-change→disable flow verified end-to-end
