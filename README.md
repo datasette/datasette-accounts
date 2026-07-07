@@ -82,9 +82,10 @@ datasette hash-password
 
 ## Screenshots
 
-Users log in at `/-/login`:
+Users log in at `/-/login`. Admins can add an optional help/contact note shown
+below the form (see [Messages](#messages) below):
 
-![The login page: a Log in heading with username and password fields.](docs/screenshots/login.png)
+![The login page: a Log in heading with username and password fields, and a help note reading "Trouble signing in? Email data-help@example.com."](docs/screenshots/login.png)
 
 Admins manage accounts at `/-/admin/users` — create accounts and disable, lock,
 reset, promote, or delete existing ones:
@@ -109,6 +110,19 @@ Adding a grant picks a principal — a specific account, a group, or an audience
 Users change their own password at `/-/account`:
 
 ![The account page: signed in as alice, with current-password and new-password fields.](docs/screenshots/account.png)
+
+### Messages
+
+Admins write optional help text at **`/-/admin/messages`** — a sign-in prompt
+for the homepage and a help/contact note for the login page. Blank hides a
+message. Bodies are admin-authored HTML rendered verbatim, so you can include
+links and `mailto:` contacts (only admins can edit them):
+
+![The Messages admin page with two cards, "Homepage sign-in prompt" and "Login help / contact", each holding a textarea of demo copy and a Save button.](docs/screenshots/messages.png)
+
+The homepage prompt then greets signed-out visitors:
+
+![The Datasette homepage showing a banner reading "Sign in to browse the internal datasets. Need access? Contact the data team." above the database list.](docs/screenshots/homepage-message.png)
 
 These are regenerated with `just shots` (a self-contained Playwright pipeline —
 see [Development](#development)).

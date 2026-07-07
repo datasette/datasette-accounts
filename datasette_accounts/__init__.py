@@ -2,12 +2,13 @@ import json
 import os
 
 import click
+import markupsafe
 from datasette import hookimpl
 from datasette.permissions import Action, PermissionSQL
 from datasette_vite import vite_entry
 from sqlite_utils import Database as SqliteUtilsDatabase
 
-from . import db, security
+from . import db, messages, security
 from .internal_migrations import internal_migrations
 from .passwords import hash_password
 from .router import ADMIN_ACTION, router
@@ -237,6 +238,66 @@ def datasette_acl_valid_actors(datasette):
     return inner
 
 
+def _banner(body, *, tone="info"):
+    """A self-contained notice for the homepage slot (no external CSS needed).
+
+    ``body`` must already be safe markup (escaped). ``tone`` picks the accent.
+    """
+    accent = "#b45309" if tone == "warn" else "#1d4ed8"
+    bg = "#fffbeb" if tone == "warn" else "#eff6ff"
+    return markupsafe.Markup(
+        '<div style="margin:0 0 1rem;padding:0.75rem 1rem;border:1px solid '
+        f"{accent}33;border-left:4px solid {accent};border-radius:6px;"
+        f'background:{bg};color:#1f2937;font-size:0.95rem;line-height:1.5">'
+        f"{body}</div>"
+    )
+
+
+@hookimpl
+def top_homepage(datasette, request):
+    """Homepage notices:
+
+    1. Bootstrap prompt — while signed in as ``root`` and no enabled admin
+       account exists yet, prompt root to create the first admin (after which
+       root is no longer needed). See plans/site-messages.
+    2. The admin-authored ``homepage_signed_out`` message, shown only to
+       visitors who are not signed in.
+    """
+
+    async def inner():
+        actor = getattr(request, "actor", None)
+        internal = datasette.get_internal_database()
+        bits = []
+
+        if actor and actor.get("id") == "root":
+            if await db.count_enabled_admins(internal) == 0:
+                users_url = datasette.urls.path("/-/admin/users")
+                bits.append(
+                    _banner(
+                        markupsafe.Markup(
+                            "You're signed in as <strong>root</strong>. "
+                            "Create the first admin account to finish setup — "
+                            "after that, root is no longer required. "
+                            f'<a href="{markupsafe.escape(users_url)}">'
+                            "Create an admin account →</a>"
+                        ),
+                        tone="warn",
+                    )
+                )
+
+        if not actor:
+            body = await db.get_site_message(internal, "homepage_signed_out")
+            rendered = messages.render_message(body)
+            if rendered:
+                bits.append(_banner(rendered))
+
+        if not bits:
+            return None
+        return markupsafe.Markup("".join(bits))
+
+    return inner
+
+
 @hookimpl
 def menu_links(datasette, actor):
     async def inner():
@@ -254,6 +315,12 @@ def menu_links(datasette, actor):
                 {
                     "href": datasette.urls.path("/-/admin/capabilities"),
                     "label": "Capabilities",
+                }
+            )
+            links.append(
+                {
+                    "href": datasette.urls.path("/-/admin/messages"),
+                    "label": "Messages",
                 }
             )
             # F2 — admins are acl admins, so link to acl's group + sharing UI

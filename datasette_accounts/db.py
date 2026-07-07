@@ -17,6 +17,7 @@ SESSIONS = "datasette_accounts_sessions"
 LOGIN_AUDIT = "datasette_accounts_login_audit"
 ADMIN_AUDIT = "datasette_accounts_admin_audit"
 CAPABILITY_GRANTS = "datasette_accounts_capability_grants"
+SITE_MESSAGES = "datasette_accounts_site_messages"
 
 # datasette-acl tables we reference (softly) for the "group" principal. We never
 # write them — acl owns them — but we join them to resolve group membership +
@@ -543,6 +544,52 @@ async def grant_capability(
             },
         )
         return True
+
+    return await db.execute_write_fn(write)
+
+
+async def get_site_messages(db):
+    """All stored site messages as ``{key: body}`` (only non-empty rows exist)."""
+    result = await db.execute(f"SELECT key, body FROM {SITE_MESSAGES}")
+    return {r["key"]: r["body"] for r in result.rows}
+
+
+async def get_site_message(db, key):
+    """The stored body for one slot, or ``None`` when it has never been set."""
+    result = await db.execute(f"SELECT body FROM {SITE_MESSAGES} WHERE key = ?", [key])
+    row = result.first()
+    return row["body"] if row else None
+
+
+async def set_site_message(db, actor_id, key, body):
+    """Upsert (or, for a blank body, clear) one site-message slot.
+
+    A blank body deletes the row so "unset" is always the absence of a row.
+    Records an admin-audit entry in the same transaction. Returns the stored
+    body (``""`` when cleared). Raises ``ValueError`` for an unknown slot key.
+    """
+    from . import messages
+
+    if not messages.is_slot(key):
+        raise ValueError(f"unknown message slot: {key}")
+    body = (body or "").strip()
+    ts = now_iso()
+
+    def write(conn):
+        if body:
+            conn.execute(
+                f"INSERT INTO {SITE_MESSAGES} (key, body, updated_at, updated_by) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                "body = excluded.body, updated_at = excluded.updated_at, "
+                "updated_by = excluded.updated_by",
+                [key, body, ts, actor_id],
+            )
+            _audit(conn, "set-message", actor_id, None, {"key": key})
+        else:
+            cur = conn.execute(f"DELETE FROM {SITE_MESSAGES} WHERE key = ?", [key])
+            if cur.rowcount:
+                _audit(conn, "clear-message", actor_id, None, {"key": key})
+        return body
 
     return await db.execute_write_fn(write)
 

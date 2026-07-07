@@ -8,6 +8,9 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
 Security review findings are in `todos/security-review/` (all applied + built).
 `plans/permissions/` is the design for admin-controlled permissions (capability
 grants + datasette-acl bridge), all built on the `permissions-admin` branch.
+`plans/site-messages/` is the design for the root bootstrap prompt + admin-
+editable site messages (homepage sign-in prompt, login help), built on the
+`site-messages` branch.
 
 ## Build status
 - M0–M8 built and tested (`uv run pytest`, 22 tests green; `npm run check` clean).
@@ -22,7 +25,11 @@ grants + datasette-acl bridge), all built on the `permissions-admin` branch.
 
 ## Layout
 - `__init__.py` — hooks (routes, actions, permission SQL, startup, actor,
-  menu, asgi_wrapper for forced password change, hash-password CLI).
+  menu, top_homepage for the bootstrap prompt + signed-out message,
+  asgi_wrapper for forced password change, hash-password CLI).
+- `messages.py` — admin-editable site-message slot registry + rendering
+  (bodies are admin-authored **raw HTML**, rendered verbatim — admin-only
+  editor); `db.py` `site_messages` table + get/set (blank clears).
 - `db.py` — internal-DB access; namespaced tables; shared admin predicate;
   transactional mutations (audit-in-same-tx, last-admin guard).
 - `passwords.py` — PBKDF2 (copied from datasette-auth-passwords) + async

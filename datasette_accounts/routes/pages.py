@@ -7,12 +7,13 @@ logout page is a tiny dependency-free redirect (no Svelte needed).
 
 from datasette import Response
 
-from .. import db, grantable, security
+from .. import db, grantable, messages, security
 from ..page_data import (
     AccountPageData,
     AdminPageData,
     CapabilitiesPageData,
     LoginPageData,
+    MessagesPageData,
     UserRow,
 )
 from ..router import require_admin_page, router
@@ -36,7 +37,9 @@ async def login_page(datasette, request):
     next_value = security.validate_next(
         request.args.get("next"), datasette.setting("base_url") or "/"
     )
-    page_data = LoginPageData(next=next_value).model_dump()
+    internal = datasette.get_internal_database()
+    help_text = await db.get_site_message(internal, "login_help") or ""
+    page_data = LoginPageData(next=next_value, help=help_text).model_dump()
     return await _render(datasette, "src/pages/login/index.ts", "Log in", page_data)
 
 
@@ -89,4 +92,15 @@ async def capabilities_page(datasette, request):
     page_data = CapabilitiesPageData(**view).model_dump()
     return await _render(
         datasette, "src/pages/capabilities/index.ts", "Capabilities", page_data
+    )
+
+
+@router.GET("/-/admin/messages$")
+@require_admin_page
+async def messages_page(datasette, request):
+    internal = datasette.get_internal_database()
+    view = await messages.slots_view(internal)
+    page_data = MessagesPageData(**view).model_dump()
+    return await _render(
+        datasette, "src/pages/messages/index.ts", "Messages", page_data
     )

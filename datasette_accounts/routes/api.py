@@ -5,7 +5,7 @@ from typing import Annotated
 from datasette import Response
 from datasette_plugin_router import Body
 
-from .. import db, grantable, security
+from .. import db, grantable, messages, security
 from ..page_data import (
     AuthenticateRequest,
     ChangePasswordRequest,
@@ -15,6 +15,7 @@ from ..page_data import (
     RevokeCapabilityRequest,
     RevokeSessionRequest,
     SessionRow,
+    SetSiteMessageRequest,
     TargetRequest,
     UserRow,
 )
@@ -430,3 +431,32 @@ async def admin_capabilities_revoke(
     internal = datasette.get_internal_database()
     await db.revoke_capability(internal, request.actor["id"], body.id)
     return Response.json({"ok": True})
+
+
+# --------------------------------------------------------------------------
+# Site messages (admin-editable help text surfaced in the app)
+# --------------------------------------------------------------------------
+
+
+@router.POST("/-/admin/api/messages/list$")
+@require_admin
+async def admin_messages_list(datasette, request):
+    internal = datasette.get_internal_database()
+    view = await messages.slots_view(internal)
+    return Response.json({"ok": True, **view})
+
+
+@router.POST("/-/admin/api/messages/set$")
+@require_admin
+async def admin_messages_set(
+    datasette, request, body: Annotated[SetSiteMessageRequest, Body()]
+):
+    if not messages.is_slot(body.key):
+        return Response.json({"ok": False, "error": "Unknown message"}, status=400)
+    if len(body.body) > messages.MAX_BODY_LENGTH:
+        return Response.json({"ok": False, "error": "Message is too long"}, status=400)
+    internal = datasette.get_internal_database()
+    stored = await db.set_site_message(
+        internal, request.actor["id"], body.key, body.body
+    )
+    return Response.json({"ok": True, "body": stored})
