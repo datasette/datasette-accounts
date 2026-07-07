@@ -26,6 +26,12 @@ dev-with-hmr *flags:
     watchexec --stop-signal SIGKILL -e py,html --ignore '*.db' --restart --clear -- \
       just dev {{flags}}
 
+# Regenerate committed doc screenshots → docs/screenshots/*.png.
+# Run all, or a subset by name: `just shots` / `just shots login admin`.
+shots *names:
+    npm --prefix frontend exec -- playwright install chromium
+    node frontend/scripts/screenshots.mjs {{names}}
+
 # Tests
 test:
     uv run pytest -q

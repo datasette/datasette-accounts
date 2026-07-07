@@ -71,6 +71,28 @@ datasette hash-password
 - The Datasette menu gains **Log in** / **Log out** / **Your account** entries,
   and **Accounts** for admins.
 
+## Screenshots
+
+Users log in at `/-/login`:
+
+![The login page: a Log in heading with username and password fields.](docs/screenshots/login.png)
+
+Admins manage accounts at `/-/admin/users` — create accounts and disable, lock,
+reset, promote, or delete existing ones:
+
+![The admin accounts table listing users with admin, status, and lock columns and per-user action buttons.](docs/screenshots/admin.png)
+
+Each account's active sessions can be listed and revoked individually:
+
+![The accounts table with a user's session drawer expanded, showing an active session with a Revoke button.](docs/screenshots/admin-sessions.png)
+
+Users change their own password at `/-/account`:
+
+![The account page: signed in as alice, with current-password and new-password fields.](docs/screenshots/account.png)
+
+These are regenerated with `just shots` (a self-contained Playwright pipeline —
+see [Development](#development)).
+
 ## Configuration
 
 All options live under the `datasette-accounts` plugin block and have safe
@@ -134,7 +156,14 @@ just types                    # regenerate page-data types
 just frontend                 # build the Svelte frontend
 just test                     # pytest
 just check                    # ruff + svelte-check
+just shots                    # regenerate docs/screenshots/*.png (Playwright)
 ```
+
+`just shots` boots a throwaway Datasette with seeded demo accounts
+(`frontend/scripts/shot-plugins/seed.py`), drives Playwright through the pages
+(`frontend/scripts/screenshots.mjs`), and writes the committed PNGs. It is
+deterministic — a re-run with no UI change produces no git diff — and is a
+manual local task, never run in CI.
 
 Three-terminal dev loop (Datasette 8006 / Vite 5180):
 
