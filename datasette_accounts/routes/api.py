@@ -11,6 +11,8 @@ from ..page_data import (
     ChangePasswordRequest,
     CreateUserRequest,
     GrantCapabilityRequest,
+    LoginAttemptRow,
+    LoginAttemptsRequest,
     ResetPasswordRequest,
     RevokeCapabilityRequest,
     RevokeSessionRequest,
@@ -76,17 +78,21 @@ async def authenticate(
 
     # 1. Locked account: refuse before hashing (the only hash-skipping path).
     if user and user["locked_until"] and user["locked_until"] > db.now_iso():
-        await db.record_login_attempt(internal, body.username, ip, False)
+        await db.record_login_attempt(internal, body.username, ip, False, "locked")
         return Response.json({"ok": False, "error": GENERIC_LOGIN_ERROR}, status=429)
 
     # 2/3. Exactly one PBKDF2 verify on every remaining path (dummy on miss).
+    # The user-facing error stays generic; the specific reason lives only in the
+    # admin-only audit log.
     if user and not user["disabled"]:
         ok = await averify_password(body.password, user["password_hash"])
+        reason = "success" if ok else "bad_password"
     else:
         await averify_dummy(body.password)
         ok = False
+        reason = "disabled" if user else "no_such_user"
 
-    await db.record_login_attempt(internal, body.username, ip, ok)
+    await db.record_login_attempt(internal, body.username, ip, ok, reason)
 
     if not ok:
         if user:
@@ -162,7 +168,9 @@ async def change_password(
             return Response.json({"ok": False, "error": "Account locked"}, status=429)
 
         ok = await averify_password(body.current_password or "", user["password_hash"])
-        await db.record_login_attempt(internal, user["username"], ip, ok)
+        await db.record_login_attempt(
+            internal, user["username"], ip, ok, "reauth" if ok else "bad_password"
+        )
         if not ok:
             await db.register_failed_attempt(internal, user["id"], threshold, minutes)
             return Response.json(
@@ -374,6 +382,22 @@ async def admin_logout_everywhere(
     internal = datasette.get_internal_database()
     await db.logout_everywhere(internal, request.actor["id"], body.id)
     return Response.json({"ok": True})
+
+
+@router.POST("/-/admin/api/login-attempts$")
+@require_admin
+async def admin_login_attempts(
+    datasette, request, body: Annotated[LoginAttemptsRequest, Body()]
+):
+    internal = datasette.get_internal_database()
+    rows = await db.list_login_attempts(
+        internal, body.username or None, body.ip or None
+    )
+    attempts = [
+        LoginAttemptRow(**{k: r.get(k) for k in LoginAttemptRow.model_fields})
+        for r in rows
+    ]
+    return Response.json({"ok": True, "attempts": [a.model_dump() for a in attempts]})
 
 
 # --------------------------------------------------------------------------

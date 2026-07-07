@@ -226,7 +226,8 @@
   flex-direction: column;
   gap: 1px;
 }
-#app-root .menu button {
+#app-root .menu button,
+#app-root .menu a {
   justify-content: flex-start;
   width: 100%;
   border: none;
@@ -236,8 +237,13 @@
   padding: 0.45rem 0.6rem;
   border-radius: 5px;
   text-align: left;
+  /* the anchor menu item (Login attempts…) should read like the buttons */
+  color: inherit;
+  text-decoration: none;
+  box-sizing: border-box;
 }
-#app-root .menu button:hover {
+#app-root .menu button:hover,
+#app-root .menu a:hover {
   background: var(--acc-l);
   border: none;
 }

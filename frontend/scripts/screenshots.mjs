@@ -298,7 +298,9 @@ function buildShots(browser) {
         .getByRole("heading", { name: "Capabilities" })
         .waitFor({ timeout: 15_000 });
       // Wait for the seeded grants to render (the paper-create card).
-      await page.getByText("Can create new papers").waitFor({ timeout: 15_000 });
+      await page
+        .getByText("Can create new papers")
+        .waitFor({ timeout: 15_000 });
       await page.getByText("@alice").waitFor();
       await freezeVolatile(page);
       await shotClipped(page, out("capabilities"));
@@ -316,10 +318,7 @@ function buildShots(browser) {
         .getByText("Can create new papers")
         .waitFor({ timeout: 15_000 });
       // Open the add-grant row on the first action card.
-      await page
-        .getByRole("button", { name: "+ Grant" })
-        .first()
-        .click();
+      await page.getByRole("button", { name: "+ Grant" }).first().click();
       await page.getByLabel("Principal type").waitFor({ timeout: 15_000 });
       await freezeVolatile(page);
       await shotClipped(page, out("capabilities-add"));
@@ -337,10 +336,32 @@ function buildShots(browser) {
       await page
         .getByRole("heading", { name: "Messages" })
         .waitFor({ timeout: 15_000 });
-      await page.getByRole("heading", { name: "Homepage sign-in prompt" }).waitFor();
-      await page.getByRole("heading", { name: "Login help / contact" }).waitFor();
+      await page
+        .getByRole("heading", { name: "Homepage sign-in prompt" })
+        .waitFor();
+      await page
+        .getByRole("heading", { name: "Login help / contact" })
+        .waitFor();
       await freezeVolatile(page);
       await shotClipped(page, out("messages"));
+      await ctx.close();
+    },
+
+    // The Login attempts admin audit page: every sign-in attempt with its
+    // result + reason, filterable by username/IP (seeded demo rows).
+    "login-attempts": async () => {
+      const { ctx, page } = await loginContext(
+        browser,
+        "admin",
+        "/-/admin/login-attempts",
+      );
+      await page
+        .getByRole("heading", { name: "Login attempts" })
+        .waitFor({ timeout: 15_000 });
+      // Wait for the seeded rows (the attacker IP) to render.
+      await page.getByText("45.148.10.62").first().waitFor();
+      await freezeVolatile(page);
+      await shotClipped(page, out("login-attempts"));
       await ctx.close();
     },
 

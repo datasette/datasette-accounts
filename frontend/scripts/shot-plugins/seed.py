@@ -85,8 +85,45 @@ def startup(datasette):
         await internal.execute_write_fn(seed)
         await internal.execute_write_fn(seed_capabilities)
         await internal.execute_write_fn(seed_messages)
+        await internal.execute_write_fn(seed_login_attempts)
 
     return inner
+
+
+# Demo login-audit rows for the Login attempts admin page. A spread of outcomes
+# and reasons (success / bad_password / no_such_user / locked), including a
+# repeated attacker IP hitting several usernames, so the page shows a realistic
+# mix. Timestamps ascend with insert order so the newest sits at the top
+# (the page orders by id DESC).
+# username, ip, timestamp, success, reason
+_LOGIN_ATTEMPTS = [
+    ("alice", "203.0.113.24", "2026-07-07T08:55:00+00:00", 1, "success"),
+    ("bob", "198.51.100.7", "2026-07-07T09:02:00+00:00", 0, "disabled"),
+    ("admin", "203.0.113.24", "2026-07-07T09:14:00+00:00", 1, "success"),
+    ("carol", "198.51.100.7", "2026-07-07T09:20:00+00:00", 0, "locked"),
+    ("root", "45.148.10.62", "2026-07-07T09:26:00+00:00", 0, "no_such_user"),
+    ("admin", "45.148.10.62", "2026-07-07T09:27:00+00:00", 0, "bad_password"),
+    ("administrator", "45.148.10.62", "2026-07-07T09:28:00+00:00", 0, "no_such_user"),
+    ("alice", "45.148.10.62", "2026-07-07T09:29:00+00:00", 0, "bad_password"),
+]
+
+
+def seed_login_attempts(conn):
+    """Seed demo login-audit rows (idempotent)."""
+    db = Database(conn)
+    audit = db[accounts_db.LOGIN_AUDIT]
+    if audit.exists() and audit.count > 0:
+        return  # already seeded
+    for username, ip, ts, success, reason in _LOGIN_ATTEMPTS:
+        db[accounts_db.LOGIN_AUDIT].insert(
+            {
+                "username": username,
+                "ip": ip,
+                "timestamp": ts,
+                "success": success,
+                "reason": reason,
+            }
+        )
 
 
 # Demo site messages (feature: admin-editable help text). Seeded so the
