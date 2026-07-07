@@ -99,12 +99,36 @@ class MessagesPageData(BaseModel):
     slots: List[SiteMessageSlot]
 
 
+# --- Login attempts (admin audit view) ---
+
+
+class LoginAttemptRow(BaseModel):
+    id: int
+    username: Optional[str] = None
+    ip: Optional[str] = None
+    timestamp: str
+    # 1 on a successful sign-in, 0 otherwise.
+    success: int
+    # Why the attempt landed where it did: success / bad_password / no_such_user
+    # / disabled / locked / reauth. NULL on rows written before this was tracked.
+    reason: Optional[str] = None
+
+
+class LoginAttemptsPageData(BaseModel):
+    attempts: List[LoginAttemptRow]
+    # Initial filters (from the ?username=/?ip= query string), echoed so the page
+    # shows them pre-populated; "" means no filter.
+    filter_username: str = ""
+    filter_ip: str = ""
+
+
 __exports__ = [
     LoginPageData,
     AdminPageData,
     AccountPageData,
     CapabilitiesPageData,
     MessagesPageData,
+    LoginAttemptsPageData,
 ]
 
 
@@ -211,3 +235,9 @@ class SetSiteMessageRequest(BaseModel):
     key: str
     # Blank clears the slot.
     body: str = ""
+
+
+class LoginAttemptsRequest(BaseModel):
+    # Exact-match filters; "" / omitted means unfiltered.
+    username: str = ""
+    ip: str = ""

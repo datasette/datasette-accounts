@@ -12,6 +12,8 @@ from ..page_data import (
     AccountPageData,
     AdminPageData,
     CapabilitiesPageData,
+    LoginAttemptRow,
+    LoginAttemptsPageData,
     LoginPageData,
     MessagesPageData,
     UserRow,
@@ -103,4 +105,27 @@ async def messages_page(datasette, request):
     page_data = MessagesPageData(**view).model_dump()
     return await _render(
         datasette, "src/pages/messages/index.ts", "Messages", page_data
+    )
+
+
+@router.GET("/-/admin/login-attempts$")
+@require_admin_page
+async def login_attempts_page(datasette, request):
+    internal = datasette.get_internal_database()
+    # The Accounts row menu links here with ?username=…; ?ip=… is also honoured.
+    username = request.args.get("username") or ""
+    ip = request.args.get("ip") or ""
+    rows = await db.list_login_attempts(internal, username or None, ip or None)
+    attempts = [
+        LoginAttemptRow(**{k: r.get(k) for k in LoginAttemptRow.model_fields})
+        for r in rows
+    ]
+    page_data = LoginAttemptsPageData(
+        attempts=attempts, filter_username=username, filter_ip=ip
+    ).model_dump()
+    return await _render(
+        datasette,
+        "src/pages/login-attempts/index.ts",
+        "Login attempts",
+        page_data,
     )

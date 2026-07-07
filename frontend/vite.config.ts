@@ -52,6 +52,7 @@ export default defineConfig({
         account: "src/pages/account/index.ts",
         capabilities: "src/pages/capabilities/index.ts",
         messages: "src/pages/messages/index.ts",
+        "login-attempts": "src/pages/login-attempts/index.ts",
       },
     },
   },

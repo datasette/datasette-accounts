@@ -129,3 +129,29 @@ def m004_site_messages(db: Database):
         );
         """
     )
+
+
+@internal_migrations()
+def m005_login_audit_reason(db: Database):
+    # Record *why* a login attempt landed where it did (the `success` flag is the
+    # what; `reason` is the why: bad_password / no_such_user / disabled / locked /
+    # reauth / success). Nullable so pre-existing rows stay valid. Indexes back
+    # the admin login-attempts view's username/ip filters and the retention purge
+    # (DELETE ... WHERE timestamp < ?); the id PK already covers ORDER BY id DESC.
+    # The admin_audit table was unindexed too — cover its per-user lookups and
+    # purge in the same migration.
+    db.execute("ALTER TABLE datasette_accounts_login_audit ADD COLUMN reason TEXT")
+    db.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_accounts_login_audit_username
+            ON datasette_accounts_login_audit (username);
+        CREATE INDEX IF NOT EXISTS idx_accounts_login_audit_ip
+            ON datasette_accounts_login_audit (ip);
+        CREATE INDEX IF NOT EXISTS idx_accounts_login_audit_timestamp
+            ON datasette_accounts_login_audit (timestamp);
+        CREATE INDEX IF NOT EXISTS idx_accounts_admin_audit_target
+            ON datasette_accounts_admin_audit (target_id);
+        CREATE INDEX IF NOT EXISTS idx_accounts_admin_audit_timestamp
+            ON datasette_accounts_admin_audit (timestamp);
+        """
+    )

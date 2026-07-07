@@ -589,6 +589,86 @@ async def test_audit_retention_purges_old_rows():
     assert count == 0
 
 
+@pytest.mark.asyncio
+async def test_login_attempts_record_reason():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    await insert_user(ds, "bob", disabled=True)
+
+    await login(ds, "alice", "password123")  # success
+    await login(ds, "alice", "wrongpass")  # bad_password
+    await login(ds, "ghost", "whatever")  # no_such_user
+    await login(ds, "bob", "password123")  # disabled
+
+    internal = ds.get_internal_database()
+    rows = await internal.execute(
+        f"SELECT username, success, reason FROM {db.LOGIN_AUDIT} ORDER BY id"
+    )
+    got = [(r["username"], r["success"], r["reason"]) for r in rows.rows]
+    assert got == [
+        ("alice", 1, "success"),
+        ("alice", 0, "bad_password"),
+        ("ghost", 0, "no_such_user"),
+        ("bob", 0, "disabled"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_locked_account_records_locked_reason():
+    ds = await make_ds(lockout_threshold=2, lockout_minutes=15)
+    await insert_user(ds, "alice")
+    # Two failures trip the lockout; the third attempt is refused pre-hash.
+    await login(ds, "alice", "wrong")
+    await login(ds, "alice", "wrong")
+    await login(ds, "alice", "wrong")
+    internal = ds.get_internal_database()
+    reason = (
+        await internal.execute(
+            f"SELECT reason FROM {db.LOGIN_AUDIT} ORDER BY id DESC LIMIT 1"
+        )
+    ).single_value()
+    assert reason == "locked"
+
+
+@pytest.mark.asyncio
+async def test_list_login_attempts_filters():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    await db.record_login_attempt(internal, "alice", "1.1.1.1", True, "success")
+    await db.record_login_attempt(internal, "alice", "2.2.2.2", False, "bad_password")
+    await db.record_login_attempt(internal, "bob", "1.1.1.1", False, "no_such_user")
+
+    by_user = await db.list_login_attempts(internal, username="alice")
+    assert [r["reason"] for r in by_user] == ["bad_password", "success"]  # id DESC
+
+    by_ip = await db.list_login_attempts(internal, ip="1.1.1.1")
+    assert {r["username"] for r in by_ip} == {"alice", "bob"}
+
+    by_both = await db.list_login_attempts(internal, username="alice", ip="1.1.1.1")
+    assert len(by_both) == 1 and by_both[0]["reason"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_admin_login_attempts_api():
+    ds = await make_ds()
+    await insert_user(ds, "admin", is_admin=True)
+    internal = ds.get_internal_database()
+    await db.record_login_attempt(internal, "victim", "9.9.9.9", False, "bad_password")
+
+    _, cookies = await login(ds, "admin", "password123")
+    r = await ds.client.post(
+        "/-/admin/api/login-attempts",
+        content=json.dumps({"username": "victim"}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"]
+    assert [a["reason"] for a in data["attempts"]] == ["bad_password"]
+    assert data["attempts"][0]["ip"] == "9.9.9.9"
+
+
 # --------------------------------------------------------------------------
 # M6 — user-profiles seeding (skips if user-profiles is not installed)
 # --------------------------------------------------------------------------

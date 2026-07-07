@@ -130,12 +130,39 @@ async def count_enabled_admins(db):
 # --------------------------------------------------------------------------
 
 
-async def record_login_attempt(db, username, ip, success):
+async def record_login_attempt(db, username, ip, success, reason=None):
     await db.execute_write(
-        f"INSERT INTO {LOGIN_AUDIT} (username, ip, timestamp, success) "
-        "VALUES (?, ?, ?, ?)",
-        [username, ip, now_iso(), 1 if success else 0],
+        f"INSERT INTO {LOGIN_AUDIT} (username, ip, timestamp, success, reason) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [username, ip, now_iso(), 1 if success else 0, reason],
     )
+
+
+# Cap the admin login-attempts view so a large audit table can't be dumped in one
+# query; the UI filters (username/ip) narrow further.
+LOGIN_ATTEMPTS_MAX = 500
+
+
+async def list_login_attempts(db, username=None, ip=None, limit=200):
+    """Most-recent-first login-audit rows, optionally filtered by exact
+    username and/or ip (AND-combined). `limit` is clamped to LOGIN_ATTEMPTS_MAX.
+    """
+    where = []
+    params = []
+    if username:
+        where.append("username = ?")
+        params.append(username)
+    if ip:
+        where.append("ip = ?")
+        params.append(ip)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    params.append(max(1, min(limit, LOGIN_ATTEMPTS_MAX)))
+    result = await db.execute(
+        f"SELECT id, username, ip, timestamp, success, reason FROM {LOGIN_AUDIT} "
+        f"{clause} ORDER BY id DESC LIMIT ?",
+        params,
+    )
+    return [dict(r) for r in result.rows]
 
 
 async def register_failed_attempt(db, user_id, lockout_threshold, lockout_minutes):

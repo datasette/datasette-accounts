@@ -96,6 +96,14 @@ Each account's active sessions can be listed and revoked individually:
 
 ![The accounts table with a user's session drawer expanded, showing an active session with a Revoke button.](docs/screenshots/admin-sessions.png)
 
+Every sign-in attempt is logged. Admins review them at
+**`/-/admin/login-attempts`** — each attempt's result and reason (wrong
+password, no such account, locked, disabled), filterable by the exact username
+entered or the client IP (the Accounts row menu links here pre-filtered for a
+user):
+
+![The Login attempts page: a table of sign-in attempts with Time, Username, IP, Result, and Reason columns, showing a mix of successes and failures including repeated failures from one IP.](docs/screenshots/login-attempts.png)
+
 Admins grant global capabilities at `/-/admin/capabilities` — here the
 `datasette-paper-create` action (registered by
 [`datasette-paper`](https://github.com/simonw/datasette-paper)) is granted to a
