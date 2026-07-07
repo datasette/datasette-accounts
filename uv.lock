@@ -154,6 +154,7 @@ source = { editable = "." }
 dependencies = [
     { name = "datasette" },
     { name = "datasette-plugin-router" },
+    { name = "datasette-user-profiles" },
     { name = "datasette-vite" },
     { name = "pydantic" },
     { name = "python-ulid" },
@@ -172,6 +173,7 @@ dev = [
 requires-dist = [
     { name = "datasette", specifier = ">=1.0a23" },
     { name = "datasette-plugin-router", specifier = ">=0.0.1a2" },
+    { name = "datasette-user-profiles", specifier = ">=0.1.0a9" },
     { name = "datasette-vite", specifier = ">=0.0.1a3" },
     { name = "pydantic", specifier = ">=2" },
     { name = "python-ulid", specifier = ">=3" },
@@ -201,6 +203,23 @@ wheels = [
 ]
 
 [[package]]
+name = "datasette-user-profiles"
+version = "0.1.0a9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "datasette" },
+    { name = "datasette-plugin-router" },
+    { name = "datasette-vite" },
+    { name = "pydantic" },
+    { name = "sqlite-migrate" },
+    { name = "sqlite-utils" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/36/b7/4405d0f08847cbf16eac1c99e152409ce5c0ab5571bd444af61f73fc8df6/datasette_user_profiles-0.1.0a9.tar.gz", hash = "sha256:003c2610023a4c704b2f852fdfe270170701b8a652eacfc44ae4898726d2c3fc", size = 64039, upload-time = "2026-06-22T20:16:23.035Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/a3/a765b6ab90f4dd264b4755f511de5fb98e1bf69ca1e303eb1da67a37ff6c/datasette_user_profiles-0.1.0a9-py3-none-any.whl", hash = "sha256:c8eac1514013d1ec7e716e3a52d4f01f3cfcf4e8b3406589d31c5dcf19487a9d", size = 73329, upload-time = "2026-06-22T20:16:21.748Z" },
+]
+
+[[package]]
 name = "datasette-vite"
 version = "0.0.1a4"
 source = { registry = "https://pypi.org/simple" }
@@ -218,7 +237,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [

@@ -22,8 +22,9 @@ admin UI and JSON API, guarded by a real Datasette 1.0 permission.
   validation, brute-force lockout (shared by login and change-password), forced
   first-password-change, audit logging, and retention/pruning.
 - **A Svelte/TS frontend** for the login, account, and admin pages.
-- **Integrates with `datasette-user-profiles`** — emits a stable actor `id` and
-  seeds the directory (optional; works with or without it installed).
+- **Integrates with `datasette-user-profiles`** (a required dependency) — emits a
+  stable actor `id` and seeds the profiles directory, so every account can view
+  and edit their profile once granted the `profile_access` permission.
 
 ## Installation
 
@@ -116,6 +117,25 @@ plugins:
     secure_cookie: true        # recommended behind a TLS-terminating proxy
     trust_proxy_headers: true  # only if a trusted proxy sets the forwarded headers
     audit_retention_days: 30
+```
+
+### User profiles
+
+Accounts are seeded into [`datasette-user-profiles`](https://github.com/simonw/datasette-user-profiles)
+automatically, but its profile pages are gated by the `profile_access`
+permission, which denies by default. Grant it to every signed-in account so they
+can view and edit their own profile:
+
+```yaml
+permissions:
+  profile_access:
+    id: "*"        # any actor with an id — i.e. any signed-in account
+```
+
+or on the command line:
+
+```bash
+datasette mydata.db --internal accounts.db -s permissions.profile_access.id '*'
 ```
 
 ### Deploying behind a reverse proxy (nginx / Caddy / Fly / Cloud Run)

@@ -16,9 +16,12 @@ frontend *flags:
 frontend-dev *flags:
     npm run dev --prefix frontend -- --port 5180 {{flags}}
 
-# Datasette dev server with a persistent internal DB
+# Datasette dev server with a persistent internal DB.
+# Grants datasette-user-profiles' `profile_access` to every signed-in account
+# ({"id": "*"} matches any actor with an id), so accounts can view/edit profiles.
 dev *flags:
-    DATASETTE_SECRET=abc123 uv run datasette --root -p 8006 --internal accounts.db {{flags}}
+    DATASETTE_SECRET=abc123 uv run datasette --root -p 8006 --internal accounts.db \
+      -s permissions.profile_access.id '*' {{flags}}
 
 # Datasette + Vite HMR (auto-restart on .py/.html changes)
 dev-with-hmr *flags:
