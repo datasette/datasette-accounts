@@ -21,7 +21,7 @@ from ..page_data import (
 from ..router import require_admin_page, router
 
 
-async def _render(datasette, entrypoint, page_title, page_data):
+async def _render(datasette, request, entrypoint, page_title, page_data):
     return Response.html(
         await datasette.render_template(
             "accounts_base.html",
@@ -30,6 +30,7 @@ async def _render(datasette, entrypoint, page_title, page_data):
                 "entrypoint": entrypoint,
                 "page_data": page_data,
             },
+            request=request,
         )
     )
 
@@ -42,7 +43,9 @@ async def login_page(datasette, request):
     internal = datasette.get_internal_database()
     help_text = await db.get_site_message(internal, "login_help") or ""
     page_data = LoginPageData(next=next_value, help=help_text).model_dump()
-    return await _render(datasette, "src/pages/login/index.ts", "Log in", page_data)
+    return await _render(
+        datasette, request, "src/pages/login/index.ts", "Log in", page_data
+    )
 
 
 @router.GET("/-/logout$")
@@ -72,7 +75,7 @@ async def account_page(datasette, request):
         must_change_password=bool(actor.get("must_change_password")),
     ).model_dump()
     return await _render(
-        datasette, "src/pages/account/index.ts", "Your account", page_data
+        datasette, request, "src/pages/account/index.ts", "Your account", page_data
     )
 
 
@@ -83,7 +86,9 @@ async def admin_page(datasette, request):
     rows = await db.list_users(internal)
     users = [UserRow(**db.to_user_row(r)) for r in rows]
     page_data = AdminPageData(users=users).model_dump()
-    return await _render(datasette, "src/pages/admin/index.ts", "Accounts", page_data)
+    return await _render(
+        datasette, request, "src/pages/admin/index.ts", "Accounts", page_data
+    )
 
 
 @router.GET("/-/admin/capabilities$")
@@ -93,7 +98,11 @@ async def capabilities_page(datasette, request):
     view = await grantable.grantable_view(datasette, internal)
     page_data = CapabilitiesPageData(**view).model_dump()
     return await _render(
-        datasette, "src/pages/capabilities/index.ts", "Capabilities", page_data
+        datasette,
+        request,
+        "src/pages/capabilities/index.ts",
+        "Capabilities",
+        page_data,
     )
 
 
@@ -104,7 +113,7 @@ async def messages_page(datasette, request):
     view = await messages.slots_view(internal)
     page_data = MessagesPageData(**view).model_dump()
     return await _render(
-        datasette, "src/pages/messages/index.ts", "Messages", page_data
+        datasette, request, "src/pages/messages/index.ts", "Messages", page_data
     )
 
 
@@ -125,6 +134,7 @@ async def login_attempts_page(datasette, request):
     ).model_dump()
     return await _render(
         datasette,
+        request,
         "src/pages/login-attempts/index.ts",
         "Login attempts",
         page_data,
