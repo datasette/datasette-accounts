@@ -84,8 +84,41 @@ def startup(datasette):
 
         await internal.execute_write_fn(seed)
         await internal.execute_write_fn(seed_capabilities)
+        await internal.execute_write_fn(seed_messages)
 
     return inner
+
+
+# Demo site messages (feature: admin-editable help text). Seeded so the
+# Messages admin page shows populated slots, the homepage shows the signed-out
+# banner, and the login page shows the help/contact note.
+_MESSAGES = {
+    "homepage_signed_out": (
+        'Sign in to browse the internal datasets. Need access? '
+        '<a href="mailto:data-team@example.com">Email the data team</a>.'
+    ),
+    "login_help": (
+        "Trouble signing in? Email "
+        '<a href="mailto:data-help@example.com">data-help@example.com</a>.'
+    ),
+}
+
+
+def seed_messages(conn):
+    """Seed the demo site-message slots (idempotent)."""
+    db = Database(conn)
+    messages = db[accounts_db.SITE_MESSAGES]
+    if messages.exists() and messages.count > 0:
+        return  # already seeded
+    for key, body in _MESSAGES.items():
+        db[accounts_db.SITE_MESSAGES].insert(
+            {
+                "key": key,
+                "body": body,
+                "updated_at": _CREATED,
+                "updated_by": "u-admin",
+            }
+        )
 
 
 def seed_capabilities(conn):

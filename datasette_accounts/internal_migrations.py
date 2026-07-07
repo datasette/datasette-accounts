@@ -110,3 +110,22 @@ def m003_capability_grants(db: Database):
             WHERE principal_type IN ('everyone', 'authenticated', 'anonymous');
         """
     )
+
+
+@internal_migrations()
+def m004_site_messages(db: Database):
+    # Admin-editable free-text messages surfaced in the running app (a
+    # sign-in prompt on the homepage, a "contact X for help" note on the login
+    # page, …). One row per known slot key; a cleared message deletes its row,
+    # so absence means "no message". The set of valid keys lives in
+    # messages.SITE_MESSAGE_SLOTS, not in the schema — bodies are opaque text.
+    db.executescript(
+        """
+        CREATE TABLE datasette_accounts_site_messages (
+            key TEXT PRIMARY KEY,
+            body TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT
+        );
+        """
+    )

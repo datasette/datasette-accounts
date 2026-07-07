@@ -51,6 +51,7 @@ export default defineConfig({
         admin: "src/pages/admin/index.ts",
         account: "src/pages/account/index.ts",
         capabilities: "src/pages/capabilities/index.ts",
+        messages: "src/pages/messages/index.ts",
       },
     },
   },

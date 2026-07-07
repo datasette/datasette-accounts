@@ -201,8 +201,23 @@ function buildShots(browser) {
         .getByRole("heading", { name: "Log in" })
         .waitFor({ timeout: 15_000 });
       await page.getByLabel("Username").waitFor();
+      // The admin-authored login help/contact note (seeded in seed.py).
+      await page.getByText("Trouble signing in?").waitFor();
       await freezeVolatile(page);
       await shotClipped(page, out("login"));
+      await ctx.close();
+    },
+
+    // The signed-out homepage banner (top_homepage hook) prompting sign-in.
+    "homepage-message": async () => {
+      const ctx = await makeContext(browser);
+      const page = await ctx.newPage();
+      await page.goto(`${BASE}/`);
+      await page
+        .getByText("Sign in to browse the internal datasets")
+        .waitFor({ timeout: 15_000 });
+      await freezeVolatile(page);
+      await shotClipped(page, out("homepage-message"));
       await ctx.close();
     },
 
@@ -308,6 +323,24 @@ function buildShots(browser) {
       await page.getByLabel("Principal type").waitFor({ timeout: 15_000 });
       await freezeVolatile(page);
       await shotClipped(page, out("capabilities-add"));
+      await ctx.close();
+    },
+
+    // The Messages admin page: admin-editable help text surfaced in the app
+    // (homepage sign-in prompt + login help/contact), seeded with demo copy.
+    messages: async () => {
+      const { ctx, page } = await loginContext(
+        browser,
+        "admin",
+        "/-/admin/messages",
+      );
+      await page
+        .getByRole("heading", { name: "Messages" })
+        .waitFor({ timeout: 15_000 });
+      await page.getByRole("heading", { name: "Homepage sign-in prompt" }).waitFor();
+      await page.getByRole("heading", { name: "Login help / contact" }).waitFor();
+      await freezeVolatile(page);
+      await shotClipped(page, out("messages"));
       await ctx.close();
     },
 

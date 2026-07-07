@@ -77,6 +77,7 @@ async def test_plugin_installed_and_tables_created():
         "datasette_accounts_capability_grants",
         "datasette_accounts_login_audit",
         "datasette_accounts_sessions",
+        "datasette_accounts_site_messages",
         "datasette_accounts_users",
     ]
 

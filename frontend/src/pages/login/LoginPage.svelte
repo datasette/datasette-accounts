@@ -65,6 +65,10 @@
       {busy ? "Signing in…" : "Log in"}
     </button>
   </form>
+  {#if pageData.help?.trim()}
+    <!-- Admin-authored HTML (trusted; only admins can set it). -->
+    <p class="help">{@html pageData.help}</p>
+  {/if}
 </div>
 
 <style>
@@ -73,5 +77,15 @@
     justify-content: center;
     padding-top: 0.6rem;
     padding-bottom: 0.6rem;
+  }
+  .help {
+    margin: 1rem 0 0;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card, transparent);
+    color: var(--muted);
+    font-size: 0.88rem;
+    line-height: 1.5;
   }
 </style>

@@ -12,6 +12,8 @@ from pydantic import BaseModel
 
 class LoginPageData(BaseModel):
     next: str = "/"
+    # Optional admin-authored help/contact note (plain text), "" when unset.
+    help: str = ""
 
 
 class UserRow(BaseModel):
@@ -82,11 +84,27 @@ class CapabilitiesPageData(BaseModel):
     has_acl: bool
 
 
+# --- Site messages (admin-editable help text) ---
+
+
+class SiteMessageSlot(BaseModel):
+    key: str
+    label: str
+    description: str
+    # Current stored body, "" when the slot is unset.
+    body: str = ""
+
+
+class MessagesPageData(BaseModel):
+    slots: List[SiteMessageSlot]
+
+
 __exports__ = [
     LoginPageData,
     AdminPageData,
     AccountPageData,
     CapabilitiesPageData,
+    MessagesPageData,
 ]
 
 
@@ -187,3 +205,9 @@ class GrantCapabilityRequest(BaseModel):
 
 class RevokeCapabilityRequest(BaseModel):
     id: int
+
+
+class SetSiteMessageRequest(BaseModel):
+    key: str
+    # Blank clears the slot.
+    body: str = ""
