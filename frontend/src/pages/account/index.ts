@@ -1,3 +1,4 @@
+import "../../lib/theme.css";
 import { mount } from "svelte";
 import AccountPage from "./AccountPage.svelte";
 

@@ -32,14 +32,29 @@
   }
 </script>
 
-<h1>Log in</h1>
-<form onsubmit={submit}>
-  <label>Username
-    <input bind:value={username} autocomplete="username" required />
-  </label>
-  <label>Password
-    <input type="password" bind:value={password} autocomplete="current-password" required />
-  </label>
-  <p><button type="submit" disabled={busy}>Log in</button></p>
-  {#if error}<p class="error">{error}</p>{/if}
-</form>
+<div class="page narrow">
+  <h1>Log in</h1>
+  <form class="card" onsubmit={submit}>
+    {#if error}<p class="msg msg-error">{error}</p>{/if}
+    <label class="field">
+      <span>Username</span>
+      <input bind:value={username} autocomplete="username" required />
+    </label>
+    <label class="field">
+      <span>Password</span>
+      <input type="password" bind:value={password} autocomplete="current-password" required />
+    </label>
+    <button type="submit" class="btn-primary block" disabled={busy}>
+      {busy ? "Signing in…" : "Log in"}
+    </button>
+  </form>
+</div>
+
+<style>
+  .block {
+    width: 100%;
+    justify-content: center;
+    padding-top: 0.6rem;
+    padding-bottom: 0.6rem;
+  }
+</style>

@@ -38,7 +38,6 @@ const OUT = resolve(HERE, "../../docs/screenshots");
 const out = (n) => resolve(OUT, `${n}.png`);
 
 const VIEWPORT = { width: 1000, height: 820 };
-const VIEWPORT_TALL = { width: 1000, height: 1000 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------
@@ -203,24 +202,41 @@ function buildShots(browser) {
       await ctx.close();
     },
 
-    // The admin table with a user's session drawer expanded.
-    "admin-sessions": async () => {
-      const { ctx, page } = await loginContext(
-        browser,
-        "admin",
-        "/-/admin/users",
-        VIEWPORT_TALL,
-      );
+    // The admin table with a row's overflow (kebab) menu open.
+    "admin-menu": async () => {
+      const { ctx, page } = await loginContext(browser, "admin", "/-/admin/users");
       await page.getByRole("cell", { name: "alice", exact: true }).waitFor({
         timeout: 15_000,
       });
       await page
         .getByRole("row", { name: /alice/ })
-        .getByRole("button", { name: "Sessions" })
+        .getByRole("button", { name: "Actions for alice" })
         .click();
+      await page.getByRole("menuitem", { name: "Active sessions" }).waitFor({ timeout: 15_000 });
+      await freezeVolatile(page);
+      await shotClipped(page, out("admin-menu"));
+      await ctx.close();
+    },
+
+    // The active-sessions modal for a user (opened from the kebab menu).
+    // Captured full-frame (not footer-clipped) so the viewport-centred modal
+    // is shown centred rather than cut off at the bottom.
+    "admin-sessions": async () => {
+      const { ctx, page } = await loginContext(browser, "admin", "/-/admin/users", {
+        width: 1000,
+        height: 680,
+      });
+      await page.getByRole("cell", { name: "alice", exact: true }).waitFor({
+        timeout: 15_000,
+      });
+      await page
+        .getByRole("row", { name: /alice/ })
+        .getByRole("button", { name: "Actions for alice" })
+        .click();
+      await page.getByRole("menuitem", { name: "Active sessions" }).click();
       await page.getByText("203.0.113.24").waitFor({ timeout: 15_000 });
       await freezeVolatile(page);
-      await shotClipped(page, out("admin-sessions"));
+      await page.screenshot({ path: out("admin-sessions") });
       await ctx.close();
     },
 

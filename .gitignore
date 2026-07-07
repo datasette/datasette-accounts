@@ -14,3 +14,7 @@ frontend/src/page_data/*_schema.json
 frontend/src/page_data/*.types.ts
 frontend/api.d.ts
 accounts.db
+
+# Built frontend assets (rebuild with `just frontend`)
+datasette_accounts/static/gen/
+datasette_accounts/manifest.json

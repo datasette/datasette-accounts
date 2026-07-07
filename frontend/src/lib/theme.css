@@ -1,0 +1,291 @@
+/* Shared design tokens + base styles for datasette-accounts pages.
+ * Scoped under #app-root so nothing leaks into Datasette's own chrome. */
+#app-root {
+  /* Catppuccin Latte */
+  --acc: #1e66f5; /* blue */
+  --acc-d: #1552cc;
+  --acc-l: #e6ecfd;
+  --mauve: #8839ef; /* admin */
+  --danger: #d20f39; /* red */
+  --danger-d: #ab0c2f;
+  --danger-l: #fbe0e6;
+  --ok: #40a02b; /* green */
+  --ok-l: #e6f2e2;
+  --warn: #fe640b; /* peach — locked */
+  --ink: #4c4f69; /* text */
+  --muted: #6c6f85; /* subtext0 */
+  --subtle: #8c8fa1; /* overlay1 */
+  --border: #ccd0da; /* surface0 */
+  --hover: #e6e9ef; /* mantle */
+  --surface: #ffffff;
+  --bg: #eff1f5; /* base */
+  --radius: 8px;
+  --shadow: 0 1px 2px rgba(76, 79, 105, 0.1), 0 8px 24px rgba(76, 79, 105, 0.1);
+
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+#app-root * {
+  box-sizing: border-box;
+}
+
+/* Layout wrappers */
+#app-root .page {
+  max-width: 960px;
+  margin: 0 auto;
+}
+#app-root .page.narrow {
+  max-width: 420px;
+}
+
+#app-root h1 {
+  font-size: 1.7rem;
+  margin: 0 0 1rem;
+  letter-spacing: -0.01em;
+}
+
+/* Card / panel */
+#app-root .card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.5rem;
+}
+
+/* Fields */
+#app-root .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-bottom: 1rem;
+}
+#app-root .field > span {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+#app-root input[type="text"],
+#app-root input[type="password"],
+#app-root input:not([type]),
+#app-root .input {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  font-size: 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+#app-root input:focus {
+  outline: none;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--acc-l);
+}
+/* Search input leaves room for the leading icon (needs ID specificity to beat
+ * the `#app-root input` padding shorthand above). */
+#app-root .search input {
+  padding-left: 2.3rem;
+}
+
+/* Buttons */
+#app-root button,
+#app-root .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.9rem;
+  padding: 0.5rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+  white-space: nowrap;
+}
+#app-root button:hover,
+#app-root .btn:hover {
+  background: var(--hover);
+  border-color: var(--subtle);
+}
+#app-root button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--acc-l);
+}
+#app-root button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+#app-root .btn-primary {
+  background: var(--acc);
+  border-color: var(--acc-d);
+  color: #fff;
+}
+#app-root .btn-primary:hover {
+  background: var(--acc-d);
+  border-color: var(--acc-d);
+}
+#app-root .btn-danger {
+  color: var(--danger);
+  border-color: var(--border);
+}
+#app-root .btn-danger:hover {
+  background: var(--danger);
+  border-color: var(--danger-d);
+  color: #fff;
+}
+#app-root .btn-danger-solid {
+  background: var(--danger);
+  border-color: var(--danger-d);
+  color: #fff;
+}
+#app-root .btn-danger-solid:hover {
+  background: var(--danger-d);
+}
+#app-root .btn-sm {
+  padding: 0.3rem 0.55rem;
+  font-size: 0.82rem;
+}
+#app-root .btn-ghost {
+  border-color: transparent;
+  background: transparent;
+}
+#app-root .btn-ghost:hover {
+  background: var(--hover);
+  border-color: transparent;
+}
+
+/* Icon buttons (square, ghost) */
+#app-root .icon-btn {
+  padding: 0.4rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  line-height: 0;
+}
+#app-root .icon-btn:hover {
+  background: var(--hover);
+  border-color: transparent;
+  color: var(--ink);
+}
+#app-root .icon-btn.danger:hover {
+  background: var(--danger-l);
+  color: var(--danger);
+}
+#app-root .icon-btn[aria-expanded="true"] {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+/* Dropdown menu */
+#app-root .menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+#app-root .menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 176px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 0.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+#app-root .menu button {
+  justify-content: flex-start;
+  width: 100%;
+  border: none;
+  background: transparent;
+  font-weight: 500;
+  font-size: 0.88rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 5px;
+  text-align: left;
+}
+#app-root .menu button:hover {
+  background: var(--acc-l);
+  border: none;
+}
+#app-root .menu .sep {
+  height: 1px;
+  background: var(--border);
+  margin: 0.3rem 0;
+}
+
+/* Badges — background-free status tags with a leading dot. Only shown for the
+ * notable states (admin / locked / disabled); plain user/active render nothing. */
+#app-root .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+#app-root .badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+#app-root .badge-admin {
+  color: var(--mauve);
+}
+#app-root .badge-locked {
+  color: var(--warn);
+}
+#app-root .badge-disabled {
+  color: var(--subtle);
+}
+
+/* Inline messages */
+#app-root .msg {
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+}
+#app-root .msg-error {
+  background: var(--danger-l);
+  color: var(--danger-d);
+  border: 1px solid #ffcecb;
+}
+#app-root .msg-ok {
+  background: var(--ok-l);
+  color: var(--ok);
+  border: 1px solid #b7e0c1;
+}
+
+/* Native <dialog> modal — pinned to the viewport centre. */
+#app-root dialog,
+dialog.acc-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0;
+  width: min(460px, calc(100vw - 2rem));
+  height: fit-content;
+  max-height: calc(100vh - 2rem);
+  box-shadow: 0 12px 48px rgba(76, 79, 105, 0.28);
+  color: var(--ink);
+  background: var(--surface);
+}
+dialog.acc-dialog::backdrop {
+  background: rgba(76, 79, 105, 0.4);
+  backdrop-filter: blur(2px);
+}
