@@ -18,7 +18,7 @@ frontend-dev *flags:
 
 # Datasette dev server with a persistent internal DB
 dev *flags:
-    uv run datasette --root -p 8006 --internal accounts.db {{flags}}
+    DATASETTE_SECRET=abc123 uv run datasette --root -p 8006 --internal accounts.db {{flags}}
 
 # Datasette + Vite HMR (auto-restart on .py/.html changes)
 dev-with-hmr *flags:

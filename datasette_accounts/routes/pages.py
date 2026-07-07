@@ -72,6 +72,4 @@ async def admin_page(datasette, request):
     rows = await db.list_users(internal)
     users = [UserRow(**db.to_user_row(r)) for r in rows]
     page_data = AdminPageData(users=users).model_dump()
-    return await _render(
-        datasette, "src/pages/admin/index.ts", "Accounts", page_data
-    )
+    return await _render(datasette, "src/pages/admin/index.ts", "Accounts", page_data)

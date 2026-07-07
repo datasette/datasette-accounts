@@ -45,7 +45,10 @@ async function reachable() {
   try {
     const ac = new AbortController();
     const t = setTimeout(() => ac.abort(), 500);
-    const r = await fetch(`${BASE}/-/login`, { redirect: "manual", signal: ac.signal });
+    const r = await fetch(`${BASE}/-/login`, {
+      redirect: "manual",
+      signal: ac.signal,
+    });
     clearTimeout(t);
     return r.status < 500;
   } catch {
@@ -90,7 +93,9 @@ async function startServer() {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
-      throw new Error(`datasette exited early (code ${child.exitCode}):\n${log}`);
+      throw new Error(
+        `datasette exited early (code ${child.exitCode}):\n${log}`,
+      );
     }
     if (await reachable()) return child;
     await sleep(250);
@@ -141,7 +146,12 @@ async function shotClipped(page, file, pad = 12) {
   const vp = page.viewportSize() || VIEWPORT;
   await page.screenshot({
     path: file,
-    clip: { x: 0, y: 0, width: vp.width, height: Math.min(vp.height, bottom + pad) },
+    clip: {
+      x: 0,
+      y: 0,
+      width: vp.width,
+      height: Math.min(vp.height, bottom + pad),
+    },
   });
 }
 
@@ -169,7 +179,9 @@ async function loginContext(browser, username, nextPath, viewport = VIEWPORT) {
   await page.getByLabel("Username").fill(username);
   await page.getByLabel("Password").fill(DEMO_PASSWORD);
   await Promise.all([
-    page.waitForURL((u) => !u.pathname.startsWith("/-/login"), { timeout: 15_000 }),
+    page.waitForURL((u) => !u.pathname.startsWith("/-/login"), {
+      timeout: 15_000,
+    }),
     page.getByRole("button", { name: "Log in" }).click(),
   ]);
   return { ctx, page };
@@ -185,7 +197,9 @@ function buildShots(browser) {
       const ctx = await makeContext(browser);
       const page = await ctx.newPage();
       await page.goto(`${BASE}/-/login`);
-      await page.getByRole("heading", { name: "Log in" }).waitFor({ timeout: 15_000 });
+      await page
+        .getByRole("heading", { name: "Log in" })
+        .waitFor({ timeout: 15_000 });
       await page.getByLabel("Username").waitFor();
       await freezeVolatile(page);
       await shotClipped(page, out("login"));
@@ -194,8 +208,14 @@ function buildShots(browser) {
 
     // The admin accounts table (logged in as the seeded admin).
     admin: async () => {
-      const { ctx, page } = await loginContext(browser, "admin", "/-/admin/users");
-      await page.getByRole("heading", { name: "Accounts" }).waitFor({ timeout: 15_000 });
+      const { ctx, page } = await loginContext(
+        browser,
+        "admin",
+        "/-/admin/users",
+      );
+      await page
+        .getByRole("heading", { name: "Accounts" })
+        .waitFor({ timeout: 15_000 });
       await page.getByRole("cell", { name: "dave", exact: true }).waitFor();
       await freezeVolatile(page);
       await shotClipped(page, out("admin"));
@@ -204,7 +224,11 @@ function buildShots(browser) {
 
     // The admin table with a row's overflow (kebab) menu open.
     "admin-menu": async () => {
-      const { ctx, page } = await loginContext(browser, "admin", "/-/admin/users");
+      const { ctx, page } = await loginContext(
+        browser,
+        "admin",
+        "/-/admin/users",
+      );
       await page.getByRole("cell", { name: "alice", exact: true }).waitFor({
         timeout: 15_000,
       });
@@ -212,7 +236,9 @@ function buildShots(browser) {
         .getByRole("row", { name: /alice/ })
         .getByRole("button", { name: "Actions for alice" })
         .click();
-      await page.getByRole("menuitem", { name: "Active sessions" }).waitFor({ timeout: 15_000 });
+      await page
+        .getByRole("menuitem", { name: "Active sessions" })
+        .waitFor({ timeout: 15_000 });
       await freezeVolatile(page);
       await shotClipped(page, out("admin-menu"));
       await ctx.close();
@@ -222,10 +248,15 @@ function buildShots(browser) {
     // Captured full-frame (not footer-clipped) so the viewport-centred modal
     // is shown centred rather than cut off at the bottom.
     "admin-sessions": async () => {
-      const { ctx, page } = await loginContext(browser, "admin", "/-/admin/users", {
-        width: 1000,
-        height: 680,
-      });
+      const { ctx, page } = await loginContext(
+        browser,
+        "admin",
+        "/-/admin/users",
+        {
+          width: 1000,
+          height: 680,
+        },
+      );
       await page.getByRole("cell", { name: "alice", exact: true }).waitFor({
         timeout: 15_000,
       });
@@ -274,7 +305,9 @@ async function main() {
     const names = Object.keys(shotsByName);
     const unknown = [...requested].filter((n) => !names.includes(n));
     if (unknown.length) {
-      throw new Error(`unknown shot(s): ${unknown.join(", ")} (have: ${names.join(", ")})`);
+      throw new Error(
+        `unknown shot(s): ${unknown.join(", ")} (have: ${names.join(", ")})`,
+      );
     }
     const todo = requested.size ? names.filter((n) => requested.has(n)) : names;
 

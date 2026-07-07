@@ -78,7 +78,9 @@
   border-radius: 6px;
   background: var(--surface);
   color: var(--ink);
-  transition: border-color 0.12s, box-shadow 0.12s;
+  transition:
+    border-color 0.12s,
+    box-shadow 0.12s;
 }
 #app-root input:focus {
   outline: none;
@@ -106,7 +108,10 @@
   background: var(--surface);
   color: var(--ink);
   cursor: pointer;
-  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    box-shadow 0.12s;
   white-space: nowrap;
 }
 #app-root button:hover,

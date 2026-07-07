@@ -162,9 +162,7 @@ def menu_links(datasette, actor):
         links.append(
             {"href": datasette.urls.path("/-/account"), "label": "Your account"}
         )
-        links.append(
-            {"href": datasette.urls.path("/-/logout"), "label": "Log out"}
-        )
+        links.append({"href": datasette.urls.path("/-/logout"), "label": "Log out"})
         return links
 
     return inner
