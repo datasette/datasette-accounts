@@ -5,12 +5,14 @@ from typing import Annotated
 from datasette import Response
 from datasette_plugin_router import Body
 
-from .. import db, security
+from .. import db, grantable, security
 from ..page_data import (
     AuthenticateRequest,
     ChangePasswordRequest,
     CreateUserRequest,
+    GrantCapabilityRequest,
     ResetPasswordRequest,
+    RevokeCapabilityRequest,
     RevokeSessionRequest,
     SessionRow,
     TargetRequest,
@@ -370,4 +372,61 @@ async def admin_logout_everywhere(
 ):
     internal = datasette.get_internal_database()
     await db.logout_everywhere(internal, request.actor["id"], body.id)
+    return Response.json({"ok": True})
+
+
+# --------------------------------------------------------------------------
+# Capability grants (F1) — grant global actions to accounts/groups/audiences
+# --------------------------------------------------------------------------
+
+
+@router.POST("/-/admin/api/capabilities/list$")
+@require_admin
+async def admin_capabilities_list(datasette, request):
+    internal = datasette.get_internal_database()
+    view = await grantable.grantable_view(datasette, internal)
+    return Response.json({"ok": True, **view})
+
+
+@router.POST("/-/admin/api/capabilities/grant$")
+@require_admin
+async def admin_capabilities_grant(
+    datasette, request, body: Annotated[GrantCapabilityRequest, Body()]
+):
+    internal = datasette.get_internal_database()
+    # Only grant currently-grantable global actions.
+    if not grantable.is_grantable(datasette, body.action):
+        return Response.json(
+            {"ok": False, "error": "Action is not grantable"}, status=400
+        )
+    # Enforce principal gating (group availability + public-audience rules, D11).
+    has_acl = await db.acl_available(internal)
+    if not grantable.principal_offerable(
+        datasette, body.action, body.principal_type, has_acl
+    ):
+        return Response.json(
+            {"ok": False, "error": "Principal not allowed for this action"},
+            status=400,
+        )
+    try:
+        await db.grant_capability(
+            internal,
+            request.actor["id"],
+            action=body.action,
+            principal_type=body.principal_type,
+            target_actor_id=body.actor_id,
+            group_id=body.group_id,
+        )
+    except db.InvalidGrantError as e:
+        return Response.json({"ok": False, "error": str(e)}, status=400)
+    return Response.json({"ok": True})
+
+
+@router.POST("/-/admin/api/capabilities/revoke$")
+@require_admin
+async def admin_capabilities_revoke(
+    datasette, request, body: Annotated[RevokeCapabilityRequest, Body()]
+):
+    internal = datasette.get_internal_database()
+    await db.revoke_capability(internal, request.actor["id"], body.id)
     return Response.json({"ok": True})

@@ -16,6 +16,17 @@ USERS = "datasette_accounts_users"
 SESSIONS = "datasette_accounts_sessions"
 LOGIN_AUDIT = "datasette_accounts_login_audit"
 ADMIN_AUDIT = "datasette_accounts_admin_audit"
+CAPABILITY_GRANTS = "datasette_accounts_capability_grants"
+
+# datasette-acl tables we reference (softly) for the "group" principal. We never
+# write them — acl owns them — but we join them to resolve group membership +
+# names when acl is installed. Absent → the group principal is simply disabled.
+ACL_GROUPS = "acl_groups"
+ACL_ACTOR_GROUPS = "acl_actor_groups"
+
+# Principal kinds a capability grant may target (mirrors datasette-acl).
+PUBLIC_PRINCIPALS = ("everyone", "authenticated", "anonymous")
+PRINCIPAL_TYPES = ("actor", "group", *PUBLIC_PRINCIPALS)
 
 # Single source of truth for "is an admin": used by both the permission grant
 # SQL and the last-admin guard so the two definitions can never drift.
@@ -32,6 +43,11 @@ class LastAdminError(Exception):
 
 class UsernameTakenError(Exception):
     """Raised when creating/renaming to an already-used username."""
+
+
+class InvalidGrantError(Exception):
+    """Raised when a capability grant references an unknown actor/group or a
+    principal kind that isn't available (e.g. a group while acl is absent)."""
 
 
 def now_iso() -> str:
@@ -404,3 +420,152 @@ def _guard_last_admin(conn, exclude_id):
     ).fetchone()[0]
     if remaining == 0:
         raise LastAdminError()
+
+
+# --------------------------------------------------------------------------
+# Capability grants (global-action grants managed by admins — F1)
+# --------------------------------------------------------------------------
+
+
+async def acl_available(db):
+    """True when datasette-acl's group tables exist in the internal DB.
+
+    Gates the "group" principal everywhere: without acl there are no groups to
+    reference, so the resolver skips the group clause and the UI hides the
+    group picker.
+    """
+    result = await db.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
+        [ACL_GROUPS, ACL_ACTOR_GROUPS],
+    )
+    return result.single_value() == 2
+
+
+async def list_acl_groups(db):
+    """Non-deleted acl groups as [{id, name}] for the group picker (or [])."""
+    if not await acl_available(db):
+        return []
+    result = await db.execute(
+        f"SELECT id, name FROM {ACL_GROUPS} WHERE deleted IS NULL ORDER BY name"
+    )
+    return [{"id": r["id"], "name": r["name"]} for r in result.rows]
+
+
+async def list_capability_grants(db, actions=None):
+    """All capability grants, newest first, with resolved display labels.
+
+    Joins users (for actor grants → username) and, when acl is present,
+    acl_groups (for group grants → group name). ``actions`` optionally filters
+    to a set/list of action names.
+    """
+    has_acl = await acl_available(db)
+    group_name = (
+        f"(SELECT name FROM {ACL_GROUPS} WHERE id = g.group_id)" if has_acl else "NULL"
+    )
+    sql = f"""
+        SELECT g.id, g.action, g.principal_type, g.actor_id, g.group_id,
+               g.created_at, g.created_by,
+               (SELECT username FROM {USERS} WHERE id = g.actor_id) AS actor_username,
+               {group_name} AS group_name
+        FROM {CAPABILITY_GRANTS} g
+    """
+    params = []
+    if actions is not None:
+        actions = list(actions)
+        if not actions:
+            return []
+        placeholders = ", ".join("?" for _ in actions)
+        sql += f" WHERE g.action IN ({placeholders})"
+        params = actions
+    sql += " ORDER BY g.action, g.id DESC"
+    result = await db.execute(sql, params)
+    return [dict(r) for r in result.rows]
+
+
+async def grant_capability(
+    db, actor_id, *, action, principal_type, target_actor_id=None, group_id=None
+):
+    """Insert a capability grant (idempotent). Returns True if a row was added.
+
+    Validates the principal inside the write transaction: an actor grant must
+    name an existing account; a group grant must name a live acl group (and acl
+    must be installed). Duplicate grants are a no-op (partial unique indexes).
+    """
+    if principal_type not in PRINCIPAL_TYPES:
+        raise InvalidGrantError(f"unknown principal type: {principal_type}")
+    # Normalise: only the matching id column is stored.
+    actor_val = target_actor_id if principal_type == "actor" else None
+    group_val = group_id if principal_type == "group" else None
+    if principal_type == "actor" and not actor_val:
+        raise InvalidGrantError("actor grant requires an account")
+    if principal_type == "group" and group_val is None:
+        raise InvalidGrantError("group grant requires a group")
+
+    ts = now_iso()
+
+    def write(conn):
+        if principal_type == "actor":
+            if not conn.execute(
+                f"SELECT 1 FROM {USERS} WHERE id = ?", [actor_val]
+            ).fetchone():
+                raise InvalidGrantError("unknown account")
+        elif principal_type == "group":
+            has_groups = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                [ACL_GROUPS],
+            ).fetchone()
+            if not has_groups:
+                raise InvalidGrantError(
+                    "groups are unavailable (datasette-acl not installed)"
+                )
+            if not conn.execute(
+                f"SELECT 1 FROM {ACL_GROUPS} WHERE id = ? AND deleted IS NULL",
+                [group_val],
+            ).fetchone():
+                raise InvalidGrantError("unknown group")
+        cur = conn.execute(
+            f"INSERT OR IGNORE INTO {CAPABILITY_GRANTS} "
+            "(action, principal_type, actor_id, group_id, created_at, created_by) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [action, principal_type, actor_val, group_val, ts, actor_id],
+        )
+        if cur.rowcount == 0:
+            return False  # already granted — no-op, no audit noise
+        _audit(
+            conn,
+            "grant-capability",
+            actor_id,
+            actor_val,
+            {
+                "action": action,
+                "principal_type": principal_type,
+                "group_id": group_val,
+            },
+        )
+        return True
+
+    return await db.execute_write_fn(write)
+
+
+async def revoke_capability(db, actor_id, grant_id):
+    """Delete a capability grant by id. Returns True if a row was removed."""
+
+    def write(conn):
+        row = conn.execute(
+            f"SELECT action, principal_type, actor_id, group_id "
+            f"FROM {CAPABILITY_GRANTS} WHERE id = ?",
+            [grant_id],
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(f"DELETE FROM {CAPABILITY_GRANTS} WHERE id = ?", [grant_id])
+        _audit(
+            conn,
+            "revoke-capability",
+            actor_id,
+            row[2],
+            {"action": row[0], "principal_type": row[1], "group_id": row[3]},
+        )
+        return True
+
+    return await db.execute_write_fn(write)

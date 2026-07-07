@@ -19,6 +19,19 @@ DEFAULTS = {
     "secure_cookie": "auto",  # "auto" | True | False
     "audit_retention_days": 90,
     "trust_proxy_headers": False,  # trust X-Forwarded-* (proto + client IP)
+    # --- Capability grants (F1) / acl bridge (F2) ---
+    # Explicit allowlist of grantable global actions; None = auto-discover all
+    # global (resource_class=None) actions minus the built-in denylist.
+    "grantable_actions": None,
+    # Extra action names to hide from auto-discovery.
+    "grantable_actions_deny": [],
+    # Actions for which the "everyone"/"anonymous" public audiences may be
+    # granted. All other actions offer only "authenticated" (any signed-in user)
+    # among the public principals, since the grantable set is write/create-heavy.
+    "public_audience_actions": [],
+    # Make accounts admins full datasette-acl admins (manage groups + all
+    # resource sharing through acl's own UI). Set False to keep them separate.
+    "grant_acl_admin": True,
 }
 
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")

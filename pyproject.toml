@@ -17,7 +17,14 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "ruff>=0.15.0"]
+dev = [
+    "datasette-acl",
+    "datasette-acl-share",
+    "datasette-paper",
+    "pytest",
+    "pytest-asyncio",
+    "ruff>=0.15.0",
+]
 
 [project.entry-points.datasette]
 accounts = "datasette_accounts"
@@ -36,3 +43,8 @@ exclude = ["frontend*"]
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.uv.sources]
+datasette-paper = { path = "../datasette-paper", editable = true }
+datasette-acl = { path = "../datasette-acl", editable = true }
+datasette-acl-share = { path = "../datasette-acl-share", editable = true }

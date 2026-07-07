@@ -47,32 +47,104 @@ def register_actions(datasette):
     ]
 
 
+_ADMIN_ALLOW_SQL = f"""
+    SELECT NULL AS parent, NULL AS child, 1 AS allow,
+           'datasette-accounts: root' AS reason
+    WHERE :actor_id = 'root'
+    UNION ALL
+    SELECT NULL, NULL, 1, 'datasette-accounts: is_admin'
+    FROM {db.USERS}
+    WHERE id = :actor_id AND {db.ENABLED_ADMIN_PREDICATE}
+"""
+
+
+def _capability_grant_sql(has_acl):
+    """SQL emitting allow rows for a global action from the grants table.
+
+    Actor + public-audience clauses always; the group clause only when acl's
+    membership table exists (referencing a missing table would fail to compile).
+    """
+    sql = f"""
+        SELECT NULL AS parent, NULL AS child, 1 AS allow,
+               'datasette-accounts: capability grant' AS reason
+        FROM {db.CAPABILITY_GRANTS}
+        WHERE action = :cap_action
+          AND (
+              (principal_type = 'actor' AND actor_id = :actor_id)
+              OR principal_type = 'everyone'
+              OR (principal_type = 'authenticated' AND :actor_id IS NOT NULL)
+              OR (principal_type = 'anonymous' AND :actor_id IS NULL)
+          )
+    """
+    if has_acl:
+        sql += f"""
+        UNION ALL
+        SELECT NULL, NULL, 1, 'datasette-accounts: capability grant (group)'
+        FROM {db.CAPABILITY_GRANTS} g
+        JOIN {db.ACL_ACTOR_GROUPS} ag
+            ON ag.group_id = g.group_id AND ag.actor_id = :actor_id
+        JOIN {db.ACL_GROUPS} gr ON gr.id = g.group_id AND gr.deleted IS NULL
+        WHERE g.action = :cap_action AND g.principal_type = 'group'
+        """
+    return sql
+
+
 @hookimpl
 def permission_resources_sql(datasette, actor, action):
-    """Self-answer the admin action: allow root, or an enabled admin row.
+    """Contribute allow rows against the internal database:
 
-    Runs against the internal database (where the users table lives). Returns
-    no rows for non-admins, so the action defaults to deny unless another
-    provider (config allow / datasette-acl) grants it.
+    - the ``datasette-accounts-admin`` action (root or enabled admin) — self;
+    - the ``datasette-acl`` action for admins when ``grant_acl_admin`` is set,
+      so accounts admins manage groups + resource sharing via acl's UI (F2);
+    - any **global** action that has capability grants in our table (F1).
+
+    Allow-only: this hook never emits a deny, so grants compose additively with
+    config-permissions and datasette-acl.
     """
-    if action != ADMIN_ACTION:
-        return None
-    if not actor or not actor.get("id"):
-        return None
-    return PermissionSQL(
-        sql=f"""
-            SELECT NULL AS parent, NULL AS child, 1 AS allow,
-                   'datasette-accounts: root' AS reason
-            WHERE :actor_id = 'root'
-            UNION ALL
-            SELECT NULL, NULL, 1, 'datasette-accounts: is_admin'
-            FROM {db.USERS}
-            WHERE id = :actor_id AND {db.ENABLED_ADMIN_PREDICATE}
-        """,
-        # Must supply actor_id in params so core namespaces + binds it (an
-        # empty/None params dict is dropped before the SQL runs).
-        params={"actor_id": actor.get("id")},
-    )
+    actor_id = actor.get("id") if actor else None
+
+    async def inner():
+        results = []
+
+        if action == ADMIN_ACTION:
+            results.append(
+                PermissionSQL(sql=_ADMIN_ALLOW_SQL, params={"actor_id": actor_id})
+            )
+
+        if action == "datasette-acl" and security.config(datasette, "grant_acl_admin"):
+            results.append(
+                PermissionSQL(
+                    sql=_ADMIN_ALLOW_SQL.replace(
+                        "datasette-accounts: root",
+                        "datasette-accounts: admin (acl bridge)",
+                    ).replace(
+                        "datasette-accounts: is_admin",
+                        "datasette-accounts: admin (acl bridge)",
+                    ),
+                    params={"actor_id": actor_id},
+                )
+            )
+
+        # F1 — only global actions can carry capability grants (validated on
+        # write), so skip the table read for the far more frequent
+        # resource-scoped checks (view-table, etc.).
+        action_obj = datasette.actions.get(action)
+        if (
+            action_obj is not None
+            and getattr(action_obj, "resource_class", None) is None
+        ):
+            internal = datasette.get_internal_database()
+            has_acl = await db.acl_available(internal)
+            results.append(
+                PermissionSQL(
+                    sql=_capability_grant_sql(has_acl),
+                    params={"actor_id": actor_id, "cap_action": action},
+                )
+            )
+
+        return results or None
+
+    return inner
 
 
 @hookimpl
@@ -147,6 +219,25 @@ def actor_from_request(datasette, request):
 
 
 @hookimpl
+def datasette_acl_valid_actors(datasette):
+    """Expose accounts users to datasette-acl (F3).
+
+    Lets acl's group-member picker and share dialog validate + autocomplete
+    accounts by username. Never called when acl isn't installed (its hookspec
+    is absent), so this is inert in that case.
+    """
+
+    async def inner():
+        internal = datasette.get_internal_database()
+        rows = await db.list_users(internal)
+        return [
+            {"id": r["id"], "display": r["username"]} for r in rows if not r["disabled"]
+        ]
+
+    return inner
+
+
+@hookimpl
 def menu_links(datasette, actor):
     async def inner():
         if not actor:
@@ -159,6 +250,21 @@ def menu_links(datasette, actor):
                     "label": "Accounts",
                 }
             )
+            links.append(
+                {
+                    "href": datasette.urls.path("/-/admin/capabilities"),
+                    "label": "Capabilities",
+                }
+            )
+            # F2 — admins are acl admins, so link to acl's group + sharing UI
+            # when acl is installed.
+            if await db.acl_available(datasette.get_internal_database()):
+                links.append(
+                    {
+                        "href": datasette.urls.path("/-/acl/groups"),
+                        "label": "Groups & sharing",
+                    }
+                )
         links.append(
             {"href": datasette.urls.path("/-/account"), "label": "Your account"}
         )

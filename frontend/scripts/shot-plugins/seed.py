@@ -83,5 +83,72 @@ def startup(datasette):
             db[accounts_db.SESSIONS].insert(_ALICE_SESSION)
 
         await internal.execute_write_fn(seed)
+        await internal.execute_write_fn(seed_capabilities)
 
     return inner
+
+
+def seed_capabilities(conn):
+    """Seed a demo acl group + capability grants for the Capabilities shot.
+
+    Grants the global ``datasette-paper-create`` action (registered by the
+    installed datasette-paper plugin) to a mix of principals — a named account,
+    an acl group, and the "any signed-in user" audience — so the screenshot
+    shows all three chip kinds. Idempotent + tolerant of acl not being present.
+    """
+    db = Database(conn)
+    grants = db[accounts_db.CAPABILITY_GRANTS]
+    if grants.exists() and grants.count > 0:
+        return  # already seeded
+
+    action = "datasette-paper-create"
+    rows = [
+        {
+            "action": action,
+            "principal_type": "actor",
+            "actor_id": "u-alice",
+            "group_id": None,
+            "created_at": _CREATED,
+            "created_by": "u-admin",
+        },
+        {
+            "action": action,
+            "principal_type": "authenticated",
+            "actor_id": None,
+            "group_id": None,
+            "created_at": _CREATED,
+            "created_by": "u-admin",
+        },
+    ]
+
+    # Ensure datasette-acl's tables exist regardless of plugin startup order
+    # (so the seeded group grant is deterministic), when acl is installed.
+    try:
+        from datasette_acl.internal_migrations import internal_migrations as acl_migrations
+
+        acl_migrations.apply(db)
+    except ImportError:
+        pass
+
+    # A group grant, only when datasette-acl's tables exist.
+    if db["acl_groups"].exists():
+        conn.execute("INSERT INTO acl_groups (name) VALUES ('Editors')")
+        gid = conn.execute(
+            "SELECT id FROM acl_groups WHERE name = 'Editors'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO acl_actor_groups (actor_id, group_id) VALUES (?, ?)",
+            ["u-carol", gid],
+        )
+        rows.append(
+            {
+                "action": action,
+                "principal_type": "group",
+                "actor_id": None,
+                "group_id": gid,
+                "created_at": _CREATED,
+                "created_by": "u-admin",
+            }
+        )
+
+    grants.insert_all(rows)

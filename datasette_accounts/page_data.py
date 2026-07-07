@@ -37,7 +37,57 @@ class AccountPageData(BaseModel):
     must_change_password: bool
 
 
-__exports__ = [LoginPageData, AdminPageData, AccountPageData]
+# --- Capabilities (F1) ---
+
+
+class CapabilityGrant(BaseModel):
+    id: int
+    action: str
+    principal_type: str
+    actor_id: Optional[str] = None
+    group_id: Optional[int] = None
+    created_at: str
+    created_by: Optional[str] = None
+    # Resolved display labels (NULL if the account/group no longer exists).
+    actor_username: Optional[str] = None
+    group_name: Optional[str] = None
+
+
+class ConfigGrant(BaseModel):
+    # Read-only view of a datasette.yaml grant that applies to an action (D8).
+    source: str
+    allow_json: str
+
+
+class GrantableAction(BaseModel):
+    name: str
+    description: str = ""
+    also_requires: Optional[str] = None
+    # Required (always populated by the server) so the generated TS types are
+    # non-optional and can be indexed without undefined guards.
+    grants: List[CapabilityGrant]
+    # Principal kinds an admin may target for this action (D11).
+    offerable_principals: List[str]
+    config_grants: List[ConfigGrant]
+
+
+class GroupOption(BaseModel):
+    id: int
+    name: str
+
+
+class CapabilitiesPageData(BaseModel):
+    actions: List[GrantableAction]
+    groups: List[GroupOption]
+    has_acl: bool
+
+
+__exports__ = [
+    LoginPageData,
+    AdminPageData,
+    AccountPageData,
+    CapabilitiesPageData,
+]
 
 
 # --------------------------------------------------------------------------
@@ -126,3 +176,14 @@ class SessionRow(BaseModel):
 class SessionListResponse(BaseModel):
     ok: bool
     sessions: List[SessionRow] = []
+
+
+class GrantCapabilityRequest(BaseModel):
+    action: str
+    principal_type: str  # actor | group | everyone | authenticated | anonymous
+    actor_id: Optional[str] = None
+    group_id: Optional[int] = None
+
+
+class RevokeCapabilityRequest(BaseModel):
+    id: int

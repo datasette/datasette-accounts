@@ -17,6 +17,12 @@ admin UI and JSON API, guarded by a real Datasette 1.0 permission.
 - **A registered admin action** (`datasette-accounts-admin`) that is
   self-answered for `root` and enabled admins, and composes with `datasette-acl`
   / config `allow` blocks.
+- **Admin-controlled capabilities** — grant global actions like "create a paper"
+  to individual accounts, groups, or "any signed-in user" from a
+  **Capabilities** admin page, no config edits required. Per-document sharing and
+  group management stay in [`datasette-acl`](https://github.com/datasette/datasette-acl);
+  accounts admins get access to it automatically. See
+  [Permissions & capabilities](#permissions--capabilities).
 - **Security hardening** built in: timing-safe login (no username enumeration),
   PBKDF2 run off the event loop, unconditional CSRF gates, strict `?next=`
   validation, brute-force lockout (shared by login and change-password), forced
@@ -68,9 +74,11 @@ datasette hash-password
 ### 3. Day-to-day
 
 - Users log in at **`/-/login`** and manage their own password at **`/-/account`**.
-- Admins manage accounts at **`/-/admin/users`**.
+- Admins manage accounts at **`/-/admin/users`** and capabilities at
+  **`/-/admin/capabilities`**.
 - The Datasette menu gains **Log in** / **Log out** / **Your account** entries,
-  and **Accounts** for admins.
+  and **Accounts** / **Capabilities** (plus **Groups & sharing** when
+  `datasette-acl` is installed) for admins.
 
 ## Screenshots
 
@@ -86,6 +94,17 @@ reset, promote, or delete existing ones:
 Each account's active sessions can be listed and revoked individually:
 
 ![The accounts table with a user's session drawer expanded, showing an active session with a Revoke button.](docs/screenshots/admin-sessions.png)
+
+Admins grant global capabilities at `/-/admin/capabilities` — here the
+`datasette-paper-create` action (registered by
+[`datasette-paper`](https://github.com/simonw/datasette-paper)) is granted to a
+group, to any signed-in user, and to one account:
+
+![The Capabilities page showing a "Can create new papers" card with Group: Editors, Any signed-in user, and @alice grant chips.](docs/screenshots/capabilities.png)
+
+Adding a grant picks a principal — a specific account, a group, or an audience:
+
+![The Capabilities page with the add-grant row open, showing a principal-type dropdown and account picker.](docs/screenshots/capabilities-add.png)
 
 Users change their own password at `/-/account`:
 
@@ -108,6 +127,10 @@ defaults (a zero-config install works — it just warns about persistence):
 | `secure_cookie` | `"auto"` / `true` / `false` | `"auto"` | Secure flag on the session cookie |
 | `audit_retention_days` | int | `90` | delete `login_audit` rows older than this; `0` = keep forever |
 | `trust_proxy_headers` | bool | `false` | trust `X-Forwarded-Proto` / `X-Forwarded-For` (set only behind a trusted proxy) |
+| `grant_acl_admin` | bool | `true` | make accounts admins full `datasette-acl` admins (manage groups + all resource sharing) |
+| `grantable_actions` | list / null | `null` | explicit allowlist of grantable global actions; `null` = auto-discover |
+| `grantable_actions_deny` | list | `[]` | extra actions to hide from auto-discovery |
+| `public_audience_actions` | list | `[]` | actions for which `everyone` / `anonymous` audiences may be granted |
 
 ```yaml
 plugins:
@@ -138,6 +161,62 @@ or on the command line:
 datasette mydata.db --internal accounts.db -s permissions.profile_access.id '*'
 ```
 
+## Permissions & capabilities
+
+Datasette 1.0 permissions split into two kinds, and this plugin handles each in
+the place it belongs:
+
+- **Resource-scoped actions** (view/edit/share *this* paper, table ACLs, …) —
+  actions with a `resource_class`. These are owned by
+  [`datasette-acl`](https://github.com/datasette/datasette-acl): grant store,
+  groups, roles, per-resource admin UI, and the
+  [`datasette-acl-share`](https://github.com/datasette/datasette-acl-share)
+  dialog. This plugin does **not** duplicate any of it.
+- **Global / instance-level actions** (create a paper, create a place list, …) —
+  actions with `resource_class=None`. `datasette-acl` ignores these; historically
+  they could only be granted by hand-editing `datasette.yaml`. **This plugin adds
+  an admin UI for them** at `/-/admin/capabilities`.
+
+### Capability grants (`/-/admin/capabilities`)
+
+Admins grant a global action to a principal:
+
+- **an account** (any accounts user),
+- **a group** (a `datasette-acl` group — the picker appears when acl is installed),
+- **any signed-in user** (the `authenticated` audience).
+
+`everyone` / `anonymous` audiences are hidden for these write-oriented actions
+unless you opt an action in via `public_audience_actions`. Grants are
+**allow-only** and compose additively with `datasette.yaml` config and acl. Any
+config `permissions:` block that applies to an action is shown **read-only** on
+the page so you can see why a capability is in effect even with no grants listed.
+
+Which actions are grantable? By default, every registered global action except
+Datasette internals, `datasette-accounts-admin`, and `datasette-acl`. Restrict or
+extend that with `grantable_actions` / `grantable_actions_deny`.
+
+```yaml
+plugins:
+  datasette-accounts:
+    grantable_actions:            # optional — expose exactly these
+      - datasette-paper-create
+      - datasette-places-create
+    public_audience_actions:      # allow everyone/anonymous only where safe
+      - some-read-only-action
+```
+
+### The `datasette-acl` bridge
+
+When `datasette-acl` is installed, accounts admins are automatically granted its
+global `datasette-acl` permission (toggle with `grant_acl_admin`). That means an
+admin can manage **group membership** and **per-document sharing** (e.g. "the
+Editors group can manage papers") through acl's own UI — reachable from the
+**Groups & sharing** menu link — with no duplicate UI here. Accounts users are
+also exposed to acl's group-member picker and share dialog via the
+`datasette_acl_valid_actors` hook.
+
+Design notes and the decision log live in [`plans/permissions/`](plans/permissions/).
+
 ### Deploying behind a reverse proxy (nginx / Caddy / Fly / Cloud Run)
 
 When TLS is terminated at a proxy, Datasette sees plain HTTP, so the default
@@ -150,10 +229,13 @@ headers, or they become attacker-spoofable.
 
 ## Security model
 
-- **Identity only.** This plugin owns accounts, passwords, sessions, and one
-  `is_admin` flag. Resource-level authorization (who can see which database/table)
-  is delegated to `datasette-acl` or config `allow` blocks, which consume the
-  actor it emits: `{"id": "<ULID>", "username": "…", "is_admin": bool}`.
+- **Identity + global capabilities.** This plugin owns accounts, passwords,
+  sessions, one `is_admin` flag, and admin-managed grants of **global** actions
+  (see [Permissions & capabilities](#permissions--capabilities)). Resource-level
+  authorization (who can see which database/table/document) is delegated to
+  `datasette-acl` or config `allow` blocks, which consume the actor it emits:
+  `{"id": "<ULID>", "username": "…", "is_admin": bool}`. Capability grants are
+  allow-only and never emit a deny.
 - **Passwords** use PBKDF2-HMAC-SHA256 (480,000 iterations), run in a thread so a
   verification never blocks the event loop.
 - **CSRF** is enforced unconditionally in the plugin (JSON Content-Type +

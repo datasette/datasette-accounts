@@ -50,6 +50,7 @@ export default defineConfig({
         login: "src/pages/login/index.ts",
         admin: "src/pages/admin/index.ts",
         account: "src/pages/account/index.ts",
+        capabilities: "src/pages/capabilities/index.ts",
       },
     },
   },

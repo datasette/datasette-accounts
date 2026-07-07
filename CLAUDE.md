@@ -6,6 +6,8 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
 ## Design spec
 `plans/start/` is the authoritative design (read `plans/start/README.md` first).
 Security review findings are in `todos/security-review/` (all applied + built).
+`plans/permissions/` is the design for admin-controlled permissions (capability
+grants + datasette-acl bridge), all built on the `permissions-admin` branch.
 
 ## Build status
 - M0–M8 built and tested (`uv run pytest`, 22 tests green; `npm run check` clean).
@@ -28,6 +30,12 @@ Security review findings are in `todos/security-review/` (all applied + built).
 - `security.py` — CSRF gates, `?next=` validation, secure-cookie + IP-trust.
 - `router.py` — shared Router + POST-only/CSRF/admin decorators.
 - `routes/api.py`, `routes/pages.py` — endpoints and HTML shells.
+- `grantable.py` — which global actions are grantable + principal gating +
+  config-grant display; `db.py` `capability_grants` table + grant/revoke/list.
+  `__init__.permission_resources_sql` emits capability-grant allow rows (F1) and
+  the acl-admin bridge (F2); `datasette_acl_valid_actors` exposes accounts (F3).
+  Frontend: `frontend/src/pages/capabilities`. datasette-paper is a dev dep used
+  as the worked example (`datasette-paper-create`) in tests + screenshots.
 
 ## Gotchas discovered during build
 - datasette-plugin-router does **not** dispatch by HTTP method: identical paths
