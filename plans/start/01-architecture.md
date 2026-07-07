@@ -28,8 +28,8 @@ Dev: `pytest`, `pytest-asyncio`, `ruff`. Frontend: `svelte ^5`, `vite ^7`,
 ## Package layout (fullstack-skill convention)
 
 ```
-datasette-auth-basic-login/
-  datasette_auth_basic_login/          # Python package (underscores)
+datasette-accounts/
+  datasette_accounts/          # Python package (underscores)
     __init__.py                        # hooks: register_routes, register_actions,
                                        #   startup, actor_from_request, menu_links,
                                        #   extra_template_vars, register_commands
@@ -44,7 +44,7 @@ datasette-auth-basic-login/
       pages.py                         # GET/HTML shells (login, admin, account)
       api.py                           # JSON endpoints (authenticate, admin ops, self)
     templates/
-      basic_login_base.html            # single base template
+      accounts_base.html            # single base template
     static/                            # BUILT frontend assets (Vite output) — shipped
     manifest.json                      # Vite manifest — shipped
   frontend/                            # Svelte/Vite/TS source — NOT shipped in wheel
@@ -53,14 +53,14 @@ datasette-auth-basic-login/
     api.d.ts                           # generated OpenAPI types
     vite.config.ts, package.json, …
   scripts/typegen-pagedata.py
-  tests/test_basic_login.py
+  tests/test_accounts.py
   pyproject.toml
   Justfile
   CLAUDE.md  (+ AGENTS.md symlink)
   plans/  plan.html
 ```
 
-Vite builds into `datasette_auth_basic_login/static/gen/` and writes
+Vite builds into `datasette_accounts/static/gen/` and writes
 `manifest.json` into the package. `pyproject.toml` ships
 `static/**`, `templates/*`, `manifest.json` via `[tool.setuptools.package-data]`
 and excludes `frontend`.
@@ -68,12 +68,12 @@ and excludes `frontend`.
 Entry point:
 ```toml
 [project.entry-points.datasette]
-auth_basic_login = "datasette_auth_basic_login"
+accounts = "datasette_accounts"
 ```
 
 ## Migration namespace
 
-`Migrations("datasette-auth-basic-login.internal")` — distinct from
+`Migrations("datasette-accounts.internal")` — distinct from
 `datasette-user-profiles.internal` so migration bookkeeping never interleaves.
 
 ## Dev ports
@@ -88,7 +88,7 @@ Pre-commit: `just format`, `just check`, `uv run pytest`.
 ## Frontend serving
 
 Each page is its own Vite entry (`login`, `admin`, `account`). The base template
-calls `datasette_auth_basic_login_vite_entry(entrypoint)` (from `datasette-vite`)
+calls `datasette_accounts_vite_entry(entrypoint)` (from `datasette-vite`)
 in `extra_head`, mounts Svelte to `#app-root`, and passes initial data via
 `<script id="pageData">{{ page_data | tojson }}</script>`. Page data uses
 `model_dump()` (dict), never `model_dump_json()`.

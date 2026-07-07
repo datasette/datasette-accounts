@@ -1,4 +1,4 @@
-# datasette-auth-basic-login — dev recipes
+# datasette-accounts — dev recipes
 # Ports: Datasette 8006 / Vite 5180
 
 # Regenerate all TypeScript types (OpenAPI + page-data)
@@ -32,11 +32,11 @@ test:
 
 # Lint / format
 check:
-    uv run ruff check datasette_auth_basic_login tests
+    uv run ruff check datasette_accounts tests
     npm run check --prefix frontend
 
 format:
-    uv run ruff format datasette_auth_basic_login tests
+    uv run ruff format datasette_accounts tests
     npm run format --prefix frontend
 
 # Hash a password with the plugin's PBKDF2 scheme

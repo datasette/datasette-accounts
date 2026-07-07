@@ -31,7 +31,7 @@ secrets in config, exactly how datasette-acl bootstraps.
   config-seeded admin (puts a credential in metadata, blurs "accounts live in DB").
 
 ## D5 — Admin gate: **Real action, self-answered**
-Register `datasette-auth-basic-login-admin` and answer it (`root OR is_admin`) so it's
+Register `datasette-accounts-admin` and answer it (`root OR is_admin`) so it's
 composable with acl/config and visible to introspection.
 - *Rejected:* internal-only `require_admin()` helper (self-contained but invisible to
   Datasette's permission system, can't be granted externally).
@@ -60,7 +60,7 @@ Store `sha256(token)`, sign the cookie, absolute 14-day expiry; track
   (per-request writes, more logic) — the latter is an easy future add.
 
 ## D10 — Cookie & logout: **Own cookie + own logout**
-Own cookie `ds_auth_basic_login_session`; own `POST /-/logout` that DELETEs the
+Own cookie `ds_accounts_session`; own `POST /-/logout` that DELETEs the
 session row and clears the cookie. Correct server-side revocation.
 - *Rejected:* reusing `ds_actor` + core `/-/logout` (clears cookie only, leaves the
   session row live until expiry).
@@ -86,9 +86,9 @@ captured at creation and passed through the seed hook.
   duplicates), and username-only (no directory data at all). User chose cleanest
   separation.
 
-## D14 — Name: **datasette-auth-basic-login**
-Kept the working-directory name. Action `datasette-auth-basic-login-admin`, cookie
-`ds_auth_basic_login_session`.
+## D14 — Name: **datasette-accounts**
+Kept the working-directory name. Action `datasette-accounts-admin`, cookie
+`ds_accounts_session`.
 - *Rejected:* `datasette-auth-accounts` and `datasette-login`.
 - *Caveat noted:* "basic" can be confused with HTTP Basic auth (a different thing);
   kept anyway.
@@ -151,7 +151,7 @@ via `@router.POST` still runs for a `GET`. Consequences, both handled:
 
 ## Build-time resolution of the `← verify` flags (M0–M5, datasette 1.0a35)
 - **`sign`/`unsign` signature:** `datasette.sign(value, namespace='default')` —
-  explicit namespace `"datasette-auth-basic-login"` used (ticket 11.3). ✅
+  explicit namespace `"datasette-accounts"` used (ticket 11.3). ✅
 - **Admin self-answer mechanism:** global actions resolve via
   `permission_resources_sql` returning a `PermissionSQL` whose SQL runs against
   the internal DB (where `users` lives). Must include `actor_id` in `params` or

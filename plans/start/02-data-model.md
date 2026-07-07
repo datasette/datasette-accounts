@@ -2,15 +2,15 @@
 
 All tables live in the **internal database** (`datasette.get_internal_database()`),
 created idempotently in the `startup` hook via `sqlite-migrate`, migration namespace
-`datasette-auth-basic-login.internal`. Append-only migrations (`m001_…`, `m002_…`);
+`datasette-accounts.internal`. Append-only migrations (`m001_…`, `m002_…`);
 never edit a shipped migration.
 
 No name collision with `datasette-user-profiles` (`datasette_user_profiles`,
 `datasette_user_profile_photos`). **Actual table names carry the plugin prefix**
-(the internal DB is shared): `users` → `datasette_auth_basic_login_users`,
-`sessions` → `datasette_auth_basic_login_sessions`, `login_audit` →
-`datasette_auth_basic_login_login_audit`, `admin_audit` →
-`datasette_auth_basic_login_admin_audit`. This doc uses the short names for
+(the internal DB is shared): `users` → `datasette_accounts_users`,
+`sessions` → `datasette_accounts_sessions`, `login_audit` →
+`datasette_accounts_login_audit`, `admin_audit` →
+`datasette_accounts_admin_audit`. This doc uses the short names for
 readability; `db.py` defines the prefixed constants.
 
 ## `users`

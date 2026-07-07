@@ -11,9 +11,9 @@ from datasette_plugin_router import Router
 
 from . import security
 
-router = Router(title="datasette-auth-basic-login", version="0.1a0")
+router = Router(title="datasette-accounts", version="0.1a0")
 
-ADMIN_ACTION = "datasette-auth-basic-login-admin"
+ADMIN_ACTION = "datasette-accounts-admin"
 
 
 def _json_error(message, status):

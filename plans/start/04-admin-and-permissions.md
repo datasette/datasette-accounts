@@ -6,8 +6,8 @@ Register a Datasette 1.0 **action** via `register_actions`:
 
 ```python
 Action(
-    name="datasette-auth-basic-login-admin",
-    description="Manage datasette-auth-basic-login accounts",
+    name="datasette-accounts-admin",
+    description="Manage datasette-accounts accounts",
 )
 ```
 
@@ -35,7 +35,7 @@ permission introspection.
 Every management route checks:
 
 ```python
-if not await datasette.allowed(action="datasette-auth-basic-login-admin", actor=request.actor):
+if not await datasette.allowed(action="datasette-accounts-admin", actor=request.actor):
     raise Forbidden(...)
 ```
 
@@ -106,4 +106,4 @@ hook or accepted schema coupling).
 ### Menu integration
 
 `menu_links` adds an "Accounts" link to the Datasette menu only when
-`datasette.allowed(action="datasette-auth-basic-login-admin", actor)` is true.
+`datasette.allowed(action="datasette-accounts-admin", actor)` is true.

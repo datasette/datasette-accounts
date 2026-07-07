@@ -1,5 +1,5 @@
 [project]
-name = "datasette-auth-basic-login"
+name = "datasette-accounts"
 version = "0.1a0"
 description = "Username/password authentication for Datasette with database-backed accounts"
 readme = "README.md"
@@ -19,17 +19,17 @@ dependencies = [
 dev = ["pytest", "pytest-asyncio", "ruff>=0.15.0"]
 
 [project.entry-points.datasette]
-auth_basic_login = "datasette_auth_basic_login"
+accounts = "datasette_accounts"
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.package-data]
-datasette_auth_basic_login = ["static/**/*", "templates/*", "manifest.json"]
+datasette_accounts = ["static/**/*", "templates/*", "manifest.json"]
 
 [tool.setuptools.packages.find]
-include = ["datasette_auth_basic_login*"]
+include = ["datasette_accounts*"]
 exclude = ["frontend*"]
 
 [tool.pytest.ini_options]

@@ -15,7 +15,7 @@ from ..router import require_admin_page, router
 async def _render(datasette, entrypoint, page_title, page_data):
     return Response.html(
         await datasette.render_template(
-            "basic_login_base.html",
+            "accounts_base.html",
             {
                 "page_title": page_title,
                 "entrypoint": entrypoint,

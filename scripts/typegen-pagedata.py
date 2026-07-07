@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from datasette_auth_basic_login.page_data import __exports__
+from datasette_accounts.page_data import __exports__
 
 out_dir = Path("frontend/src/page_data")
 out_dir.mkdir(parents=True, exist_ok=True)

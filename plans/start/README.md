@@ -1,6 +1,6 @@
-# datasette-auth-basic-login — start plan
+# datasette-accounts — start plan
 
-This directory is the pre-build design spec for **datasette-auth-basic-login**, a
+This directory is the pre-build design spec for **datasette-accounts**, a
 Datasette authentication plugin that stores accounts in the internal database,
 adds an admin permission for provisioning/revoking/managing accounts, and ships a
 Svelte/Vite/TS frontend built with the `datasette-alex-fullstack-skill` conventions.

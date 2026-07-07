@@ -1,6 +1,6 @@
 """Internal-database schema (append-only migrations).
 
-Namespace ``datasette-auth-basic-login.internal`` — distinct from
+Namespace ``datasette-accounts.internal`` — distinct from
 ``datasette-user-profiles.internal`` so migration bookkeeping never interleaves.
 Never edit a shipped migration; add ``m002_…`` etc. instead.
 """
@@ -8,14 +8,14 @@ Never edit a shipped migration; add ``m002_…`` etc. instead.
 from sqlite_utils import Database
 from sqlite_migrate import Migrations
 
-internal_migrations = Migrations("datasette-auth-basic-login.internal")
+internal_migrations = Migrations("datasette-accounts.internal")
 
 
 @internal_migrations()
 def m001_initial(db: Database):
     db.executescript(
         """
-        CREATE TABLE datasette_auth_basic_login_users (
+        CREATE TABLE datasette_accounts_users (
             id TEXT PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
@@ -28,7 +28,7 @@ def m001_initial(db: Database):
             updated_at TEXT NOT NULL
         );
 
-        CREATE TABLE datasette_auth_basic_login_sessions (
+        CREATE TABLE datasette_accounts_sessions (
             token_sha256 TEXT PRIMARY KEY,
             actor_id TEXT NOT NULL,
             created_at TEXT NOT NULL,
@@ -37,10 +37,10 @@ def m001_initial(db: Database):
             user_agent TEXT,
             ip TEXT
         );
-        CREATE INDEX idx_basic_login_sessions_actor
-            ON datasette_auth_basic_login_sessions (actor_id);
+        CREATE INDEX idx_accounts_sessions_actor
+            ON datasette_accounts_sessions (actor_id);
 
-        CREATE TABLE datasette_auth_basic_login_login_audit (
+        CREATE TABLE datasette_accounts_login_audit (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT,
             ip TEXT,
@@ -48,7 +48,7 @@ def m001_initial(db: Database):
             success INTEGER NOT NULL
         );
 
-        CREATE TABLE datasette_auth_basic_login_admin_audit (
+        CREATE TABLE datasette_accounts_admin_audit (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
             operation TEXT NOT NULL,

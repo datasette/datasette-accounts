@@ -148,7 +148,7 @@ wheels = [
 ]
 
 [[package]]
-name = "datasette-auth-basic-login"
+name = "datasette-accounts"
 version = "0.1a0"
 source = { editable = "." }
 dependencies = [

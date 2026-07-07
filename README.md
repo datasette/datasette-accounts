@@ -1,4 +1,4 @@
-# datasette-auth-basic-login
+# datasette-accounts
 
 Username/password authentication for [Datasette](https://datasette.io) with
 **accounts stored in the internal database** (not in plugin config). Provisioning,
@@ -14,7 +14,7 @@ admin UI and JSON API, guarded by a real Datasette 1.0 permission.
 - **Server-side sessions** — revocable per-device, with "log out everywhere" and
   an admin session list. Disabling an account or revoking a session takes effect
   on the next request.
-- **A registered admin action** (`datasette-auth-basic-login-admin`) that is
+- **A registered admin action** (`datasette-accounts-admin`) that is
   self-answered for `root` and enabled admins, and composes with `datasette-acl`
   / config `allow` blocks.
 - **Security hardening** built in: timing-safe login (no username enumeration),
@@ -28,7 +28,7 @@ admin UI and JSON API, guarded by a real Datasette 1.0 permission.
 ## Installation
 
 ```bash
-datasette install datasette-auth-basic-login
+datasette install datasette-accounts
 ```
 
 Requires Datasette **1.0a23+** and Python 3.10+.
@@ -73,7 +73,7 @@ datasette hash-password
 
 ## Configuration
 
-All options live under the `datasette-auth-basic-login` plugin block and have safe
+All options live under the `datasette-accounts` plugin block and have safe
 defaults (a zero-config install works — it just warns about persistence):
 
 | option | type | default | meaning |
@@ -88,7 +88,7 @@ defaults (a zero-config install works — it just warns about persistence):
 
 ```yaml
 plugins:
-  datasette-auth-basic-login:
+  datasette-accounts:
     session_ttl_days: 30
     password_min_length: 12
     secure_cookie: true        # recommended behind a TLS-terminating proxy

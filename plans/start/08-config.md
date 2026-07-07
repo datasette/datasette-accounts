@@ -1,6 +1,6 @@
 # 08 — Plugin configuration
 
-Config lives under the `datasette-auth-basic-login` plugin block in Datasette
+Config lives under the `datasette-accounts` plugin block in Datasette
 metadata/config. All options have safe defaults; a zero-config install works (it just
 warns about persistence).
 
@@ -17,7 +17,7 @@ warns about persistence).
 
 ```yaml
 plugins:
-  datasette-auth-basic-login:
+  datasette-accounts:
     session_ttl_days: 30
     password_min_length: 12
     lockout_threshold: 8

@@ -1,5 +1,5 @@
 {
-  "name": "datasette-auth-basic-login-frontend",
+  "name": "datasette-accounts-frontend",
   "private": true,
   "type": "module",
   "scripts": {

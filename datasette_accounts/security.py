@@ -7,9 +7,9 @@ Datasette middleware. See 03-authentication.md and 04-unconditional-csrf-checks.
 import re
 from urllib.parse import unquote, urlparse
 
-PLUGIN_NAME = "datasette-auth-basic-login"
-COOKIE_NAME = "ds_auth_basic_login_session"
-SIGN_NAMESPACE = "datasette-auth-basic-login"
+PLUGIN_NAME = "datasette-accounts"
+COOKIE_NAME = "ds_accounts_session"
+SIGN_NAMESPACE = "datasette-accounts"
 
 DEFAULTS = {
     "session_ttl_days": 14,

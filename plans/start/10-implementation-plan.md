@@ -32,7 +32,7 @@ generation is therefore skipped. Ports: Datasette 8006 / Vite 5180.
 
 ## M0 — Scaffold
 - `pyproject.toml` (deps from [`01-architecture.md`](01-architecture.md)), entry point
-  `auth_basic_login`, package-data for `static/**`, `templates/*`, `manifest.json`.
+  `accounts`, package-data for `static/**`, `templates/*`, `manifest.json`.
 - `Justfile`, `CLAUDE.md` (+ `AGENTS.md` symlink), `LICENSE` (Apache-2.0), `README.md`.
 - `frontend/` skeleton per the fullstack skill (vite.config, tsconfig, package.json,
   `store.svelte.ts`, `load.ts`). Ports 8006 / 5180.
@@ -40,7 +40,7 @@ generation is therefore skipped. Ports: Datasette 8006 / Vite 5180.
 
 ## M1 — Internal DB + migrations
 - `internal_migrations.py` (`users`, `sessions`, `login_audit`, **`admin_audit`**),
-  namespace `datasette-auth-basic-login.internal`.
+  namespace `datasette-accounts.internal`.
 - `startup` hook applies migrations; logs the **ephemeral-internal-DB warning**;
   runs the startup **expired-session purge** and **`login_audit` retention delete**
   (no background thread — see [`02-data-model.md`](02-data-model.md)).
@@ -57,7 +57,7 @@ generation is therefore skipped. Ports: Datasette 8006 / Vite 5180.
   `DUMMY_HASH` constant. Enforce `password_min_length` + fixed **1024-char max**.
 - `sessions.py`: mint / `sha256` / insert / lookup / revoke-one / revoke-all /
   expire / **bulk-purge-expired**. Cookie sign/unsign use the explicit
-  `"datasette-auth-basic-login"` namespace.
+  `"datasette-accounts"` namespace.
 - `register_commands` → `datasette hash-password`.
 - *Test:* async wrappers return identical results to the sync functions;
   `verify_password` matches; expired/revoked lookups return nothing; 1025-char
@@ -133,7 +133,7 @@ generation is therefore skipped. Ports: Datasette 8006 / Vite 5180.
 - `page_data.py` Pydantic models + `scripts/typegen-pagedata.py`; `just types`.
 - Pages: `login`, `admin` (user table + per-user session drawer), `account`.
 - `openapi-fetch` client wired to the M3–M5 endpoints; `#pageData` bootstrap.
-- Base template `basic_login_base.html` + `vite_entry`.
+- Base template `accounts_base.html` + `vite_entry`.
 - *Manual verify:* full flow through the browser via the `/run` skill — root →
   create admin → log in as admin → create user (must-change) → user logs in, forced
   change → admin disables user → user logged out → admin lists/revokes sessions.

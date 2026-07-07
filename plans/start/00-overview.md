@@ -2,14 +2,14 @@
 
 ## What we're building
 
-A Datasette plugin, **`datasette-auth-basic-login`**, that provides username/password
+A Datasette plugin, **`datasette-accounts`**, that provides username/password
 authentication where **accounts live in Datasette's internal database** (not in
 plugin config, unlike `datasette-auth-passwords`). It adds:
 
 1. **Database-backed accounts** — create/manage login users at runtime, persisted in
    the internal DB.
 2. **An admin permission** — a registered Datasette 1.0 *action*
-   (`datasette-auth-basic-login-admin`) that lets an admin provision new accounts,
+   (`datasette-accounts-admin`) that lets an admin provision new accounts,
    revoke access, reset passwords, and toggle who else is an admin.
 3. **A Svelte/Vite/TS frontend** built per `datasette-alex-fullstack-skill` — a login
    page, an admin dashboard, and a self-service account page.

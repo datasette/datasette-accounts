@@ -32,9 +32,9 @@ def register_routes():
 def extra_template_vars(datasette):
     entry = vite_entry(
         datasette=datasette,
-        plugin_package="datasette_auth_basic_login",
+        plugin_package="datasette_accounts",
     )
-    return {"datasette_auth_basic_login_vite_entry": entry}
+    return {"datasette_accounts_vite_entry": entry}
 
 
 @hookimpl
@@ -42,7 +42,7 @@ def register_actions(datasette):
     return [
         Action(
             name=ADMIN_ACTION,
-            description="Manage datasette-auth-basic-login accounts",
+            description="Manage datasette-accounts accounts",
         )
     ]
 
@@ -62,10 +62,10 @@ def permission_resources_sql(datasette, actor, action):
     return PermissionSQL(
         sql=f"""
             SELECT NULL AS parent, NULL AS child, 1 AS allow,
-                   'datasette-auth-basic-login: root' AS reason
+                   'datasette-accounts: root' AS reason
             WHERE :actor_id = 'root'
             UNION ALL
-            SELECT NULL, NULL, 1, 'datasette-auth-basic-login: is_admin'
+            SELECT NULL, NULL, 1, 'datasette-accounts: is_admin'
             FROM {db.USERS}
             WHERE id = :actor_id AND {db.ENABLED_ADMIN_PREDICATE}
         """,
@@ -89,7 +89,7 @@ def startup(datasette):
         path = getattr(internal, "path", None) or ""
         if os.path.basename(path).startswith("datasette_temp_"):
             click.secho(
-                "datasette-auth-basic-login: the internal database is EPHEMERAL — "
+                "datasette-accounts: the internal database is EPHEMERAL — "
                 "accounts and sessions will be lost on exit. Pass --internal "
                 "path.db to persist them.",
                 fg="yellow",
@@ -266,7 +266,7 @@ def register_commands(cli):
     @cli.command(name="hash-password")
     @click.argument("password", required=False)
     def hash_password_command(password):
-        """Hash a password with the datasette-auth-basic-login PBKDF2 scheme."""
+        """Hash a password with the datasette-accounts PBKDF2 scheme."""
         if not password:
             password = click.prompt(
                 "Password", hide_input=True, confirmation_prompt=True

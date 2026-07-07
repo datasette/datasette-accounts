@@ -1,4 +1,4 @@
-# datasette-auth-basic-login
+# datasette-accounts
 
 Username/password auth for Datasette with **database-backed accounts** in the
 internal DB, an admin permission, and a Svelte/Vite/TS frontend.
@@ -11,8 +11,8 @@ Security review findings are in `todos/security-review/` (all applied + built).
 - M0–M8 built and tested (`uv run pytest`, 22 tests green; `npm run check` clean).
   All milestones complete.
 - Frontend: Svelte 5 pages (`frontend/src/pages/{login,admin,account}`) built by
-  Vite into `datasette_auth_basic_login/static/gen/` + `manifest.json` (shipped).
-  `routes/pages.py` renders `templates/basic_login_base.html`, which mounts the
+  Vite into `datasette_accounts/static/gen/` + `manifest.json` (shipped).
+  `routes/pages.py` renders `templates/accounts_base.html`, which mounts the
   page bundle on `#app-root` and reads `#pageData`. Pages call the JSON API via
   `frontend/src/lib/api.ts` (`postJSON`), not openapi-fetch.
 - Rebuild the frontend after changing Svelte/TS: `just frontend` (or `just types`

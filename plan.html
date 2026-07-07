@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>datasette-auth-basic-login — plan</title>
+<title>datasette-accounts — plan</title>
 <style>
   :root {
     --bg: #ffffff; --fg: #1a1a1a; --muted: #5b6470; --line: #e3e6ea;
@@ -64,7 +64,7 @@
 <body>
 <div class="wrap">
 <header>
-  <h1>datasette-auth-basic-login</h1>
+  <h1>datasette-accounts</h1>
   <p class="sub">Database-backed login for Datasette, with admin account management and a Svelte/Vite/TS frontend. Pre-build design spec.</p>
   <span class="status">Awaiting Fable 5 review — no code written yet</span>
 </header>
@@ -91,7 +91,7 @@
 </div>
 
 <h2>Data model — internal DB</h2>
-<p>Migration namespace <code>datasette-auth-basic-login.internal</code>. No collision with user-profiles' tables.</p>
+<p>Migration namespace <code>datasette-accounts.internal</code>. No collision with user-profiles' tables.</p>
 <div class="tablewrap">
 <table>
   <tr><th>Table</th><th>Purpose</th><th>Key columns</th></tr>
@@ -105,7 +105,7 @@
 <h2>Authentication flow</h2>
 <div class="grid">
   <div class="card"><h3>Sessions</h3><p class="kv">Server-side, revocable. <code>token = secrets.token_urlsafe(32)</code>; store <code>sha256(token)</code>; cookie carries <code>sign(token)</code>; absolute 14-day expiry.</p></div>
-  <div class="card"><h3>Cookie</h3><p class="kv"><code>ds_auth_basic_login_session</code> (own, not <code>ds_actor</code>) · httponly · SameSite=Lax · Secure on HTTPS.</p></div>
+  <div class="card"><h3>Cookie</h3><p class="kv"><code>ds_accounts_session</code> (own, not <code>ds_actor</code>) · httponly · SameSite=Lax · Secure on HTTPS.</p></div>
 </div>
 <p><code>actor_from_request</code> re-checks the session + account on <strong>every request</strong> — so disabling an account or deleting a session logs the user out on the next request, and renames / admin-flag changes take effect live.</p>
 <pre>cookie → unsign → sha256 → sessions lookup → not expired?
@@ -117,7 +117,7 @@
 
 <h2>Admin &amp; permissions</h2>
 <ul>
-  <li>Register action <code>datasette-auth-basic-login-admin</code>, <strong>self-answered</strong> as <code>root OR users.is_admin=1</code> (via <code>permission_resources_sql</code>) — composable with acl/config, visible to introspection.</li>
+  <li>Register action <code>datasette-accounts-admin</code>, <strong>self-answered</strong> as <code>root OR users.is_admin=1</code> (via <code>permission_resources_sql</code>) — composable with acl/config, visible to introspection.</li>
   <li><strong>Bootstrap</strong> via <code>datasette --root</code>: root is always admin, creates the first real admin, then steps back. No secrets in config.</li>
   <li><strong>Admin UI</strong> (Svelte, <code>/-/admin/users</code>): create · reset-password · toggle-admin · disable (reversible, kills sessions) · hard-delete · unlock · list/revoke sessions · log-out-everywhere.</li>
   <li><strong>Last-admin guard</strong>: refuses to disable/delete/demote the final admin (synchronous count-then-write, HTTP 409), like acl's last-manager guard.</li>
@@ -156,7 +156,7 @@
   <tr><td class="d">D11</td><td>Disable + delete, guarded</td><td class="rej">disable-only · no guard</td></tr>
   <tr><td class="d">D12</td><td>Change-pw + forced first change</td><td class="rej">no forced flow · admin-only pw</td></tr>
   <tr><td class="d">D13</td><td>Auth-only table, defer to profiles</td><td class="rej">store+feed · username-only</td></tr>
-  <tr><td class="d">D14</td><td>Name: datasette-auth-basic-login</td><td class="rej">-auth-accounts · -login</td></tr>
+  <tr><td class="d">D14</td><td>Name: datasette-accounts</td><td class="rej">-auth-accounts · -login</td></tr>
   <tr><td class="d">D15</td><td>Hard lockout</td><td class="rej">nothing · soft throttle</td></tr>
 </table>
 </div>

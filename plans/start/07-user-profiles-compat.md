@@ -64,4 +64,4 @@ at creation (accepting schema coupling to profiles) or ask upstream for a runtim
 
 Both plugins use the internal DB; profiles' tables are `datasette_user_profiles` /
 `datasette_user_profile_photos`. Our `users` / `sessions` / `login_audit` and our
-`datasette-auth-basic-login.internal` migration namespace do not collide.
+`datasette-accounts.internal` migration namespace do not collide.

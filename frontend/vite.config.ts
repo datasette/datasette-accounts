@@ -42,7 +42,7 @@ export default defineConfig({
   ],
   build: {
     manifest: "manifest.json",
-    outDir: "../datasette_auth_basic_login",
+    outDir: "../datasette_accounts",
     assetsDir: "static/gen",
     emptyOutDir: false,
     rollupOptions: {

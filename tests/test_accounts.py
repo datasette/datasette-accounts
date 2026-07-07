@@ -3,9 +3,9 @@ import json
 import pytest
 from datasette.app import Datasette
 
-from datasette_auth_basic_login import db
-from datasette_auth_basic_login.passwords import hash_password
-from datasette_auth_basic_login.security import COOKIE_NAME
+from datasette_accounts import db
+from datasette_accounts.passwords import hash_password
+from datasette_accounts.security import COOKIE_NAME
 
 JSON = {"content-type": "application/json"}
 
@@ -13,7 +13,7 @@ JSON = {"content-type": "application/json"}
 async def make_ds(**plugin_config):
     metadata = {}
     if plugin_config:
-        metadata = {"plugins": {"datasette-auth-basic-login": plugin_config}}
+        metadata = {"plugins": {"datasette-accounts": plugin_config}}
     ds = Datasette(memory=True, metadata=metadata)
     await ds.invoke_startup()
     return ds
@@ -66,17 +66,17 @@ async def login(ds, username, password, **extra):
 async def test_plugin_installed_and_tables_created():
     ds = await make_ds()
     resp = await ds.client.get("/-/plugins.json")
-    assert "datasette-auth-basic-login" in {p["name"] for p in resp.json()}
+    assert "datasette-accounts" in {p["name"] for p in resp.json()}
     internal = ds.get_internal_database()
     tables = await internal.execute(
         "SELECT name FROM sqlite_master WHERE type='table' "
-        "AND name LIKE 'datasette_auth_basic_login%'"
+        "AND name LIKE 'datasette_accounts%'"
     )
     assert sorted(r[0] for r in tables.rows) == [
-        "datasette_auth_basic_login_admin_audit",
-        "datasette_auth_basic_login_login_audit",
-        "datasette_auth_basic_login_sessions",
-        "datasette_auth_basic_login_users",
+        "datasette_accounts_admin_audit",
+        "datasette_accounts_login_audit",
+        "datasette_accounts_sessions",
+        "datasette_accounts_users",
     ]
 
 
@@ -112,7 +112,7 @@ async def test_unknown_and_wrong_password_are_indistinguishable():
 async def test_unknown_username_still_verifies_once(monkeypatch):
     ds = await make_ds()
     calls = {"n": 0}
-    import datasette_auth_basic_login.routes.api as api
+    import datasette_accounts.routes.api as api
 
     real = api.averify_dummy
 
@@ -252,7 +252,7 @@ async def test_admin_action_grant_and_disabled_denied():
     non_admin_id = await insert_user(ds, "bob")
 
     async def allowed(actor):
-        return await ds.allowed(action="datasette-auth-basic-login-admin", actor=actor)
+        return await ds.allowed(action="datasette-accounts-admin", actor=actor)
 
     assert await allowed({"id": admin_id})
     assert await allowed({"id": "root"})

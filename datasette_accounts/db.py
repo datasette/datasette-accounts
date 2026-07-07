@@ -12,10 +12,10 @@ import json as jsonlib
 from ulid import ULID
 
 # Namespaced table names (the internal DB is shared with other plugins).
-USERS = "datasette_auth_basic_login_users"
-SESSIONS = "datasette_auth_basic_login_sessions"
-LOGIN_AUDIT = "datasette_auth_basic_login_login_audit"
-ADMIN_AUDIT = "datasette_auth_basic_login_admin_audit"
+USERS = "datasette_accounts_users"
+SESSIONS = "datasette_accounts_sessions"
+LOGIN_AUDIT = "datasette_accounts_login_audit"
+ADMIN_AUDIT = "datasette_accounts_admin_audit"
 
 # Single source of truth for "is an admin": used by both the permission grant
 # SQL and the last-admin guard so the two definitions can never drift.

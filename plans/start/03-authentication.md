@@ -40,7 +40,7 @@ validation line.
 
 - Mint: `token = secrets.token_urlsafe(32)`.
 - Store: `sha256(token)` as `sessions.token_sha256` (never the raw token).
-- Cookie: `datasette.sign(token, "datasette-auth-basic-login")` — an **explicit
+- Cookie: `datasette.sign(token, "datasette-accounts")` — an **explicit
   namespace** (not the default), so this value can't be confused with anything
   else signed by core or another plugin. `unsign` uses the same namespace.
   ← verify the exact `sign`/`unsign` signature in the pinned Datasette alpha.
@@ -48,8 +48,8 @@ validation line.
 
 ## Cookie
 
-- Name: **`ds_auth_basic_login_session`** (our own; NOT `ds_actor`).
-- Value: `datasette.sign(raw_token, "datasette-auth-basic-login")`.
+- Name: **`ds_accounts_session`** (our own; NOT `ds_actor`).
+- Value: `datasette.sign(raw_token, "datasette-accounts")`.
 - Attributes: `httponly=True`, `samesite="Lax"`, `path="/"`, TTL matches session
   expiry, and `secure` per the **`secure_cookie`** option:
   - `secure_cookie: "auto"` (default) — Secure when the request is HTTPS **or**
@@ -71,8 +71,8 @@ validation line.
 Runs on every request. The DB is the source of truth:
 
 ```
-1. read ds_auth_basic_login_session cookie -> None if absent
-2. token = datasette.unsign(cookie, "datasette-auth-basic-login")  -> None if tampered
+1. read ds_accounts_session cookie -> None if absent
+2. token = datasette.unsign(cookie, "datasette-accounts")  -> None if tampered
 3. row = SELECT * FROM sessions WHERE token_sha256 = sha256(token)
 4. if no row OR expires_at <= now:          -> None (and delete expired row)
 5. user = SELECT * FROM users WHERE id = row.actor_id
@@ -169,7 +169,7 @@ use, and would leave the session row alive).
 
 ```
 POST /-/logout/perform
-  DELETE FROM sessions WHERE token_sha256 = sha256(unsign(cookie, "datasette-auth-basic-login"))
+  DELETE FROM sessions WHERE token_sha256 = sha256(unsign(cookie, "datasette-accounts"))
   clear the cookie
   redirect to "/"
 ```
