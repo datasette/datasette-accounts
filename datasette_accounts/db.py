@@ -65,13 +65,16 @@ class InvalidGrantError(Exception):
 
 
 def now_iso() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    """Current UTC time as millisecond ISO-8601 with a +00:00 offset.
 
-
-def _iso_minus_days(days: int) -> str:
-    return (
-        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days)
-    ).isoformat()
+    Byte-identical to the generated queries' SQL clock
+    (``strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00'``), so timestamps written
+    in SQL and this "now" — used only for the read-side ``locked_until`` /
+    ``expires_at`` comparisons — sort and compare lexicographically.
+    """
+    return datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="milliseconds"
+    )
 
 
 def new_id() -> str:
@@ -150,7 +153,6 @@ async def record_login_attempt(db, username, ip, success, reason=None):
             conn,
             username=username,
             ip=ip,
-            timestamp=now_iso(),
             success=1 if success else 0,
             reason=reason,
         )
@@ -186,14 +188,11 @@ async def register_failed_attempt(db, user_id, lockout_threshold, lockout_minute
     """
 
     def write(conn):
-        gen.bump_failed_attempts(conn, updated_at=now_iso(), user_id=user_id)
+        gen.bump_failed_attempts(conn, user_id=user_id)
         count = gen.select_failed_attempts(conn, user_id=user_id)
         if lockout_threshold and count >= lockout_threshold:
-            locked_until = (
-                datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(minutes=lockout_minutes)
-            ).isoformat()
-            gen.set_locked_until(conn, locked_until=locked_until, user_id=user_id)
+            # SQL computes `now + lockout_minutes`.
+            gen.set_locked_until(conn, lockout_minutes=lockout_minutes, user_id=user_id)
         return count
 
     return await db.execute_write_fn(write)
@@ -202,25 +201,18 @@ async def register_failed_attempt(db, user_id, lockout_threshold, lockout_minute
 async def record_login_success(db, user_id):
     """Clear the lockout counters and stamp last_login_at on a successful login."""
     await db.execute_write_fn(
-        lambda conn: gen.record_login_success(
-            conn, timestamp=now_iso(), user_id=user_id
-        )
+        lambda conn: gen.record_login_success(conn, user_id=user_id)
     )
 
 
 async def create_session(db, actor_id, token_sha, ttl_days, user_agent, ip):
-    ts = now_iso()
-    expires_at = (
-        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=ttl_days)
-    ).isoformat()
+    # SQL stamps created_at/last_seen_at = now and expires_at = now + ttl_days.
     await db.execute_write_fn(
         lambda conn: gen.insert_session(
             conn,
             token_sha256=token_sha,
             actor_id=actor_id,
-            created_at=ts,
-            expires_at=expires_at,
-            last_seen_at=ts,
+            ttl_days=ttl_days,
             user_agent=user_agent,
             ip=ip,
         )
@@ -228,7 +220,12 @@ async def create_session(db, actor_id, token_sha, ttl_days, user_agent, ip):
 
 
 async def touch_last_seen(db, token_sha, stored_last_seen):
-    """Throttled last_seen_at update — skip if refreshed within the window."""
+    """Throttled last_seen_at update — skip if refreshed within the window.
+
+    The throttle stays in Python (comparing the already-loaded ``last_seen_at``
+    against now) so a fresh session avoids touching the internal DB's single
+    write connection at all; the update itself stamps ``now`` in SQL.
+    """
     try:
         last = datetime.datetime.fromisoformat(stored_last_seen)
     except (TypeError, ValueError):
@@ -240,9 +237,7 @@ async def touch_last_seen(db, token_sha, stored_last_seen):
         if (now - last).total_seconds() < LAST_SEEN_THROTTLE_SECONDS:
             return
     await db.execute_write_fn(
-        lambda conn: gen.touch_last_seen(
-            conn, last_seen_at=now.isoformat(), token_sha256=token_sha
-        )
+        lambda conn: gen.touch_last_seen(conn, token_sha256=token_sha)
     )
 
 
@@ -253,16 +248,15 @@ async def delete_session(db, token_sha):
 
 
 async def delete_expired_sessions(db):
-    await db.execute_write_fn(
-        lambda conn: gen.delete_expired_sessions(conn, now=now_iso())
-    )
+    await db.execute_write_fn(gen.delete_expired_sessions)
 
 
 async def purge_login_audit(db, retention_days):
     if not retention_days:
         return
+    # SQL computes the cutoff as `now - retention_days`.
     await db.execute_write_fn(
-        lambda conn: gen.purge_login_audit(conn, cutoff=_iso_minus_days(retention_days))
+        lambda conn: gen.purge_login_audit(conn, retention_days=retention_days)
     )
 
 
@@ -274,7 +268,6 @@ async def purge_login_audit(db, retention_days):
 def _audit(conn, operation, actor_id, target_id, detail=None):
     gen.insert_admin_audit(
         conn,
-        timestamp=now_iso(),
         operation=operation,
         actor_id=actor_id,
         target_id=target_id,
@@ -286,7 +279,6 @@ async def create_user(
     db, actor_id, username, password_hash, is_admin, must_change_password
 ):
     user_id = new_id()
-    ts = now_iso()
 
     def write(conn):
         if gen.username_exists(conn, username=username):
@@ -298,8 +290,6 @@ async def create_user(
             password_hash=password_hash,
             is_admin=1 if is_admin else 0,
             must_change_password=1 if must_change_password else 0,
-            created_at=ts,
-            updated_at=ts,
         )
         _audit(
             conn,
@@ -315,9 +305,7 @@ async def create_user(
 
 async def reset_password(db, actor_id, target_id, password_hash):
     def write(conn):
-        gen.reset_password(
-            conn, password_hash=password_hash, updated_at=now_iso(), user_id=target_id
-        )
+        gen.reset_password(conn, password_hash=password_hash, user_id=target_id)
         gen.delete_sessions_for_actor(conn, actor_id=target_id)
         _audit(conn, "reset-password", actor_id, target_id)
 
@@ -334,9 +322,7 @@ async def toggle_admin(db, actor_id, target_id):
         # Demoting the last enabled admin is forbidden.
         if is_admin and not disabled:
             _guard_last_admin(conn, exclude_id=target_id)
-        gen.set_user_admin(
-            conn, is_admin=new_value, updated_at=now_iso(), user_id=target_id
-        )
+        gen.set_user_admin(conn, is_admin=new_value, user_id=target_id)
         _audit(conn, "toggle-admin", actor_id, target_id, {"is_admin": bool(new_value)})
         return new_value
 
@@ -347,7 +333,7 @@ async def disable_user(db, actor_id, target_id):
     def write(conn):
         if gen.select_user_is_enabled_admin(conn, user_id=target_id):
             _guard_last_admin(conn, exclude_id=target_id)
-        gen.set_user_disabled(conn, disabled=1, updated_at=now_iso(), user_id=target_id)
+        gen.set_user_disabled(conn, disabled=1, user_id=target_id)
         gen.delete_sessions_for_actor(conn, actor_id=target_id)
         _audit(conn, "disable", actor_id, target_id)
 
@@ -356,7 +342,7 @@ async def disable_user(db, actor_id, target_id):
 
 async def enable_user(db, actor_id, target_id):
     def write(conn):
-        gen.set_user_disabled(conn, disabled=0, updated_at=now_iso(), user_id=target_id)
+        gen.set_user_disabled(conn, disabled=0, user_id=target_id)
         _audit(conn, "enable", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -375,7 +361,7 @@ async def delete_user(db, actor_id, target_id):
 
 async def unlock_user(db, actor_id, target_id):
     def write(conn):
-        gen.clear_lockout(conn, updated_at=now_iso(), user_id=target_id)
+        gen.clear_lockout(conn, user_id=target_id)
         _audit(conn, "unlock", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -401,9 +387,7 @@ async def change_own_password(db, user_id, password_hash, current_token_sha):
     """Set a new password, clear the forced-change flag, revoke OTHER sessions."""
 
     def write(conn):
-        gen.change_own_password(
-            conn, password_hash=password_hash, updated_at=now_iso(), user_id=user_id
-        )
+        gen.change_own_password(conn, password_hash=password_hash, user_id=user_id)
         gen.delete_other_sessions_for_actor(
             conn, actor_id=user_id, token_sha256=current_token_sha
         )
@@ -513,8 +497,6 @@ async def grant_capability(
     if principal_type == "group" and group_val is None:
         raise InvalidGrantError("group grant requires a group")
 
-    ts = now_iso()
-
     def write(conn):
         if principal_type == "actor":
             if not gen.user_id_exists(conn, user_id=actor_val):
@@ -541,7 +523,6 @@ async def grant_capability(
             principal_type=principal_type,
             actor_id=actor_val,
             group_id=group_val,
-            created_at=ts,
             created_by=actor_id,
         )
         if new_id is None:
@@ -614,13 +595,10 @@ async def set_site_message(db, actor_id, key, body):
     if not messages.is_slot(key):
         raise ValueError(f"unknown message slot: {key}")
     body = (body or "").strip()
-    ts = now_iso()
 
     def write(conn):
         if body:
-            gen.upsert_site_message(
-                conn, key=key, body=body, updated_at=ts, updated_by=actor_id
-            )
+            gen.upsert_site_message(conn, key=key, body=body, updated_by=actor_id)
             _audit(conn, "set-message", actor_id, None, {"key": key})
         else:
             # RETURNING key is non-empty only when a row existed.

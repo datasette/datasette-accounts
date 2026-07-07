@@ -22,3 +22,4 @@ datasette_accounts/manifest.json
 # solite codegen IR (intermediate; regenerate with `just codegen-queries`).
 # Only the generated Python (_queries_generated.py) is checked in.
 datasette_accounts/sql/_queries.sql.json
+*.db

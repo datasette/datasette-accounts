@@ -179,15 +179,15 @@ def insert_user(
     password_hash: str,
     is_admin: int,
     must_change_password: int,
-    created_at: str,
-    updated_at: str,
 ) -> None:
     sql = """\
 INSERT INTO datasette_accounts_users
     (id, username, password_hash, is_admin, disabled, must_change_password,
      failed_attempts, locked_until, created_at, updated_at)
 VALUES ($id::text, $username::text, $password_hash::text, $is_admin::integer, 0,
-        $must_change_password::integer, 0, NULL, $created_at::text, $updated_at::text);
+        $must_change_password::integer, 0, NULL,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00');
 """
     params = {
         "id::text": id,
@@ -195,127 +195,111 @@ VALUES ($id::text, $username::text, $password_hash::text, $is_admin::integer, 0,
         "password_hash::text": password_hash,
         "is_admin::integer": is_admin,
         "must_change_password::integer": must_change_password,
-        "created_at::text": created_at,
-        "updated_at::text": updated_at,
     }
     conn.execute(sql, params)
     return None
 
 
-def bump_failed_attempts(
-    conn: sqlite3.Connection, updated_at: str, user_id: str
+def bump_failed_attempts(conn: sqlite3.Connection, user_id: str) -> None:
+    sql = """\
+UPDATE datasette_accounts_users
+SET failed_attempts = failed_attempts + 1,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
+"""
+    params = {"user_id::text": user_id}
+    conn.execute(sql, params)
+    return None
+
+
+def set_locked_until(
+    conn: sqlite3.Connection, lockout_minutes: int, user_id: str
 ) -> None:
     sql = """\
 UPDATE datasette_accounts_users
-SET failed_attempts = failed_attempts + 1, updated_at = $updated_at::text
+SET locked_until =
+    strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d minutes', $lockout_minutes::integer))
+    || '+00:00'
 WHERE id = $user_id::text;
 """
-    params = {"updated_at::text": updated_at, "user_id::text": user_id}
+    params = {"lockout_minutes::integer": lockout_minutes, "user_id::text": user_id}
     conn.execute(sql, params)
     return None
 
 
-def set_locked_until(conn: sqlite3.Connection, locked_until: str, user_id: str) -> None:
-    sql = """\
-UPDATE datasette_accounts_users
-SET locked_until = $locked_until::text WHERE id = $user_id::text;
-"""
-    params = {"locked_until::text": locked_until, "user_id::text": user_id}
-    conn.execute(sql, params)
-    return None
-
-
-def clear_lockout(conn: sqlite3.Connection, updated_at: str, user_id: str) -> None:
-    sql = """\
-UPDATE datasette_accounts_users
-SET failed_attempts = 0, locked_until = NULL, updated_at = $updated_at::text
-WHERE id = $user_id::text;
-"""
-    params = {"updated_at::text": updated_at, "user_id::text": user_id}
-    conn.execute(sql, params)
-    return None
-
-
-def record_login_success(
-    conn: sqlite3.Connection, timestamp: str, user_id: str
-) -> None:
+def clear_lockout(conn: sqlite3.Connection, user_id: str) -> None:
     sql = """\
 UPDATE datasette_accounts_users
 SET failed_attempts = 0, locked_until = NULL,
-    last_login_at = $timestamp::text, updated_at = $timestamp::text
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 """
-    params = {"timestamp::text": timestamp, "user_id::text": user_id}
+    params = {"user_id::text": user_id}
     conn.execute(sql, params)
     return None
 
 
-def reset_password(
-    conn: sqlite3.Connection, password_hash: str, updated_at: str, user_id: str
-) -> None:
+def record_login_success(conn: sqlite3.Connection, user_id: str) -> None:
+    sql = """\
+UPDATE datasette_accounts_users
+SET failed_attempts = 0, locked_until = NULL,
+    last_login_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
+"""
+    params = {"user_id::text": user_id}
+    conn.execute(sql, params)
+    return None
+
+
+def reset_password(conn: sqlite3.Connection, password_hash: str, user_id: str) -> None:
     sql = """\
 UPDATE datasette_accounts_users
 SET password_hash = $password_hash::text, must_change_password = 1,
-    failed_attempts = 0, locked_until = NULL, updated_at = $updated_at::text
+    failed_attempts = 0, locked_until = NULL,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 """
-    params = {
-        "password_hash::text": password_hash,
-        "updated_at::text": updated_at,
-        "user_id::text": user_id,
-    }
+    params = {"password_hash::text": password_hash, "user_id::text": user_id}
     conn.execute(sql, params)
     return None
 
 
 def change_own_password(
-    conn: sqlite3.Connection, password_hash: str, updated_at: str, user_id: str
+    conn: sqlite3.Connection, password_hash: str, user_id: str
 ) -> None:
     sql = """\
 UPDATE datasette_accounts_users
 SET password_hash = $password_hash::text, must_change_password = 0,
-    failed_attempts = 0, locked_until = NULL, updated_at = $updated_at::text
+    failed_attempts = 0, locked_until = NULL,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 """
-    params = {
-        "password_hash::text": password_hash,
-        "updated_at::text": updated_at,
-        "user_id::text": user_id,
-    }
+    params = {"password_hash::text": password_hash, "user_id::text": user_id}
     conn.execute(sql, params)
     return None
 
 
-def set_user_admin(
-    conn: sqlite3.Connection, is_admin: int, updated_at: str, user_id: str
-) -> None:
+def set_user_admin(conn: sqlite3.Connection, is_admin: int, user_id: str) -> None:
     sql = """\
 UPDATE datasette_accounts_users
-SET is_admin = $is_admin::integer, updated_at = $updated_at::text
+SET is_admin = $is_admin::integer,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 """
-    params = {
-        "is_admin::integer": is_admin,
-        "updated_at::text": updated_at,
-        "user_id::text": user_id,
-    }
+    params = {"is_admin::integer": is_admin, "user_id::text": user_id}
     conn.execute(sql, params)
     return None
 
 
-def set_user_disabled(
-    conn: sqlite3.Connection, disabled: int, updated_at: str, user_id: str
-) -> None:
+def set_user_disabled(conn: sqlite3.Connection, disabled: int, user_id: str) -> None:
     sql = """\
 UPDATE datasette_accounts_users
-SET disabled = $disabled::integer, updated_at = $updated_at::text
+SET disabled = $disabled::integer,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 """
-    params = {
-        "disabled::integer": disabled,
-        "updated_at::text": updated_at,
-        "user_id::text": user_id,
-    }
+    params = {"disabled::integer": disabled, "user_id::text": user_id}
     conn.execute(sql, params)
     return None
 
@@ -355,24 +339,24 @@ def insert_session(
     conn: sqlite3.Connection,
     token_sha256: str,
     actor_id: str,
-    created_at: str,
-    expires_at: str,
-    last_seen_at: str,
+    ttl_days: int,
     user_agent: str | None,
     ip: str | None,
 ) -> None:
     sql = """\
 INSERT INTO datasette_accounts_sessions
     (token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip)
-VALUES ($token_sha256::text, $actor_id::text, $created_at::text, $expires_at::text,
-        $last_seen_at::text, $user_agent::text::, $ip::text::);
+VALUES ($token_sha256::text, $actor_id::text,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d days', $ttl_days::integer))
+        || '+00:00',
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        $user_agent::text::, $ip::text::);
 """
     params = {
         "token_sha256::text": token_sha256,
         "actor_id::text": actor_id,
-        "created_at::text": created_at,
-        "expires_at::text": expires_at,
-        "last_seen_at::text": last_seen_at,
+        "ttl_days::integer": ttl_days,
         "user_agent::text::": user_agent,
         "ip::text::": ip,
     }
@@ -380,14 +364,13 @@ VALUES ($token_sha256::text, $actor_id::text, $created_at::text, $expires_at::te
     return None
 
 
-def touch_last_seen(
-    conn: sqlite3.Connection, last_seen_at: str, token_sha256: str
-) -> None:
+def touch_last_seen(conn: sqlite3.Connection, token_sha256: str) -> None:
     sql = """\
 UPDATE datasette_accounts_sessions
-SET last_seen_at = $last_seen_at::text WHERE token_sha256 = $token_sha256::text;
+SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE token_sha256 = $token_sha256::text;
 """
-    params = {"last_seen_at::text": last_seen_at, "token_sha256::text": token_sha256}
+    params = {"token_sha256::text": token_sha256}
     conn.execute(sql, params)
     return None
 
@@ -430,9 +413,12 @@ WHERE actor_id = $actor_id::text AND token_sha256 != $token_sha256::text;
     return None
 
 
-def delete_expired_sessions(conn: sqlite3.Connection, now: str) -> None:
-    sql = "DELETE FROM datasette_accounts_sessions WHERE expires_at <= $now::text;"
-    params = {"now::text": now}
+def delete_expired_sessions(conn: sqlite3.Connection) -> None:
+    sql = """\
+DELETE FROM datasette_accounts_sessions
+WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+"""
+    params: dict[str, Any] = {}
     conn.execute(sql, params)
     return None
 
@@ -441,19 +427,18 @@ def insert_login_attempt(
     conn: sqlite3.Connection,
     username: str | None,
     ip: str | None,
-    timestamp: str,
     success: int,
     reason: str | None,
 ) -> None:
     sql = """\
 INSERT INTO datasette_accounts_login_audit (username, ip, timestamp, success, reason)
-VALUES ($username::text::, $ip::text::, $timestamp::text, $success::integer,
-        $reason::text::);
+VALUES ($username::text::, $ip::text::,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        $success::integer, $reason::text::);
 """
     params = {
         "username::text::": username,
         "ip::text::": ip,
-        "timestamp::text": timestamp,
         "success::integer": success,
         "reason::text::": reason,
     }
@@ -477,16 +462,20 @@ LIMIT $limit::integer;
     return [LoginAttemptRow(*row) for row in cursor.fetchall()]
 
 
-def purge_login_audit(conn: sqlite3.Connection, cutoff: str) -> None:
-    sql = "DELETE FROM datasette_accounts_login_audit WHERE timestamp < $cutoff::text;"
-    params = {"cutoff::text": cutoff}
+def purge_login_audit(conn: sqlite3.Connection, retention_days: int) -> None:
+    sql = """\
+DELETE FROM datasette_accounts_login_audit
+WHERE timestamp <
+    strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('-%d days', $retention_days::integer))
+    || '+00:00';
+"""
+    params = {"retention_days::integer": retention_days}
     conn.execute(sql, params)
     return None
 
 
 def insert_admin_audit(
     conn: sqlite3.Connection,
-    timestamp: str,
     operation: str,
     actor_id: str | None,
     target_id: str | None,
@@ -495,11 +484,10 @@ def insert_admin_audit(
     sql = """\
 INSERT INTO datasette_accounts_admin_audit
     (timestamp, operation, actor_id, target_id, detail)
-VALUES ($timestamp::text, $operation::text, $actor_id::text::, $target_id::text::,
-        $detail::text::);
+VALUES (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        $operation::text, $actor_id::text::, $target_id::text::, $detail::text::);
 """
     params = {
-        "timestamp::text": timestamp,
         "operation::text": operation,
         "actor_id::text::": actor_id,
         "target_id::text::": target_id,
@@ -515,14 +503,13 @@ def insert_capability_grant(
     principal_type: str,
     actor_id: str | None,
     group_id: int | None,
-    created_at: str,
     created_by: str | None,
 ) -> int | None:
     sql = """\
 INSERT OR IGNORE INTO datasette_accounts_capability_grants
     (action, principal_type, actor_id, group_id, created_at, created_by)
 VALUES ($action::text, $principal_type::text, $actor_id::text::, $group_id::integer::,
-        $created_at::text, $created_by::text::)
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00', $created_by::text::)
 RETURNING id;
 """
     params = {
@@ -530,7 +517,6 @@ RETURNING id;
         "principal_type::text": principal_type,
         "actor_id::text::": actor_id,
         "group_id::integer::": group_id,
-        "created_at::text": created_at,
         "created_by::text::": created_by,
     }
     cursor = conn.execute(sql, params)
@@ -575,25 +561,17 @@ def select_site_message(conn: sqlite3.Connection, key: str) -> str | None:
 
 
 def upsert_site_message(
-    conn: sqlite3.Connection,
-    key: str,
-    body: str,
-    updated_at: str,
-    updated_by: str | None,
+    conn: sqlite3.Connection, key: str, body: str, updated_by: str | None
 ) -> None:
     sql = """\
 INSERT INTO datasette_accounts_site_messages (key, body, updated_at, updated_by)
-VALUES ($key::text, $body::text, $updated_at::text, $updated_by::text::)
+VALUES ($key::text, $body::text,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00', $updated_by::text::)
 ON CONFLICT(key) DO UPDATE SET
     body = excluded.body, updated_at = excluded.updated_at,
     updated_by = excluded.updated_by;
 """
-    params = {
-        "key::text": key,
-        "body::text": body,
-        "updated_at::text": updated_at,
-        "updated_by::text::": updated_by,
-    }
+    params = {"key::text": key, "body::text": body, "updated_by::text::": updated_by}
     conn.execute(sql, params)
     return None
 

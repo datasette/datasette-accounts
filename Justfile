@@ -84,6 +84,10 @@ check-queries-fresh:
         exit 1
     }
 
+schema:
+    rm -f schema.db
+    uv run sqlite-utils migrate schema.db datasette_accounts/internal_migrations.py >/dev/null
+
 # Tests
 test:
     uv run pytest -q

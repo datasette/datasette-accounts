@@ -1,7 +1,9 @@
+-- schema: ../../schema.db
+
 -- Named queries for datasette-accounts.
 --
 -- Edit here, then run `just codegen-queries` to regenerate `_queries.sql.json`
--- (the codegen IR) and `_queries.py` (typed Python helpers).
+-- (the codegen IR) and `_queries_generated.py` (typed Python helpers).
 -- `just check-queries-fresh` is the CI gate.
 --
 -- solite codegen syntax (subset):
@@ -15,6 +17,16 @@
 --     $foo::text                       -- non-null text → str
 --     $foo::text::                     -- nullable text → str | None
 --     $foo::integer                    -- int (non-null)
+--
+-- Timestamps are generated in SQL, not passed in: "now" is
+--     strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00'
+-- which is byte-identical to Python's
+--     datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+-- (millisecond ISO-8601 with a +00:00 offset), so the values sort and compare
+-- lexicographically against db.now_iso() everywhere. Relative deadlines use a
+-- printf-built modifier, e.g. printf('+%d minutes', $n) → '+15 minutes'.
+-- 'now' is stable within a single statement, so paired columns written together
+-- (created_at/updated_at, last_login_at/updated_at) get the identical instant.
 --
 -- Table names are hard-coded here (codegen needs literal SQL); the `{USERS}`
 -- etc. constants in db.py cover the few hand-written queries that touch
@@ -88,48 +100,61 @@ INSERT INTO datasette_accounts_users
     (id, username, password_hash, is_admin, disabled, must_change_password,
      failed_attempts, locked_until, created_at, updated_at)
 VALUES ($id::text, $username::text, $password_hash::text, $is_admin::integer, 0,
-        $must_change_password::integer, 0, NULL, $created_at::text, $updated_at::text);
+        $must_change_password::integer, 0, NULL,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00');
 
 -- name: bumpFailedAttempts
 UPDATE datasette_accounts_users
-SET failed_attempts = failed_attempts + 1, updated_at = $updated_at::text
+SET failed_attempts = failed_attempts + 1,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 
+-- Lock the account until `lockout_minutes` from now.
 -- name: setLockedUntil
 UPDATE datasette_accounts_users
-SET locked_until = $locked_until::text WHERE id = $user_id::text;
+SET locked_until =
+    strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d minutes', $lockout_minutes::integer))
+    || '+00:00'
+WHERE id = $user_id::text;
 
 -- name: clearLockout
 UPDATE datasette_accounts_users
-SET failed_attempts = 0, locked_until = NULL, updated_at = $updated_at::text
+SET failed_attempts = 0, locked_until = NULL,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 
 -- name: recordLoginSuccess
 UPDATE datasette_accounts_users
 SET failed_attempts = 0, locked_until = NULL,
-    last_login_at = $timestamp::text, updated_at = $timestamp::text
+    last_login_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 
 -- name: resetPassword
 UPDATE datasette_accounts_users
 SET password_hash = $password_hash::text, must_change_password = 1,
-    failed_attempts = 0, locked_until = NULL, updated_at = $updated_at::text
+    failed_attempts = 0, locked_until = NULL,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 
 -- name: changeOwnPassword
 UPDATE datasette_accounts_users
 SET password_hash = $password_hash::text, must_change_password = 0,
-    failed_attempts = 0, locked_until = NULL, updated_at = $updated_at::text
+    failed_attempts = 0, locked_until = NULL,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 
 -- name: setUserAdmin
 UPDATE datasette_accounts_users
-SET is_admin = $is_admin::integer, updated_at = $updated_at::text
+SET is_admin = $is_admin::integer,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 
 -- name: setUserDisabled
 UPDATE datasette_accounts_users
-SET disabled = $disabled::integer, updated_at = $updated_at::text
+SET disabled = $disabled::integer,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
 WHERE id = $user_id::text;
 
 -- name: deleteUser
@@ -150,15 +175,21 @@ FROM datasette_accounts_sessions
 WHERE actor_id = $actor_id::text
 ORDER BY last_seen_at DESC;
 
+-- Create a session that expires `ttl_days` from now.
 -- name: insertSession
 INSERT INTO datasette_accounts_sessions
     (token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip)
-VALUES ($token_sha256::text, $actor_id::text, $created_at::text, $expires_at::text,
-        $last_seen_at::text, $user_agent::text::, $ip::text::);
+VALUES ($token_sha256::text, $actor_id::text,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d days', $ttl_days::integer))
+        || '+00:00',
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        $user_agent::text::, $ip::text::);
 
 -- name: touchLastSeen
 UPDATE datasette_accounts_sessions
-SET last_seen_at = $last_seen_at::text WHERE token_sha256 = $token_sha256::text;
+SET last_seen_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE token_sha256 = $token_sha256::text;
 
 -- name: deleteSession
 DELETE FROM datasette_accounts_sessions WHERE token_sha256 = $token_sha256::text;
@@ -176,7 +207,8 @@ DELETE FROM datasette_accounts_sessions
 WHERE actor_id = $actor_id::text AND token_sha256 != $token_sha256::text;
 
 -- name: deleteExpiredSessions
-DELETE FROM datasette_accounts_sessions WHERE expires_at <= $now::text;
+DELETE FROM datasette_accounts_sessions
+WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
 
 -- ============================================================================
 -- Login audit
@@ -184,8 +216,9 @@ DELETE FROM datasette_accounts_sessions WHERE expires_at <= $now::text;
 
 -- name: insertLoginAttempt
 INSERT INTO datasette_accounts_login_audit (username, ip, timestamp, success, reason)
-VALUES ($username::text::, $ip::text::, $timestamp::text, $success::integer,
-        $reason::text::);
+VALUES ($username::text::, $ip::text::,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        $success::integer, $reason::text::);
 
 -- Most-recent-first login-audit rows with optional exact username/ip filters
 -- (AND-combined). A NULL filter param disables that clause, collapsing the old
@@ -198,8 +231,12 @@ WHERE ($username::text:: IS NULL OR username = $username::text::)
 ORDER BY id DESC
 LIMIT $limit::integer;
 
+-- Purge audit rows older than `retention_days`.
 -- name: purgeLoginAudit
-DELETE FROM datasette_accounts_login_audit WHERE timestamp < $cutoff::text;
+DELETE FROM datasette_accounts_login_audit
+WHERE timestamp <
+    strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('-%d days', $retention_days::integer))
+    || '+00:00';
 
 -- ============================================================================
 -- Admin audit
@@ -208,8 +245,8 @@ DELETE FROM datasette_accounts_login_audit WHERE timestamp < $cutoff::text;
 -- name: insertAdminAudit
 INSERT INTO datasette_accounts_admin_audit
     (timestamp, operation, actor_id, target_id, detail)
-VALUES ($timestamp::text, $operation::text, $actor_id::text::, $target_id::text::,
-        $detail::text::);
+VALUES (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        $operation::text, $actor_id::text::, $target_id::text::, $detail::text::);
 
 -- ============================================================================
 -- Capability grants
@@ -222,7 +259,7 @@ VALUES ($timestamp::text, $operation::text, $actor_id::text::, $target_id::text:
 INSERT OR IGNORE INTO datasette_accounts_capability_grants
     (action, principal_type, actor_id, group_id, created_at, created_by)
 VALUES ($action::text, $principal_type::text, $actor_id::text::, $group_id::integer::,
-        $created_at::text, $created_by::text::)
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00', $created_by::text::)
 RETURNING id;
 
 -- Row backing revoke-capability's audit detail; None when the id is unknown.
@@ -246,7 +283,8 @@ SELECT body FROM datasette_accounts_site_messages WHERE key = $key::text;
 
 -- name: upsertSiteMessage
 INSERT INTO datasette_accounts_site_messages (key, body, updated_at, updated_by)
-VALUES ($key::text, $body::text, $updated_at::text, $updated_by::text::)
+VALUES ($key::text, $body::text,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00', $updated_by::text::)
 ON CONFLICT(key) DO UPDATE SET
     body = excluded.body, updated_at = excluded.updated_at,
     updated_by = excluded.updated_by;
