@@ -3,6 +3,7 @@
   import { loadPageData } from "../../page_data/load.ts";
   import { postJSON } from "../../lib/api.ts";
   import Modal from "../../lib/Modal.svelte";
+  import PasswordReveal from "../../lib/PasswordReveal.svelte";
 
   type User = AdminPageData["users"][number];
   type Session = {
@@ -43,12 +44,18 @@
   let newUsername = $state("");
   let newPassword = $state("");
   let newIsAdmin = $state(false);
+  let newGenerate = $state(true);
   let createError = $state("");
+  // Set once the account is created with a generated password (shown once).
+  let createdCred = $state<{ username: string; password: string } | null>(null);
 
   // Reset-password modal
   let resetTarget = $state<User | null>(null);
   let resetPassword = $state("");
+  let resetGenerate = $state(true);
   let resetError = $state("");
+  // The generated password to reveal once after a reset (null while editing).
+  let resetCred = $state<string | null>(null);
 
   // Delete-confirm modal
   let deleteTarget = $state<User | null>(null);
@@ -72,23 +79,37 @@
     return true;
   }
 
+  function openCreate() {
+    newUsername = "";
+    newPassword = "";
+    newIsAdmin = false;
+    newGenerate = true;
+    createError = "";
+    createdCred = null;
+    createOpen = true;
+  }
+
   async function create(e: Event) {
     e.preventDefault();
     createError = "";
-    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>("/-/admin/api/create", {
-      username: newUsername,
-      password: newPassword,
-      is_admin: newIsAdmin,
-    });
+    const body: Record<string, unknown> = { username: newUsername, is_admin: newIsAdmin };
+    if (newGenerate) body.generate = true;
+    else body.password = newPassword;
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string; password?: string }>(
+      "/-/admin/api/create",
+      body,
+    );
     if (!ok || !data.ok) {
       createError = data.error || "Could not create account";
       return;
     }
-    newUsername = "";
-    newPassword = "";
-    newIsAdmin = false;
-    createOpen = false;
     await refresh();
+    if (data.password) {
+      // Keep the modal open to reveal the generated password once.
+      createdCred = { username: newUsername, password: data.password };
+    } else {
+      createOpen = false;
+    }
   }
 
   async function toggle(u: User, path: string) {
@@ -107,16 +128,24 @@
     const u = resetTarget;
     if (!u) return;
     resetError = "";
-    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(
+    const body: Record<string, unknown> = { id: u.id };
+    if (resetGenerate) body.generate = true;
+    else body.password = resetPassword;
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string; password?: string }>(
       "/-/admin/api/reset-password",
-      { id: u.id, password: resetPassword },
+      body,
     );
     if (!ok || !data.ok) {
       resetError = data.error || "Could not reset password";
       return;
     }
     resetPassword = "";
-    resetTarget = null;
+    if (data.password) {
+      // Keep the modal open to reveal the generated password once.
+      resetCred = data.password;
+    } else {
+      resetTarget = null;
+    }
   }
 
   async function openSessions(u: User) {
@@ -141,7 +170,9 @@
   function openReset(u: User) {
     resetTarget = u;
     resetPassword = "";
+    resetGenerate = true;
     resetError = "";
+    resetCred = null;
   }
 </script>
 
@@ -153,7 +184,7 @@
 <div class="page">
   <header class="bar">
     <h1>Accounts</h1>
-    <button class="btn-primary" onclick={() => ((createError = ""), (createOpen = true))}>
+    <button class="btn-primary" onclick={openCreate}>
       + New account
     </button>
   </header>
@@ -233,42 +264,72 @@
 </div>
 
 <!-- Create account -->
-<Modal bind:open={createOpen} title="New account">
-  <form id="create-form" onsubmit={create}>
-    {#if createError}<p class="msg msg-error">{createError}</p>{/if}
-    <label class="field">
-      <span>Username</span>
-      <input bind:value={newUsername} required />
-    </label>
-    <label class="field">
-      <span>Initial password</span>
-      <input type="password" bind:value={newPassword} required />
-    </label>
-    <label class="check">
-      <input type="checkbox" bind:checked={newIsAdmin} />
-      <span>Grant admin permission</span>
-    </label>
-  </form>
+<Modal bind:open={createOpen} onclose={() => (createdCred = null)} title="New account">
+  {#if createdCred}
+    <p class="lead">Account <strong>{createdCred.username}</strong> was created.</p>
+    <PasswordReveal username={createdCred.username} password={createdCred.password} />
+  {:else}
+    <form id="create-form" onsubmit={create}>
+      {#if createError}<p class="msg msg-error">{createError}</p>{/if}
+      <label class="field">
+        <span>Username</span>
+        <input bind:value={newUsername} required />
+      </label>
+      <label class="check">
+        <input type="checkbox" bind:checked={newGenerate} />
+        <span>Generate a secure password</span>
+      </label>
+      {#if !newGenerate}
+        <label class="field">
+          <span>Initial password</span>
+          <input type="password" bind:value={newPassword} required />
+        </label>
+      {/if}
+      <label class="check">
+        <input type="checkbox" bind:checked={newIsAdmin} />
+        <span>Grant admin permission</span>
+      </label>
+    </form>
+  {/if}
   {#snippet footer()}
-    <button class="btn-sm" onclick={() => (createOpen = false)}>Cancel</button>
-    <button class="btn-primary btn-sm" type="submit" form="create-form">Create account</button>
+    {#if createdCred}
+      <button class="btn-primary btn-sm" onclick={() => (createOpen = false)}>Done</button>
+    {:else}
+      <button class="btn-sm" onclick={() => (createOpen = false)}>Cancel</button>
+      <button class="btn-primary btn-sm" type="submit" form="create-form">Create account</button>
+    {/if}
   {/snippet}
 </Modal>
 
 <!-- Reset password -->
 <Modal open={resetTarget !== null} onclose={() => (resetTarget = null)} title="Reset password">
-  <form id="reset-form" onsubmit={submitReset}>
-    <p class="lead">Set a new password for <strong>{resetTarget?.username}</strong>.</p>
-    {#if resetError}<p class="msg msg-error">{resetError}</p>{/if}
-    <label class="field">
-      <span>New password</span>
-      <!-- svelte-ignore a11y_autofocus -->
-      <input type="password" bind:value={resetPassword} required autofocus />
-    </label>
-  </form>
+  {#if resetCred}
+    <p class="lead">Password reset for <strong>{resetTarget?.username}</strong>.</p>
+    <PasswordReveal username={resetTarget?.username} password={resetCred} />
+  {:else}
+    <form id="reset-form" onsubmit={submitReset}>
+      <p class="lead">Set a new password for <strong>{resetTarget?.username}</strong>.</p>
+      {#if resetError}<p class="msg msg-error">{resetError}</p>{/if}
+      <label class="check">
+        <input type="checkbox" bind:checked={resetGenerate} />
+        <span>Generate a secure password</span>
+      </label>
+      {#if !resetGenerate}
+        <label class="field">
+          <span>New password</span>
+          <!-- svelte-ignore a11y_autofocus -->
+          <input type="password" bind:value={resetPassword} required autofocus />
+        </label>
+      {/if}
+    </form>
+  {/if}
   {#snippet footer()}
-    <button class="btn-sm" onclick={() => (resetTarget = null)}>Cancel</button>
-    <button class="btn-primary btn-sm" type="submit" form="reset-form">Reset password</button>
+    {#if resetCred}
+      <button class="btn-primary btn-sm" onclick={() => (resetTarget = null)}>Done</button>
+    {:else}
+      <button class="btn-sm" onclick={() => (resetTarget = null)}>Cancel</button>
+      <button class="btn-primary btn-sm" type="submit" form="reset-form">Reset password</button>
+    {/if}
   {/snippet}
 </Modal>
 

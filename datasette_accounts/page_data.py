@@ -62,13 +62,18 @@ class OkResponse(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str
+    # Optional: not required in the first-login forced-change flow, where the
+    # session already proves the current (temp) password was just entered.
+    current_password: Optional[str] = None
     new_password: str
 
 
 class CreateUserRequest(BaseModel):
     username: str
-    password: str
+    # Omit `password` (or send generate=True) to have the server mint a strong
+    # random password and return it once in the response.
+    password: Optional[str] = None
+    generate: bool = False
     is_admin: bool = False
     must_change_password: bool = True
 
@@ -76,6 +81,8 @@ class CreateUserRequest(BaseModel):
 class CreateUserResponse(BaseModel):
     ok: bool
     id: Optional[str] = None
+    # Present only when the password was server-generated (shown once).
+    password: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -87,7 +94,17 @@ class TargetRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     id: str
-    password: str
+    # Omit `password` (or send generate=True) to mint a strong random password
+    # and return it once in the response.
+    password: Optional[str] = None
+    generate: bool = False
+
+
+class ResetPasswordResponse(BaseModel):
+    ok: bool
+    # Present only when the password was server-generated (shown once).
+    password: Optional[str] = None
+    error: Optional[str] = None
 
 
 class RevokeSessionRequest(BaseModel):

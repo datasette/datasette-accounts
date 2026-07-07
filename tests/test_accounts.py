@@ -337,6 +337,65 @@ async def test_reset_password_revokes_sessions():
     ).single_value() == 0
 
 
+@pytest.mark.asyncio
+async def test_admin_create_generated_password():
+    ds = await make_ds()
+    await insert_user(ds, "admin", is_admin=True)
+    _, cookies = await login(ds, "admin", "password123")
+    r = await ds.client.post(
+        "/-/admin/api/create",
+        content=json.dumps({"username": "carol", "generate": True}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    generated = body["password"]
+    # A real, strong password is echoed back exactly once.
+    assert generated and len(generated) >= 20
+    # The generated password actually authenticates.
+    login_r, _ = await login(ds, "carol", generated)
+    assert login_r.json()["ok"]
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_generated_password():
+    ds = await make_ds()
+    await insert_user(ds, "admin", is_admin=True)
+    bob_id = await insert_user(ds, "bob")
+    _, cookies = await login(ds, "admin", "password123")
+    r = await ds.client.post(
+        "/-/admin/api/reset-password",
+        content=json.dumps({"id": bob_id, "generate": True}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 200
+    generated = r.json()["password"]
+    assert generated
+    # Old password stops working; the generated one logs in.
+    old_r, _ = await login(ds, "bob", "password123")
+    assert not old_r.json()["ok"]
+    new_r, _ = await login(ds, "bob", generated)
+    assert new_r.json()["ok"]
+
+
+@pytest.mark.asyncio
+async def test_admin_supplied_password_not_echoed():
+    ds = await make_ds()
+    await insert_user(ds, "admin", is_admin=True)
+    _, cookies = await login(ds, "admin", "password123")
+    r = await ds.client.post(
+        "/-/admin/api/create",
+        content=json.dumps({"username": "dave", "password": "password123"}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 200
+    # An admin-supplied password is never reflected back in the response.
+    assert r.json().get("password") is None
+
+
 # --------------------------------------------------------------------------
 # M5 — self-service + forced change
 # --------------------------------------------------------------------------
@@ -416,6 +475,57 @@ async def test_must_change_password_gate():
     assert r.status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_change_password_rejects_reuse():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    _, cookies = await login(ds, "alice", "password123")
+    r = await ds.client.post(
+        "/-/account/api/change-password",
+        content=json.dumps(
+            {"current_password": "password123", "new_password": "password123"}
+        ),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 400
+    assert "different" in r.json()["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_rejects_same_password():
+    ds = await make_ds()
+    await insert_user(ds, "admin", is_admin=True)
+    bob_id = await insert_user(ds, "bob")
+    _, cookies = await login(ds, "admin", "password123")
+    r = await ds.client.post(
+        "/-/admin/api/reset-password",
+        content=json.dumps({"id": bob_id, "password": "password123"}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 400
+    assert "different" in r.json()["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_forced_change_needs_no_current_password():
+    ds = await make_ds()
+    await insert_user(ds, "alice", must_change_password=True)
+    _, cookies = await login(ds, "alice", "password123")
+    # First-login change succeeds without re-supplying the current password.
+    r = await ds.client.post(
+        "/-/account/api/change-password",
+        content=json.dumps({"new_password": "brandnew1"}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 200
+    # Gate lifted and the new password authenticates.
+    assert (await ds.client.get("/", cookies=cookies)).status_code == 200
+    assert (await login(ds, "alice", "brandnew1"))[0].status_code == 200
+
+
 # --------------------------------------------------------------------------
 # M2 — passwords + retention
 # --------------------------------------------------------------------------
@@ -465,7 +575,5 @@ async def test_user_profiles_seeding():
     uid = await insert_user(ds, "alice")
     await apply_seeds(ds)
     internal = ds.get_internal_database()
-    rows = (
-        await internal.execute("SELECT actor_id FROM datasette_user_profiles")
-    ).rows
+    rows = (await internal.execute("SELECT actor_id FROM datasette_user_profiles")).rows
     assert uid in [r[0] for r in rows]

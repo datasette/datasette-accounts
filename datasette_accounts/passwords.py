@@ -68,6 +68,24 @@ async def averify_dummy(password):
     return await averify_password(password, DUMMY_HASH)
 
 
+# A server-generated password is shown to the admin exactly once, so it needs
+# enough entropy to be safe even if it survives in a clipboard/paste buffer.
+# token_urlsafe(n) yields ceil(4n/3) URL-safe chars; 18 bytes -> 24 chars.
+GENERATED_PASSWORD_MIN_CHARS = 20
+
+
+def generate_password(min_length: int = 0) -> str:
+    """Return a cryptographically-random URL-safe password.
+
+    Always at least ``max(min_length, GENERATED_PASSWORD_MIN_CHARS)`` chars, so
+    a generated password never trips ``check_password_length`` regardless of the
+    configured ``password_min_length``.
+    """
+    target = max(min_length, GENERATED_PASSWORD_MIN_CHARS)
+    nbytes = -(-target * 3 // 4)  # ceil division: bytes needed for `target` chars
+    return secrets.token_urlsafe(nbytes)
+
+
 class PasswordLengthError(ValueError):
     """Raised when a proposed password violates the configured length bounds."""
 

@@ -22,6 +22,7 @@ from ..passwords import (
     averify_dummy,
     averify_password,
     check_password_length,
+    generate_password,
 )
 from ..router import require_actor, require_admin, require_csrf, router
 from ..security import COOKIE_NAME, SIGN_NAMESPACE
@@ -150,16 +151,20 @@ async def change_password(
     minutes = security.config(datasette, "lockout_minutes")
     ip = security.client_ip(datasette, request)
 
-    if user["locked_until"] and user["locked_until"] > db.now_iso():
-        return Response.json({"ok": False, "error": "Account locked"}, status=429)
+    # First-login forced change: the session already proves the temp password
+    # was entered at login, so don't demand it a second time. A normal, voluntary
+    # change still re-verifies the current password (defends a walked-up session).
+    if not user["must_change_password"]:
+        if user["locked_until"] and user["locked_until"] > db.now_iso():
+            return Response.json({"ok": False, "error": "Account locked"}, status=429)
 
-    ok = await averify_password(body.current_password, user["password_hash"])
-    await db.record_login_attempt(internal, user["username"], ip, ok)
-    if not ok:
-        await db.register_failed_attempt(internal, user["id"], threshold, minutes)
-        return Response.json(
-            {"ok": False, "error": "Current password is incorrect"}, status=401
-        )
+        ok = await averify_password(body.current_password or "", user["password_hash"])
+        await db.record_login_attempt(internal, user["username"], ip, ok)
+        if not ok:
+            await db.register_failed_attempt(internal, user["id"], threshold, minutes)
+            return Response.json(
+                {"ok": False, "error": "Current password is incorrect"}, status=401
+            )
 
     try:
         check_password_length(
@@ -167,6 +172,17 @@ async def change_password(
         )
     except PasswordLengthError as e:
         return Response.json({"ok": False, "error": str(e)}, status=400)
+
+    # The new password must differ from the current one (covers the forced-change
+    # path too, where we never re-checked the current password above).
+    if await averify_password(body.new_password, user["password_hash"]):
+        return Response.json(
+            {
+                "ok": False,
+                "error": "New password must be different from the current one",
+            },
+            status=400,
+        )
 
     new_hash = await ahash_password(body.new_password)
     await db.change_own_password(
@@ -178,6 +194,24 @@ async def change_password(
 # --------------------------------------------------------------------------
 # Admin operations
 # --------------------------------------------------------------------------
+
+
+def _resolve_password(datasette, provided, generate):
+    """Return ``(plaintext, generated, error_response)``.
+
+    When ``generate`` is set (or no password is provided) the server mints a
+    strong random password; otherwise the admin-supplied one is length-checked.
+    ``generated`` tells the caller whether the plaintext should be echoed back
+    to the admin once. On a length violation ``error_response`` is set.
+    """
+    min_length = security.config(datasette, "password_min_length")
+    if generate or not provided:
+        return generate_password(min_length), True, None
+    try:
+        check_password_length(provided, min_length)
+    except PasswordLengthError as e:
+        return None, False, Response.json({"ok": False, "error": str(e)}, status=400)
+    return provided, False, None
 
 
 @router.POST("/-/admin/api/list$")
@@ -193,13 +227,12 @@ async def admin_list(datasette, request):
 @require_admin
 async def admin_create(datasette, request, body: Annotated[CreateUserRequest, Body()]):
     internal = datasette.get_internal_database()
-    try:
-        check_password_length(
-            body.password, security.config(datasette, "password_min_length")
-        )
-    except PasswordLengthError as e:
-        return Response.json({"ok": False, "error": str(e)}, status=400)
-    password_hash = await ahash_password(body.password)
+    plaintext, generated, error = _resolve_password(
+        datasette, body.password, body.generate
+    )
+    if error:
+        return error
+    password_hash = await ahash_password(plaintext)
     try:
         user_id = await db.create_user(
             internal,
@@ -213,7 +246,10 @@ async def admin_create(datasette, request, body: Annotated[CreateUserRequest, Bo
         return Response.json(
             {"ok": False, "error": "Username already taken"}, status=409
         )
-    return Response.json({"ok": True, "id": user_id})
+    result = {"ok": True, "id": user_id}
+    if generated:
+        result["password"] = plaintext
+    return Response.json(result)
 
 
 @router.POST("/-/admin/api/reset-password$")
@@ -222,15 +258,29 @@ async def admin_reset_password(
     datasette, request, body: Annotated[ResetPasswordRequest, Body()]
 ):
     internal = datasette.get_internal_database()
-    try:
-        check_password_length(
-            body.password, security.config(datasette, "password_min_length")
-        )
-    except PasswordLengthError as e:
-        return Response.json({"ok": False, "error": str(e)}, status=400)
-    password_hash = await ahash_password(body.password)
+    plaintext, generated, error = _resolve_password(
+        datasette, body.password, body.generate
+    )
+    if error:
+        return error
+    # A manually-supplied reset must differ from the target's current password.
+    # (A generated one is random — skip the extra KDF verify.)
+    if not generated:
+        target = await db.get_user_by_id(internal, body.id)
+        if target and await averify_password(plaintext, target["password_hash"]):
+            return Response.json(
+                {
+                    "ok": False,
+                    "error": "New password must be different from the current one",
+                },
+                status=400,
+            )
+    password_hash = await ahash_password(plaintext)
     await db.reset_password(internal, request.actor["id"], body.id, password_hash)
-    return Response.json({"ok": True})
+    result = {"ok": True}
+    if generated:
+        result["password"] = plaintext
+    return Response.json(result)
 
 
 @router.POST("/-/admin/api/toggle-admin$")

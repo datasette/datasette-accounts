@@ -16,9 +16,12 @@
     busy = true;
     error = "";
     message = "";
+    const body: Record<string, unknown> = { new_password: next };
+    // First-login forced change doesn't ask for the current password again.
+    if (!pageData.must_change_password) body.current_password = current;
     const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(
       "/-/account/api/change-password",
-      { current_password: current, new_password: next },
+      body,
     );
     busy = false;
     if (ok && data.ok) {
@@ -35,17 +38,19 @@
   <p class="who">Signed in as <strong class="me">{pageData.username}</strong></p>
 
   {#if pageData.must_change_password}
-    <p class="msg msg-error">You must change your password before continuing.</p>
+    <p class="msg msg-error">Set a new password before continuing.</p>
   {/if}
 
   <form class="card" onsubmit={submit}>
     <h2>Change password</h2>
     {#if message}<p class="msg msg-ok">{message}</p>{/if}
     {#if error}<p class="msg msg-error">{error}</p>{/if}
-    <label class="field">
-      <span>Current password</span>
-      <input type="password" bind:value={current} autocomplete="current-password" required />
-    </label>
+    {#if !pageData.must_change_password}
+      <label class="field">
+        <span>Current password</span>
+        <input type="password" bind:value={current} autocomplete="current-password" required />
+      </label>
+    {/if}
     <label class="field">
       <span>New password</span>
       <input type="password" bind:value={next} autocomplete="new-password" required />
