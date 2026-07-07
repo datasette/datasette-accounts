@@ -1,15 +1,15 @@
 # datasette-auth-basic-login
 
 Username/password auth for Datasette with **database-backed accounts** in the
-internal DB, an admin permission, and (M7, pending) a Svelte/Vite/TS frontend.
+internal DB, an admin permission, and a Svelte/Vite/TS frontend.
 
 ## Design spec
 `plans/start/` is the authoritative design (read `plans/start/README.md` first).
 Security review findings are in `todos/security-review/` (all applied + built).
 
 ## Build status
-- M0–M7 built and tested (`uv run pytest`, 22 tests green; `npm run check` clean).
-  Only M8 (README/deploy docs) remains.
+- M0–M8 built and tested (`uv run pytest`, 22 tests green; `npm run check` clean).
+  All milestones complete.
 - Frontend: Svelte 5 pages (`frontend/src/pages/{login,admin,account}`) built by
   Vite into `datasette_auth_basic_login/static/gen/` + `manifest.json` (shipped).
   `routes/pages.py` renders `templates/basic_login_base.html`, which mounts the
