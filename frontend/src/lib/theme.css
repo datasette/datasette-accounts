@@ -188,6 +188,24 @@
   color: var(--ink);
 }
 
+/* Compact ✕ to remove a chip/tag — a bare glyph, not a boxed button. */
+#app-root .chip-x {
+  width: 1.05rem;
+  height: 1.05rem;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 0;
+  border-radius: 4px;
+}
+#app-root .chip-x:hover {
+  background: var(--hover);
+  border-color: transparent;
+  color: var(--danger);
+}
+
 /* Dropdown menu */
 #app-root .menu-wrap {
   position: relative;

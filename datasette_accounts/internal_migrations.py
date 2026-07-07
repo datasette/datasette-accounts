@@ -64,6 +64,49 @@ def m001_initial(db: Database):
 def m002_last_login_at(db: Database):
     # NULL means the account has never had a successful sign-in ("pending" —
     # created but not yet initialised by its owner). Set on each login success.
-    db.execute(
-        "ALTER TABLE datasette_accounts_users ADD COLUMN last_login_at TEXT"
+    db.execute("ALTER TABLE datasette_accounts_users ADD COLUMN last_login_at TEXT")
+
+
+@internal_migrations()
+def m003_capability_grants(db: Database):
+    # Admin-managed grants of GLOBAL actions (Datasette actions with no
+    # resource_class) to a principal. Resource-scoped actions stay with
+    # datasette-acl; this table only ever ALLOWS a global capability.
+    #
+    # Shape mirrors datasette-acl's `acl` table so the two read consistently:
+    # exactly one principal is set per row, enforced by the CHECK, and each
+    # principal-kind is deduped by a partial UNIQUE index. `group_id` references
+    # acl_groups.id when acl is installed; we store the id and validate on write
+    # rather than declaring a cross-plugin foreign key.
+    db.executescript(
+        """
+        CREATE TABLE datasette_accounts_capability_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            principal_type TEXT NOT NULL
+                CHECK (principal_type IN
+                    ('actor', 'group', 'everyone', 'authenticated', 'anonymous')),
+            actor_id TEXT,
+            group_id INTEGER,
+            created_at TEXT NOT NULL,
+            created_by TEXT,
+            CHECK (
+                (principal_type = 'actor'
+                    AND actor_id IS NOT NULL AND group_id IS NULL)
+                OR (principal_type = 'group'
+                    AND group_id IS NOT NULL AND actor_id IS NULL)
+                OR (principal_type IN ('everyone', 'authenticated', 'anonymous')
+                    AND actor_id IS NULL AND group_id IS NULL)
+            )
+        );
+        CREATE UNIQUE INDEX idx_accounts_grant_actor
+            ON datasette_accounts_capability_grants (action, actor_id)
+            WHERE principal_type = 'actor';
+        CREATE UNIQUE INDEX idx_accounts_grant_group
+            ON datasette_accounts_capability_grants (action, group_id)
+            WHERE principal_type = 'group';
+        CREATE UNIQUE INDEX idx_accounts_grant_public
+            ON datasette_accounts_capability_grants (action, principal_type)
+            WHERE principal_type IN ('everyone', 'authenticated', 'anonymous');
+        """
     )

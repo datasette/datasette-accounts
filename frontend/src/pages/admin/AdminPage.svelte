@@ -4,6 +4,7 @@
   import { postJSON } from "../../lib/api.ts";
   import Modal from "../../lib/Modal.svelte";
   import PasswordReveal from "../../lib/PasswordReveal.svelte";
+  import AdminNav from "../../lib/AdminNav.svelte";
 
   type User = AdminPageData["users"][number];
   type Session = {
@@ -198,6 +199,7 @@
       + New account
     </button>
   </header>
+  <AdminNav current="accounts" />
 
   {#if error}<p class="msg msg-error">{error}</p>{/if}
 

@@ -271,6 +271,46 @@ function buildShots(browser) {
       await ctx.close();
     },
 
+    // The Capabilities admin page: global-action grants to accounts, groups
+    // and audiences (seeded against the installed datasette-paper plugin).
+    capabilities: async () => {
+      const { ctx, page } = await loginContext(
+        browser,
+        "admin",
+        "/-/admin/capabilities",
+      );
+      await page
+        .getByRole("heading", { name: "Capabilities" })
+        .waitFor({ timeout: 15_000 });
+      // Wait for the seeded grants to render (the paper-create card).
+      await page.getByText("Can create new papers").waitFor({ timeout: 15_000 });
+      await page.getByText("@alice").waitFor();
+      await freezeVolatile(page);
+      await shotClipped(page, out("capabilities"));
+      await ctx.close();
+    },
+
+    // The Capabilities page with a grant being added (principal picker open).
+    "capabilities-add": async () => {
+      const { ctx, page } = await loginContext(
+        browser,
+        "admin",
+        "/-/admin/capabilities",
+      );
+      await page
+        .getByText("Can create new papers")
+        .waitFor({ timeout: 15_000 });
+      // Open the add-grant row on the first action card.
+      await page
+        .getByRole("button", { name: "+ Grant" })
+        .first()
+        .click();
+      await page.getByLabel("Principal type").waitFor({ timeout: 15_000 });
+      await freezeVolatile(page);
+      await shotClipped(page, out("capabilities-add"));
+      await ctx.close();
+    },
+
     // A regular user's own account page (change-password form).
     account: async () => {
       const { ctx, page } = await loginContext(browser, "alice", "/-/account");
