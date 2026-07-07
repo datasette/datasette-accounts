@@ -22,6 +22,8 @@ class UserRow(BaseModel):
     must_change_password: bool
     locked: bool
     created_at: str
+    # None until the first successful sign-in — the account is still "pending".
+    last_login_at: Optional[str] = None
 
 
 class AdminPageData(BaseModel):

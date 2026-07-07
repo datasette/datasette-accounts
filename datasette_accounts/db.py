@@ -88,6 +88,8 @@ def to_user_row(r):
         "must_change_password": bool(r["must_change_password"]),
         "locked": bool(r["locked_until"] and r["locked_until"] > now_iso()),
         "created_at": r["created_at"],
+        # NULL until the account's first successful sign-in ("pending").
+        "last_login_at": r["last_login_at"],
     }
 
 
@@ -148,11 +150,13 @@ async def register_failed_attempt(db, user_id, lockout_threshold, lockout_minute
     return await db.execute_write_fn(write)
 
 
-async def reset_lockout(db, user_id):
+async def record_login_success(db, user_id):
+    """Clear the lockout counters and stamp last_login_at on a successful login."""
+    ts = now_iso()
     await db.execute_write(
         f"UPDATE {USERS} SET failed_attempts = 0, locked_until = NULL, "
-        "updated_at = ? WHERE id = ?",
-        [now_iso(), user_id],
+        "last_login_at = ?, updated_at = ? WHERE id = ?",
+        [ts, ts, user_id],
     )
 
 

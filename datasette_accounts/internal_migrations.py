@@ -58,3 +58,12 @@ def m001_initial(db: Database):
         );
         """
     )
+
+
+@internal_migrations()
+def m002_last_login_at(db: Database):
+    # NULL means the account has never had a successful sign-in ("pending" —
+    # created but not yet initialised by its owner). Set on each login success.
+    db.execute(
+        "ALTER TABLE datasette_accounts_users ADD COLUMN last_login_at TEXT"
+    )

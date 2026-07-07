@@ -255,6 +255,9 @@
 #app-root .badge-disabled {
   color: var(--subtle);
 }
+#app-root .badge-pending {
+  color: var(--acc);
+}
 
 /* Inline messages */
 #app-root .msg {

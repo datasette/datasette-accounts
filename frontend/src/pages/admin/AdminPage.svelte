@@ -39,6 +39,16 @@
     users.filter((u) => u.username.toLowerCase().includes(search.trim().toLowerCase())),
   );
 
+  // Render a stored ISO timestamp in the viewer's locale; fall back to the raw
+  // value if it can't be parsed.
+  function fmtDate(iso: string | null | undefined): string {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return isNaN(d.getTime())
+      ? iso
+      : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  }
+
   // Create-account modal
   let createOpen = $state(false);
   let newUsername = $state("");
@@ -203,6 +213,7 @@
           <th>Username</th>
           <th>Role</th>
           <th>Status</th>
+          <th>Last sign-in</th>
           <th class="right">Actions</th>
         </tr>
       </thead>
@@ -217,7 +228,15 @@
               <div class="status">
                 {#if u.disabled}<span class="badge badge-disabled">disabled</span>{/if}
                 {#if u.locked}<span class="badge badge-locked">locked</span>{/if}
+                {#if !u.last_login_at}<span class="badge badge-pending">pending</span>{/if}
               </div>
+            </td>
+            <td>
+              {#if u.last_login_at}
+                <span class="lastseen">{fmtDate(u.last_login_at)}</span>
+              {:else}
+                <span class="never" title="This account has never signed in.">Never</span>
+              {/if}
             </td>
             <td class="actions">
               <div class="menu-wrap">
@@ -256,7 +275,7 @@
           </tr>
         {/each}
         {#if filtered.length === 0}
-          <tr><td colspan="4" class="empty">No accounts match “{search}”.</td></tr>
+          <tr><td colspan="5" class="empty">No accounts match “{search}”.</td></tr>
         {/if}
       </tbody>
     </table>
@@ -359,7 +378,7 @@
       {#each sessions as s (s.token_sha256)}
         <li>
           <div class="sinfo">
-            <div class="stime">{s.last_seen_at}</div>
+            <div class="stime">{fmtDate(s.last_seen_at)}</div>
             <div class="smeta">{s.ip ?? "unknown IP"} · {s.user_agent ?? "unknown device"}</div>
           </div>
           <button class="btn-sm btn-danger" onclick={() => revoke(s.token_sha256)}>Revoke</button>
@@ -431,7 +450,16 @@
   }
   .status {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.9rem;
+  }
+  .lastseen {
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+  .never {
+    font-size: 0.85rem;
+    color: var(--muted);
   }
   .right {
     text-align: right;

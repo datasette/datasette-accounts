@@ -38,11 +38,28 @@
     {#if error}<p class="msg msg-error">{error}</p>{/if}
     <label class="field">
       <span>Username</span>
-      <input bind:value={username} autocomplete="username" required />
+      <input
+        id="username"
+        name="username"
+        type="text"
+        bind:value={username}
+        autocomplete="username"
+        autocapitalize="none"
+        autocorrect="off"
+        spellcheck="false"
+        required
+      />
     </label>
     <label class="field">
       <span>Password</span>
-      <input type="password" bind:value={password} autocomplete="current-password" required />
+      <input
+        id="current-password"
+        name="password"
+        type="password"
+        bind:value={password}
+        autocomplete="current-password"
+        required
+      />
     </label>
     <button type="submit" class="btn-primary block" disabled={busy}>
       {busy ? "Signing in…" : "Log in"}

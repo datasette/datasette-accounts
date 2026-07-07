@@ -91,7 +91,7 @@ async def authenticate(
         return Response.json({"ok": False, "error": GENERIC_LOGIN_ERROR}, status=401)
 
     # Success.
-    await db.reset_lockout(internal, user["id"])
+    await db.record_login_success(internal, user["id"])
     raw_token = mint_token()
     await db.create_session(
         internal,

@@ -99,6 +99,32 @@ async def test_login_success_sets_cookie_and_actor():
 
 
 @pytest.mark.asyncio
+async def test_last_login_at_tracks_first_signin():
+    ds = await make_ds()
+    await insert_user(ds, "admin", is_admin=True)
+    await insert_user(ds, "bob")
+
+    def by_name(users):
+        return {u["username"]: u for u in users}
+
+    _, admin_cookies = await login(ds, "admin", "password123")
+    listed = await ds.client.post(
+        "/-/admin/api/list", content="{}", headers=JSON, cookies=admin_cookies
+    )
+    users = by_name(listed.json()["users"])
+    # bob has never signed in -> pending
+    assert users["bob"]["last_login_at"] is None
+
+    # bob signs in for the first time...
+    await login(ds, "bob", "password123")
+    listed = await ds.client.post(
+        "/-/admin/api/list", content="{}", headers=JSON, cookies=admin_cookies
+    )
+    users = by_name(listed.json()["users"])
+    assert users["bob"]["last_login_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_unknown_and_wrong_password_are_indistinguishable():
     ds = await make_ds()
     await insert_user(ds, "alice")
