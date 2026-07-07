@@ -18,3 +18,7 @@ accounts.db
 # Built frontend assets (rebuild with `just frontend`)
 datasette_accounts/static/gen/
 datasette_accounts/manifest.json
+
+# solite codegen IR (intermediate; regenerate with `just codegen-queries`).
+# Only the generated Python (_queries_generated.py) is checked in.
+datasette_accounts/sql/_queries.sql.json

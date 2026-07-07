@@ -1,0 +1,257 @@
+-- Named queries for datasette-accounts.
+--
+-- Edit here, then run `just codegen-queries` to regenerate `_queries.sql.json`
+-- (the codegen IR) and `_queries.py` (typed Python helpers).
+-- `just check-queries-fresh` is the CI gate.
+--
+-- solite codegen syntax (subset):
+--     -- name: foo                     -- :rows by default → list[Row]
+--     -- name: foo :rows -> UserRow    -- list[UserRow] using a named class
+--     -- name: foo :row  -> UserRow    -- UserRow | None
+--     -- name: foo :value              -- scalar | None
+--     -- name: foo                     -- Void for INSERT/UPDATE/DELETE
+--
+-- Parameter sigils:
+--     $foo::text                       -- non-null text → str
+--     $foo::text::                     -- nullable text → str | None
+--     $foo::integer                    -- int (non-null)
+--
+-- Table names are hard-coded here (codegen needs literal SQL); the `{USERS}`
+-- etc. constants in db.py cover the few hand-written queries that touch
+-- datasette-acl tables not present in this schema.
+--
+-- Multi-statement orchestration (audit-in-same-tx, last-admin guard, lockout
+-- bump-then-check) lives in db.py — codegen emits one helper per query block.
+
+-- ============================================================================
+-- Users (reads)
+--
+-- Every user-returning query selects the same explicit column set so the
+-- generated ``UserRow`` dataclass has one shape (matching the old ``SELECT *``).
+-- ============================================================================
+
+-- name: selectUserByUsername :row -> UserRow
+SELECT id, username, password_hash, is_admin, disabled, must_change_password,
+       failed_attempts, locked_until, created_at, updated_at, last_login_at
+FROM datasette_accounts_users
+WHERE username = $username::text;
+
+-- name: selectUserById :row -> UserRow
+SELECT id, username, password_hash, is_admin, disabled, must_change_password,
+       failed_attempts, locked_until, created_at, updated_at, last_login_at
+FROM datasette_accounts_users
+WHERE id = $user_id::text;
+
+-- name: listUsers :rows -> UserRow
+SELECT id, username, password_hash, is_admin, disabled, must_change_password,
+       failed_attempts, locked_until, created_at, updated_at, last_login_at
+FROM datasette_accounts_users
+ORDER BY username;
+
+-- name: countEnabledAdmins :value
+SELECT COUNT(*) FROM datasette_accounts_users
+WHERE is_admin = 1 AND disabled = 0;
+
+-- Count of OTHER enabled admins — the last-admin guard (excludes the target).
+-- name: countOtherEnabledAdmins :value
+SELECT COUNT(*) FROM datasette_accounts_users
+WHERE is_admin = 1 AND disabled = 0 AND id != $exclude_id::text;
+
+-- Does this username already exist? (1 or None) — create/rename collision check.
+-- name: usernameExists :value
+SELECT 1 FROM datasette_accounts_users WHERE username = $username::text;
+
+-- Does an account with this id exist? (1 or None) — actor-grant validation.
+-- name: userIdExists :value
+SELECT 1 FROM datasette_accounts_users WHERE id = $user_id::text;
+
+-- Is the target an enabled admin? (1/0 or None) — drives the last-admin guard
+-- in disable/delete. Mirrors ENABLED_ADMIN_PREDICATE in db.py.
+-- name: selectUserIsEnabledAdmin :value
+SELECT is_admin = 1 AND disabled = 0
+FROM datasette_accounts_users WHERE id = $user_id::text;
+
+-- Current admin/disabled flags for the toggle-admin guard.
+-- name: selectUserAdminState :row -> AdminStateRow
+SELECT is_admin, disabled FROM datasette_accounts_users WHERE id = $user_id::text;
+
+-- Current failed-attempts count, read back inside the lockout transaction.
+-- name: selectFailedAttempts :value
+SELECT failed_attempts FROM datasette_accounts_users WHERE id = $user_id::text;
+
+-- ============================================================================
+-- Users (writes)
+-- ============================================================================
+
+-- name: insertUser
+INSERT INTO datasette_accounts_users
+    (id, username, password_hash, is_admin, disabled, must_change_password,
+     failed_attempts, locked_until, created_at, updated_at)
+VALUES ($id::text, $username::text, $password_hash::text, $is_admin::integer, 0,
+        $must_change_password::integer, 0, NULL, $created_at::text, $updated_at::text);
+
+-- name: bumpFailedAttempts
+UPDATE datasette_accounts_users
+SET failed_attempts = failed_attempts + 1, updated_at = $updated_at::text
+WHERE id = $user_id::text;
+
+-- name: setLockedUntil
+UPDATE datasette_accounts_users
+SET locked_until = $locked_until::text WHERE id = $user_id::text;
+
+-- name: clearLockout
+UPDATE datasette_accounts_users
+SET failed_attempts = 0, locked_until = NULL, updated_at = $updated_at::text
+WHERE id = $user_id::text;
+
+-- name: recordLoginSuccess
+UPDATE datasette_accounts_users
+SET failed_attempts = 0, locked_until = NULL,
+    last_login_at = $timestamp::text, updated_at = $timestamp::text
+WHERE id = $user_id::text;
+
+-- name: resetPassword
+UPDATE datasette_accounts_users
+SET password_hash = $password_hash::text, must_change_password = 1,
+    failed_attempts = 0, locked_until = NULL, updated_at = $updated_at::text
+WHERE id = $user_id::text;
+
+-- name: changeOwnPassword
+UPDATE datasette_accounts_users
+SET password_hash = $password_hash::text, must_change_password = 0,
+    failed_attempts = 0, locked_until = NULL, updated_at = $updated_at::text
+WHERE id = $user_id::text;
+
+-- name: setUserAdmin
+UPDATE datasette_accounts_users
+SET is_admin = $is_admin::integer, updated_at = $updated_at::text
+WHERE id = $user_id::text;
+
+-- name: setUserDisabled
+UPDATE datasette_accounts_users
+SET disabled = $disabled::integer, updated_at = $updated_at::text
+WHERE id = $user_id::text;
+
+-- name: deleteUser
+DELETE FROM datasette_accounts_users WHERE id = $user_id::text;
+
+-- ============================================================================
+-- Sessions
+-- ============================================================================
+
+-- name: selectSession :row -> SessionRow
+SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip
+FROM datasette_accounts_sessions
+WHERE token_sha256 = $token_sha256::text;
+
+-- name: listSessionsForUser :rows -> SessionRow
+SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip
+FROM datasette_accounts_sessions
+WHERE actor_id = $actor_id::text
+ORDER BY last_seen_at DESC;
+
+-- name: insertSession
+INSERT INTO datasette_accounts_sessions
+    (token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip)
+VALUES ($token_sha256::text, $actor_id::text, $created_at::text, $expires_at::text,
+        $last_seen_at::text, $user_agent::text::, $ip::text::);
+
+-- name: touchLastSeen
+UPDATE datasette_accounts_sessions
+SET last_seen_at = $last_seen_at::text WHERE token_sha256 = $token_sha256::text;
+
+-- name: deleteSession
+DELETE FROM datasette_accounts_sessions WHERE token_sha256 = $token_sha256::text;
+
+-- name: deleteSessionForActor
+DELETE FROM datasette_accounts_sessions
+WHERE token_sha256 = $token_sha256::text AND actor_id = $actor_id::text;
+
+-- name: deleteSessionsForActor
+DELETE FROM datasette_accounts_sessions WHERE actor_id = $actor_id::text;
+
+-- Delete all of an actor's sessions except the current one (change-own-password).
+-- name: deleteOtherSessionsForActor
+DELETE FROM datasette_accounts_sessions
+WHERE actor_id = $actor_id::text AND token_sha256 != $token_sha256::text;
+
+-- name: deleteExpiredSessions
+DELETE FROM datasette_accounts_sessions WHERE expires_at <= $now::text;
+
+-- ============================================================================
+-- Login audit
+-- ============================================================================
+
+-- name: insertLoginAttempt
+INSERT INTO datasette_accounts_login_audit (username, ip, timestamp, success, reason)
+VALUES ($username::text::, $ip::text::, $timestamp::text, $success::integer,
+        $reason::text::);
+
+-- Most-recent-first login-audit rows with optional exact username/ip filters
+-- (AND-combined). A NULL filter param disables that clause, collapsing the old
+-- dynamic WHERE builder into one static query. `limit` is clamped in db.py.
+-- name: listLoginAttempts :rows -> LoginAttemptRow
+SELECT id, username, ip, timestamp, success, reason
+FROM datasette_accounts_login_audit
+WHERE ($username::text:: IS NULL OR username = $username::text::)
+  AND ($ip::text:: IS NULL OR ip = $ip::text::)
+ORDER BY id DESC
+LIMIT $limit::integer;
+
+-- name: purgeLoginAudit
+DELETE FROM datasette_accounts_login_audit WHERE timestamp < $cutoff::text;
+
+-- ============================================================================
+-- Admin audit
+-- ============================================================================
+
+-- name: insertAdminAudit
+INSERT INTO datasette_accounts_admin_audit
+    (timestamp, operation, actor_id, target_id, detail)
+VALUES ($timestamp::text, $operation::text, $actor_id::text::, $target_id::text::,
+        $detail::text::);
+
+-- ============================================================================
+-- Capability grants
+-- ============================================================================
+
+-- Insert a capability grant, ignoring duplicates (partial unique indexes).
+-- RETURNING id yields a row only when a row was actually inserted, so the
+-- helper returns the new id on insert and None when the grant already existed.
+-- name: insertCapabilityGrant :value
+INSERT OR IGNORE INTO datasette_accounts_capability_grants
+    (action, principal_type, actor_id, group_id, created_at, created_by)
+VALUES ($action::text, $principal_type::text, $actor_id::text::, $group_id::integer::,
+        $created_at::text, $created_by::text::)
+RETURNING id;
+
+-- Row backing revoke-capability's audit detail; None when the id is unknown.
+-- name: selectCapabilityGrant :row -> CapabilityGrantRow
+SELECT action, principal_type, actor_id, group_id
+FROM datasette_accounts_capability_grants
+WHERE id = $grant_id::integer;
+
+-- name: deleteCapabilityGrant
+DELETE FROM datasette_accounts_capability_grants WHERE id = $grant_id::integer;
+
+-- ============================================================================
+-- Site messages
+-- ============================================================================
+
+-- name: listSiteMessages :rows -> SiteMessageRow
+SELECT key, body FROM datasette_accounts_site_messages;
+
+-- name: selectSiteMessage :value
+SELECT body FROM datasette_accounts_site_messages WHERE key = $key::text;
+
+-- name: upsertSiteMessage
+INSERT INTO datasette_accounts_site_messages (key, body, updated_at, updated_by)
+VALUES ($key::text, $body::text, $updated_at::text, $updated_by::text::)
+ON CONFLICT(key) DO UPDATE SET
+    body = excluded.body, updated_at = excluded.updated_at,
+    updated_by = excluded.updated_by;
+
+-- Delete a site-message slot; RETURNING key is non-empty only when a row
+-- existed, so the helper reports whether anything was cleared.
+-- name: deleteSiteMessage :value
+DELETE FROM datasette_accounts_site_messages WHERE key = $key::text RETURNING key;

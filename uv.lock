@@ -179,6 +179,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "solite" },
 ]
 
 [package.metadata]
@@ -201,6 +202,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff", specifier = ">=0.15.0" },
+    { name = "solite", specifier = ">=0.0.1a36" },
 ]
 
 [[package]]
@@ -1342,6 +1344,16 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "solite"
+version = "0.0.1a37"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/00/8686dbb091bd6b2bf37c3e1c909ebc94c8a016811003c84fb7a9c7bdf2ca/solite-0.0.1a37-py3-none-macosx_11_0_arm64.whl", hash = "sha256:471f6198ee6b92da02fc6018fa377acebbdef3ab6a829c7a5cb7a60e769ba20a", size = 11437794, upload-time = "2026-06-14T15:25:50.946Z" },
+    { url = "https://files.pythonhosted.org/packages/56/9b/e838012a8f47cc3f3b2a8d5c837a831642edf2acbba3daab7bfe88da1318/solite-0.0.1a37-py3-none-manylinux_2_39_x86_64.whl", hash = "sha256:d3aa3988833c550eac4dbef94b7b37f8ee6283b788b756e728410f4f9139b8e2", size = 15062450, upload-time = "2026-06-14T15:25:54.118Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/a7/c34f4a08d55c85e6ac03a51076c0e62e74db60e5ee823249d4a7b0fc4924/solite-0.0.1a37-py3-none-win_amd64.whl", hash = "sha256:e3111bf903bde1762197b0e1e6377d6bd3824e0dfcbc33d6b22b15382b52a5b7", size = 10425946, upload-time = "2026-06-14T15:25:47.963Z" },
 ]
 
 [[package]]

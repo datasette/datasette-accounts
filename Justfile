@@ -35,6 +35,55 @@ shots *names:
     npm --prefix frontend exec -- playwright install chromium
     node frontend/scripts/screenshots.mjs {{names}}
 
+# --- Codegen: SQL queries ---
+
+# Regenerate datasette_accounts/sql/_queries_generated.py from queries.sql.
+#
+# internal_migrations.py is the single source of truth for schema. We apply it
+# to an ephemeral sqlite file, then point `solite codegen` at that .db so it can
+# resolve column types + nullability from the post-migration state. The JSON IR
+# (_queries.sql.json) is an intermediate — gitignored, not checked in.
+# tools/gen_queries.py turns the IR into `conn`-first Python helpers that slot
+# into db.py's execute_fn / execute_write_fn closures.
+codegen-queries:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # solite --schema keys off file extension; mktemp -u returns an
+    # extensionless path so we append .db.
+    tmp_db=$(mktemp -u).db
+    trap "rm -f $tmp_db" EXIT
+    uv run python tools/gen_schema_db.py "$tmp_db"
+    uv run solite codegen \
+        --schema "$tmp_db" \
+        datasette_accounts/sql/queries.sql \
+        > datasette_accounts/sql/_queries.sql.json
+    uv run python tools/gen_queries.py \
+        datasette_accounts/sql/_queries.sql.json \
+        > datasette_accounts/sql/_queries_generated.py
+    uv run ruff format datasette_accounts/sql/_queries_generated.py
+
+# CI gate: regenerate into a temp file and diff against the checked-in helper.
+# Fails if `just codegen-queries` wasn't run after editing queries.sql /
+# internal_migrations.py / tools/gen_queries.py.
+check-queries-fresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp_db=$(mktemp -u).db
+    tmp_ir=$(mktemp)
+    tmp_py=$(mktemp)
+    trap "rm -f $tmp_db $tmp_ir $tmp_py" EXIT
+    uv run python tools/gen_schema_db.py "$tmp_db"
+    uv run solite codegen \
+        --schema "$tmp_db" \
+        datasette_accounts/sql/queries.sql \
+        > "$tmp_ir"
+    uv run python tools/gen_queries.py "$tmp_ir" > "$tmp_py"
+    uv run ruff format --quiet "$tmp_py"
+    diff -u datasette_accounts/sql/_queries_generated.py "$tmp_py" || {
+        echo "::error:: _queries_generated.py is stale — run \`just codegen-queries\`"
+        exit 1
+    }
+
 # Tests
 test:
     uv run pytest -q

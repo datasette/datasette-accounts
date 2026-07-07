@@ -1,17 +1,30 @@
 """Internal-database access layer.
 
-All tables live in Datasette's internal database. Reads use ``execute``;
-writes that must be atomic (mutation + audit row in one transaction, or the
-last-admin count-then-write guard) use ``execute_write_fn`` with a sync
-callback that runs inside a single transaction on the write connection.
+All tables live in Datasette's internal database. This module is pure
+orchestration over the typed query helpers generated from ``sql/queries.sql``
+(see ``sql/_queries_generated.py``): reads run the ``conn``-first helpers
+inside ``execute_fn`` (a read connection); writes that must be atomic (mutation
++ audit row in one transaction, or the last-admin count-then-write guard) run
+them inside ``execute_write_fn`` (a single transaction on the write
+connection). The generated helpers return dataclasses; this layer converts them
+back to plain dicts so callers (routes, page data) keep their existing shape.
+
+A few queries touch datasette-acl's tables, which aren't in our schema and may
+be absent at runtime, so codegen can't type them — those stay hand-written here
+(``acl_available``, ``list_acl_groups``, ``list_capability_grants``).
 """
 
+import dataclasses
 import datetime
 import json as jsonlib
 
 from ulid import ULID
 
-# Namespaced table names (the internal DB is shared with other plugins).
+from .sql import _queries_generated as gen
+
+# Namespaced table names (the internal DB is shared with other plugins). Kept
+# for the hand-written acl-touching queries below; the generated helpers hard-
+# code the same names (codegen needs literal SQL).
 USERS = "datasette_accounts_users"
 SESSIONS = "datasette_accounts_sessions"
 LOGIN_AUDIT = "datasette_accounts_login_audit"
@@ -65,34 +78,39 @@ def new_id() -> str:
     return str(ULID())
 
 
+def _as_dict(row):
+    """Generated dataclass row → plain dict (or None), matching the old
+    ``dict(sqlite_row)`` shape callers expect."""
+    return dataclasses.asdict(row) if row is not None else None
+
+
 # --------------------------------------------------------------------------
 # Reads
 # --------------------------------------------------------------------------
 
 
 async def get_user_by_username(db, username):
-    result = await db.execute(f"SELECT * FROM {USERS} WHERE username = ?", [username])
-    row = result.first()
-    return dict(row) if row else None
+    row = await db.execute_fn(
+        lambda conn: gen.select_user_by_username(conn, username=username)
+    )
+    return _as_dict(row)
 
 
 async def get_user_by_id(db, user_id):
-    result = await db.execute(f"SELECT * FROM {USERS} WHERE id = ?", [user_id])
-    row = result.first()
-    return dict(row) if row else None
+    row = await db.execute_fn(lambda conn: gen.select_user_by_id(conn, user_id=user_id))
+    return _as_dict(row)
 
 
 async def get_session(db, token_sha):
-    result = await db.execute(
-        f"SELECT * FROM {SESSIONS} WHERE token_sha256 = ?", [token_sha]
+    row = await db.execute_fn(
+        lambda conn: gen.select_session(conn, token_sha256=token_sha)
     )
-    row = result.first()
-    return dict(row) if row else None
+    return _as_dict(row)
 
 
 async def list_users(db):
-    result = await db.execute(f"SELECT * FROM {USERS} ORDER BY username")
-    return [dict(r) for r in result.rows]
+    rows = await db.execute_fn(gen.list_users)
+    return [dataclasses.asdict(r) for r in rows]
 
 
 def to_user_row(r):
@@ -111,18 +129,14 @@ def to_user_row(r):
 
 
 async def list_sessions_for_user(db, actor_id):
-    result = await db.execute(
-        f"SELECT * FROM {SESSIONS} WHERE actor_id = ? ORDER BY last_seen_at DESC",
-        [actor_id],
+    rows = await db.execute_fn(
+        lambda conn: gen.list_sessions_for_user(conn, actor_id=actor_id)
     )
-    return [dict(r) for r in result.rows]
+    return [dataclasses.asdict(r) for r in rows]
 
 
 async def count_enabled_admins(db):
-    result = await db.execute(
-        f"SELECT COUNT(*) FROM {USERS} WHERE {ENABLED_ADMIN_PREDICATE}"
-    )
-    return result.single_value()
+    return await db.execute_fn(gen.count_enabled_admins)
 
 
 # --------------------------------------------------------------------------
@@ -131,10 +145,15 @@ async def count_enabled_admins(db):
 
 
 async def record_login_attempt(db, username, ip, success, reason=None):
-    await db.execute_write(
-        f"INSERT INTO {LOGIN_AUDIT} (username, ip, timestamp, success, reason) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [username, ip, now_iso(), 1 if success else 0, reason],
+    await db.execute_write_fn(
+        lambda conn: gen.insert_login_attempt(
+            conn,
+            username=username,
+            ip=ip,
+            timestamp=now_iso(),
+            success=1 if success else 0,
+            reason=reason,
+        )
     )
 
 
@@ -147,22 +166,17 @@ async def list_login_attempts(db, username=None, ip=None, limit=200):
     """Most-recent-first login-audit rows, optionally filtered by exact
     username and/or ip (AND-combined). `limit` is clamped to LOGIN_ATTEMPTS_MAX.
     """
-    where = []
-    params = []
-    if username:
-        where.append("username = ?")
-        params.append(username)
-    if ip:
-        where.append("ip = ?")
-        params.append(ip)
-    clause = f"WHERE {' AND '.join(where)}" if where else ""
-    params.append(max(1, min(limit, LOGIN_ATTEMPTS_MAX)))
-    result = await db.execute(
-        f"SELECT id, username, ip, timestamp, success, reason FROM {LOGIN_AUDIT} "
-        f"{clause} ORDER BY id DESC LIMIT ?",
-        params,
+    clamped = max(1, min(limit, LOGIN_ATTEMPTS_MAX))
+    rows = await db.execute_fn(
+        lambda conn: gen.list_login_attempts(
+            # Empty string means "no filter" (matches the old truthiness check).
+            conn,
+            username=username or None,
+            ip=ip or None,
+            limit=clamped,
+        )
     )
-    return [dict(r) for r in result.rows]
+    return [dataclasses.asdict(r) for r in rows]
 
 
 async def register_failed_attempt(db, user_id, lockout_threshold, lockout_minutes):
@@ -172,23 +186,14 @@ async def register_failed_attempt(db, user_id, lockout_threshold, lockout_minute
     """
 
     def write(conn):
-        conn.execute(
-            f"UPDATE {USERS} SET failed_attempts = failed_attempts + 1, "
-            "updated_at = ? WHERE id = ?",
-            [now_iso(), user_id],
-        )
-        count = conn.execute(
-            f"SELECT failed_attempts FROM {USERS} WHERE id = ?", [user_id]
-        ).fetchone()[0]
+        gen.bump_failed_attempts(conn, updated_at=now_iso(), user_id=user_id)
+        count = gen.select_failed_attempts(conn, user_id=user_id)
         if lockout_threshold and count >= lockout_threshold:
             locked_until = (
                 datetime.datetime.now(datetime.timezone.utc)
                 + datetime.timedelta(minutes=lockout_minutes)
             ).isoformat()
-            conn.execute(
-                f"UPDATE {USERS} SET locked_until = ? WHERE id = ?",
-                [locked_until, user_id],
-            )
+            gen.set_locked_until(conn, locked_until=locked_until, user_id=user_id)
         return count
 
     return await db.execute_write_fn(write)
@@ -196,11 +201,10 @@ async def register_failed_attempt(db, user_id, lockout_threshold, lockout_minute
 
 async def record_login_success(db, user_id):
     """Clear the lockout counters and stamp last_login_at on a successful login."""
-    ts = now_iso()
-    await db.execute_write(
-        f"UPDATE {USERS} SET failed_attempts = 0, locked_until = NULL, "
-        "last_login_at = ?, updated_at = ? WHERE id = ?",
-        [ts, ts, user_id],
+    await db.execute_write_fn(
+        lambda conn: gen.record_login_success(
+            conn, timestamp=now_iso(), user_id=user_id
+        )
     )
 
 
@@ -209,10 +213,17 @@ async def create_session(db, actor_id, token_sha, ttl_days, user_agent, ip):
     expires_at = (
         datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=ttl_days)
     ).isoformat()
-    await db.execute_write(
-        f"INSERT INTO {SESSIONS} (token_sha256, actor_id, created_at, expires_at, "
-        "last_seen_at, user_agent, ip) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [token_sha, actor_id, ts, expires_at, ts, user_agent, ip],
+    await db.execute_write_fn(
+        lambda conn: gen.insert_session(
+            conn,
+            token_sha256=token_sha,
+            actor_id=actor_id,
+            created_at=ts,
+            expires_at=expires_at,
+            last_seen_at=ts,
+            user_agent=user_agent,
+            ip=ip,
+        )
     )
 
 
@@ -228,28 +239,30 @@ async def touch_last_seen(db, token_sha, stored_last_seen):
             last = last.replace(tzinfo=datetime.timezone.utc)
         if (now - last).total_seconds() < LAST_SEEN_THROTTLE_SECONDS:
             return
-    await db.execute_write(
-        f"UPDATE {SESSIONS} SET last_seen_at = ? WHERE token_sha256 = ?",
-        [now.isoformat(), token_sha],
+    await db.execute_write_fn(
+        lambda conn: gen.touch_last_seen(
+            conn, last_seen_at=now.isoformat(), token_sha256=token_sha
+        )
     )
 
 
 async def delete_session(db, token_sha):
-    await db.execute_write(
-        f"DELETE FROM {SESSIONS} WHERE token_sha256 = ?", [token_sha]
+    await db.execute_write_fn(
+        lambda conn: gen.delete_session(conn, token_sha256=token_sha)
     )
 
 
 async def delete_expired_sessions(db):
-    await db.execute_write(f"DELETE FROM {SESSIONS} WHERE expires_at <= ?", [now_iso()])
+    await db.execute_write_fn(
+        lambda conn: gen.delete_expired_sessions(conn, now=now_iso())
+    )
 
 
 async def purge_login_audit(db, retention_days):
     if not retention_days:
         return
-    await db.execute_write(
-        f"DELETE FROM {LOGIN_AUDIT} WHERE timestamp < ?",
-        [_iso_minus_days(retention_days)],
+    await db.execute_write_fn(
+        lambda conn: gen.purge_login_audit(conn, cutoff=_iso_minus_days(retention_days))
     )
 
 
@@ -259,16 +272,13 @@ async def purge_login_audit(db, retention_days):
 
 
 def _audit(conn, operation, actor_id, target_id, detail=None):
-    conn.execute(
-        f"INSERT INTO {ADMIN_AUDIT} (timestamp, operation, actor_id, target_id, detail) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [
-            now_iso(),
-            operation,
-            actor_id,
-            target_id,
-            jsonlib.dumps(detail) if detail is not None else None,
-        ],
+    gen.insert_admin_audit(
+        conn,
+        timestamp=now_iso(),
+        operation=operation,
+        actor_id=actor_id,
+        target_id=target_id,
+        detail=jsonlib.dumps(detail) if detail is not None else None,
     )
 
 
@@ -279,24 +289,17 @@ async def create_user(
     ts = now_iso()
 
     def write(conn):
-        exists = conn.execute(
-            f"SELECT 1 FROM {USERS} WHERE username = ?", [username]
-        ).fetchone()
-        if exists:
+        if gen.username_exists(conn, username=username):
             raise UsernameTakenError(username)
-        conn.execute(
-            f"INSERT INTO {USERS} (id, username, password_hash, is_admin, disabled, "
-            "must_change_password, failed_attempts, locked_until, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, 0, ?, 0, NULL, ?, ?)",
-            [
-                user_id,
-                username,
-                password_hash,
-                1 if is_admin else 0,
-                1 if must_change_password else 0,
-                ts,
-                ts,
-            ],
+        gen.insert_user(
+            conn,
+            id=user_id,
+            username=username,
+            password_hash=password_hash,
+            is_admin=1 if is_admin else 0,
+            must_change_password=1 if must_change_password else 0,
+            created_at=ts,
+            updated_at=ts,
         )
         _audit(
             conn,
@@ -312,12 +315,10 @@ async def create_user(
 
 async def reset_password(db, actor_id, target_id, password_hash):
     def write(conn):
-        conn.execute(
-            f"UPDATE {USERS} SET password_hash = ?, must_change_password = 1, "
-            "failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?",
-            [password_hash, now_iso(), target_id],
+        gen.reset_password(
+            conn, password_hash=password_hash, updated_at=now_iso(), user_id=target_id
         )
-        conn.execute(f"DELETE FROM {SESSIONS} WHERE actor_id = ?", [target_id])
+        gen.delete_sessions_for_actor(conn, actor_id=target_id)
         _audit(conn, "reset-password", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -325,19 +326,16 @@ async def reset_password(db, actor_id, target_id, password_hash):
 
 async def toggle_admin(db, actor_id, target_id):
     def write(conn):
-        row = conn.execute(
-            f"SELECT is_admin, disabled FROM {USERS} WHERE id = ?", [target_id]
-        ).fetchone()
-        if not row:
+        state = gen.select_user_admin_state(conn, user_id=target_id)
+        if state is None:
             return None
-        is_admin, disabled = row[0], row[1]
+        is_admin, disabled = state.is_admin, state.disabled
         new_value = 0 if is_admin else 1
         # Demoting the last enabled admin is forbidden.
         if is_admin and not disabled:
             _guard_last_admin(conn, exclude_id=target_id)
-        conn.execute(
-            f"UPDATE {USERS} SET is_admin = ?, updated_at = ? WHERE id = ?",
-            [new_value, now_iso(), target_id],
+        gen.set_user_admin(
+            conn, is_admin=new_value, updated_at=now_iso(), user_id=target_id
         )
         _audit(conn, "toggle-admin", actor_id, target_id, {"is_admin": bool(new_value)})
         return new_value
@@ -347,16 +345,10 @@ async def toggle_admin(db, actor_id, target_id):
 
 async def disable_user(db, actor_id, target_id):
     def write(conn):
-        row = conn.execute(
-            f"SELECT {ENABLED_ADMIN_PREDICATE} FROM {USERS} WHERE id = ?", [target_id]
-        ).fetchone()
-        if row and row[0]:
+        if gen.select_user_is_enabled_admin(conn, user_id=target_id):
             _guard_last_admin(conn, exclude_id=target_id)
-        conn.execute(
-            f"UPDATE {USERS} SET disabled = 1, updated_at = ? WHERE id = ?",
-            [now_iso(), target_id],
-        )
-        conn.execute(f"DELETE FROM {SESSIONS} WHERE actor_id = ?", [target_id])
+        gen.set_user_disabled(conn, disabled=1, updated_at=now_iso(), user_id=target_id)
+        gen.delete_sessions_for_actor(conn, actor_id=target_id)
         _audit(conn, "disable", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -364,10 +356,7 @@ async def disable_user(db, actor_id, target_id):
 
 async def enable_user(db, actor_id, target_id):
     def write(conn):
-        conn.execute(
-            f"UPDATE {USERS} SET disabled = 0, updated_at = ? WHERE id = ?",
-            [now_iso(), target_id],
-        )
+        gen.set_user_disabled(conn, disabled=0, updated_at=now_iso(), user_id=target_id)
         _audit(conn, "enable", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -375,13 +364,10 @@ async def enable_user(db, actor_id, target_id):
 
 async def delete_user(db, actor_id, target_id):
     def write(conn):
-        row = conn.execute(
-            f"SELECT {ENABLED_ADMIN_PREDICATE} FROM {USERS} WHERE id = ?", [target_id]
-        ).fetchone()
-        if row and row[0]:
+        if gen.select_user_is_enabled_admin(conn, user_id=target_id):
             _guard_last_admin(conn, exclude_id=target_id)
-        conn.execute(f"DELETE FROM {SESSIONS} WHERE actor_id = ?", [target_id])
-        conn.execute(f"DELETE FROM {USERS} WHERE id = ?", [target_id])
+        gen.delete_sessions_for_actor(conn, actor_id=target_id)
+        gen.delete_user(conn, user_id=target_id)
         _audit(conn, "delete", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -389,11 +375,7 @@ async def delete_user(db, actor_id, target_id):
 
 async def unlock_user(db, actor_id, target_id):
     def write(conn):
-        conn.execute(
-            f"UPDATE {USERS} SET failed_attempts = 0, locked_until = NULL, "
-            "updated_at = ? WHERE id = ?",
-            [now_iso(), target_id],
-        )
+        gen.clear_lockout(conn, updated_at=now_iso(), user_id=target_id)
         _audit(conn, "unlock", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -401,10 +383,7 @@ async def unlock_user(db, actor_id, target_id):
 
 async def revoke_session(db, actor_id, target_id, token_sha):
     def write(conn):
-        conn.execute(
-            f"DELETE FROM {SESSIONS} WHERE token_sha256 = ? AND actor_id = ?",
-            [token_sha, target_id],
-        )
+        gen.delete_session_for_actor(conn, token_sha256=token_sha, actor_id=target_id)
         _audit(conn, "revoke-session", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -412,7 +391,7 @@ async def revoke_session(db, actor_id, target_id, token_sha):
 
 async def logout_everywhere(db, actor_id, target_id):
     def write(conn):
-        conn.execute(f"DELETE FROM {SESSIONS} WHERE actor_id = ?", [target_id])
+        gen.delete_sessions_for_actor(conn, actor_id=target_id)
         _audit(conn, "logout-everywhere", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -422,14 +401,11 @@ async def change_own_password(db, user_id, password_hash, current_token_sha):
     """Set a new password, clear the forced-change flag, revoke OTHER sessions."""
 
     def write(conn):
-        conn.execute(
-            f"UPDATE {USERS} SET password_hash = ?, must_change_password = 0, "
-            "failed_attempts = 0, locked_until = NULL, updated_at = ? WHERE id = ?",
-            [password_hash, now_iso(), user_id],
+        gen.change_own_password(
+            conn, password_hash=password_hash, updated_at=now_iso(), user_id=user_id
         )
-        conn.execute(
-            f"DELETE FROM {SESSIONS} WHERE actor_id = ? AND token_sha256 != ?",
-            [user_id, current_token_sha],
+        gen.delete_other_sessions_for_actor(
+            conn, actor_id=user_id, token_sha256=current_token_sha
         )
         _audit(conn, "change-own-password", user_id, user_id)
 
@@ -442,11 +418,7 @@ def _guard_last_admin(conn, exclude_id):
     Runs inside the caller's write transaction so the count and the write are
     atomic (no last-two-admins race).
     """
-    remaining = conn.execute(
-        f"SELECT COUNT(*) FROM {USERS} WHERE {ENABLED_ADMIN_PREDICATE} AND id != ?",
-        [exclude_id],
-    ).fetchone()[0]
-    if remaining == 0:
+    if gen.count_other_enabled_admins(conn, exclude_id=exclude_id) == 0:
         raise LastAdminError()
 
 
@@ -461,6 +433,9 @@ async def acl_available(db):
     Gates the "group" principal everywhere: without acl there are no groups to
     reference, so the resolver skips the group clause and the UI hides the
     group picker.
+
+    Hand-written (not codegen): introspects sqlite_master for acl tables that
+    aren't part of this plugin's schema.
     """
     result = await db.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
@@ -470,7 +445,11 @@ async def acl_available(db):
 
 
 async def list_acl_groups(db):
-    """Non-deleted acl groups as [{id, name}] for the group picker (or [])."""
+    """Non-deleted acl groups as [{id, name}] for the group picker (or []).
+
+    Hand-written (not codegen): reads acl_groups, which is owned by
+    datasette-acl and absent from this plugin's schema.
+    """
     if not await acl_available(db):
         return []
     result = await db.execute(
@@ -485,6 +464,11 @@ async def list_capability_grants(db, actions=None):
     Joins users (for actor grants → username) and, when acl is present,
     acl_groups (for group grants → group name). ``actions`` optionally filters
     to a set/list of action names.
+
+    Hand-written (not codegen): the group-name subquery references acl_groups
+    only when acl is installed (a runtime-conditional join), and the optional
+    ``action IN (...)`` list is variable-length — neither fits codegen's static
+    schema model.
     """
     has_acl = await acl_available(db)
     group_name = (
@@ -533,11 +517,11 @@ async def grant_capability(
 
     def write(conn):
         if principal_type == "actor":
-            if not conn.execute(
-                f"SELECT 1 FROM {USERS} WHERE id = ?", [actor_val]
-            ).fetchone():
+            if not gen.user_id_exists(conn, user_id=actor_val):
                 raise InvalidGrantError("unknown account")
         elif principal_type == "group":
+            # acl tables are hand-checked: they're not in our schema and may be
+            # absent, so we can't codegen these lookups.
             has_groups = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
                 [ACL_GROUPS],
@@ -551,13 +535,16 @@ async def grant_capability(
                 [group_val],
             ).fetchone():
                 raise InvalidGrantError("unknown group")
-        cur = conn.execute(
-            f"INSERT OR IGNORE INTO {CAPABILITY_GRANTS} "
-            "(action, principal_type, actor_id, group_id, created_at, created_by) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [action, principal_type, actor_val, group_val, ts, actor_id],
+        new_id = gen.insert_capability_grant(
+            conn,
+            action=action,
+            principal_type=principal_type,
+            actor_id=actor_val,
+            group_id=group_val,
+            created_at=ts,
+            created_by=actor_id,
         )
-        if cur.rowcount == 0:
+        if new_id is None:
             return False  # already granted — no-op, no audit noise
         _audit(
             conn,
@@ -575,17 +562,44 @@ async def grant_capability(
     return await db.execute_write_fn(write)
 
 
+async def revoke_capability(db, actor_id, grant_id):
+    """Delete a capability grant by id. Returns True if a row was removed."""
+
+    def write(conn):
+        row = gen.select_capability_grant(conn, grant_id=grant_id)
+        if row is None:
+            return False
+        gen.delete_capability_grant(conn, grant_id=grant_id)
+        _audit(
+            conn,
+            "revoke-capability",
+            actor_id,
+            row.actor_id,
+            {
+                "action": row.action,
+                "principal_type": row.principal_type,
+                "group_id": row.group_id,
+            },
+        )
+        return True
+
+    return await db.execute_write_fn(write)
+
+
+# --------------------------------------------------------------------------
+# Site messages
+# --------------------------------------------------------------------------
+
+
 async def get_site_messages(db):
     """All stored site messages as ``{key: body}`` (only non-empty rows exist)."""
-    result = await db.execute(f"SELECT key, body FROM {SITE_MESSAGES}")
-    return {r["key"]: r["body"] for r in result.rows}
+    rows = await db.execute_fn(gen.list_site_messages)
+    return {r.key: r.body for r in rows}
 
 
 async def get_site_message(db, key):
     """The stored body for one slot, or ``None`` when it has never been set."""
-    result = await db.execute(f"SELECT body FROM {SITE_MESSAGES} WHERE key = ?", [key])
-    row = result.first()
-    return row["body"] if row else None
+    return await db.execute_fn(lambda conn: gen.select_site_message(conn, key=key))
 
 
 async def set_site_message(db, actor_id, key, body):
@@ -604,42 +618,14 @@ async def set_site_message(db, actor_id, key, body):
 
     def write(conn):
         if body:
-            conn.execute(
-                f"INSERT INTO {SITE_MESSAGES} (key, body, updated_at, updated_by) "
-                "VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
-                "body = excluded.body, updated_at = excluded.updated_at, "
-                "updated_by = excluded.updated_by",
-                [key, body, ts, actor_id],
+            gen.upsert_site_message(
+                conn, key=key, body=body, updated_at=ts, updated_by=actor_id
             )
             _audit(conn, "set-message", actor_id, None, {"key": key})
         else:
-            cur = conn.execute(f"DELETE FROM {SITE_MESSAGES} WHERE key = ?", [key])
-            if cur.rowcount:
+            # RETURNING key is non-empty only when a row existed.
+            if gen.delete_site_message(conn, key=key) is not None:
                 _audit(conn, "clear-message", actor_id, None, {"key": key})
         return body
-
-    return await db.execute_write_fn(write)
-
-
-async def revoke_capability(db, actor_id, grant_id):
-    """Delete a capability grant by id. Returns True if a row was removed."""
-
-    def write(conn):
-        row = conn.execute(
-            f"SELECT action, principal_type, actor_id, group_id "
-            f"FROM {CAPABILITY_GRANTS} WHERE id = ?",
-            [grant_id],
-        ).fetchone()
-        if not row:
-            return False
-        conn.execute(f"DELETE FROM {CAPABILITY_GRANTS} WHERE id = ?", [grant_id])
-        _audit(
-            conn,
-            "revoke-capability",
-            actor_id,
-            row[2],
-            {"action": row[0], "principal_type": row[1], "group_id": row[3]},
-        )
-        return True
 
     return await db.execute_write_fn(write)

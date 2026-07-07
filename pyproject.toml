@@ -24,6 +24,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "ruff>=0.15.0",
+    "solite>=0.0.1a36",
 ]
 
 [project.entry-points.datasette]
