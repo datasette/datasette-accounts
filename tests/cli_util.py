@@ -32,6 +32,4 @@ def query(db_path, sql, params=()):
 
 def make_admin(db_path, username="admin", password="adminpass123"):
     """Create the first admin non-interactively (``-y`` bypasses the prompt)."""
-    return run(
-        "bootstrap-admin", username, "--password", password, "-y", "-i", db_path
-    )
+    return run("bootstrap-admin", username, "--password", password, "-y", "-i", db_path)
