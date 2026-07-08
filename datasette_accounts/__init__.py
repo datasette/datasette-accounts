@@ -440,10 +440,22 @@ async def _send_redirect(send, location):
 
 @hookimpl
 def register_commands(cli):
+    from .cli import accounts
+
+    cli.add_command(accounts)
+
+    # Deprecated top-level alias for `datasette accounts hash-password`, kept for
+    # one release. Emits a stderr notice, then delegates to the same code.
     @cli.command(name="hash-password")
     @click.argument("password", required=False)
     def hash_password_command(password):
-        """Hash a password with the datasette-accounts PBKDF2 scheme."""
+        """Hash a password (deprecated: use `datasette accounts hash-password`)."""
+        click.secho(
+            "Warning: `datasette hash-password` is deprecated — use "
+            "`datasette accounts hash-password`.",
+            fg="yellow",
+            err=True,
+        )
         if not password:
             password = click.prompt(
                 "Password", hide_input=True, confirmation_prompt=True
