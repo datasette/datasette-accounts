@@ -1,0 +1,10 @@
+# Generated page-data type artifacts (regenerate with `just types`)
+src/page_data/*_schema.json
+src/page_data/*.types.ts
+
+# Generated API types
+api.d.ts
+
+# Build output
+dist/
+node_modules/

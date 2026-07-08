@@ -196,9 +196,9 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "datasette-acl", editable = "../datasette-acl" },
-    { name = "datasette-acl-share", editable = "../datasette-acl-share" },
-    { name = "datasette-paper", editable = "../datasette-paper" },
+    { name = "datasette-acl" },
+    { name = "datasette-acl-share" },
+    { name = "datasette-paper" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff", specifier = ">=0.15.0" },
@@ -208,54 +208,34 @@ dev = [
 [[package]]
 name = "datasette-acl"
 version = "0.6a1"
-source = { editable = "../datasette-acl" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasette" },
     { name = "sqlite-migrate" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "datasette", specifier = ">=1.0a20" },
-    { name = "sqlite-migrate", specifier = "==0.1b0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
+sdist = { url = "https://files.pythonhosted.org/packages/fc/84/208e362e0e68b870a6f6b7bd366d5e481748a4c306ae9b4f3fdb4a22b48e/datasette_acl-0.6a1.tar.gz", hash = "sha256:21bd58e1aa663f48cf5a6def80dbd4125631cac91316b7a2e082e47136a5cf28", size = 94568, upload-time = "2026-06-22T17:26:44.768Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/4d/a885c4a48e081d3d2abf110af5a27c4e31b4429ed66fc12215a06f251e0f/datasette_acl-0.6a1-py3-none-any.whl", hash = "sha256:31f2bf5ad83b44724d70e0eeb92cc4027e1af17be741936c422f16a7440e07a2", size = 72389, upload-time = "2026-06-22T17:26:43.491Z" },
 ]
 
 [[package]]
 name = "datasette-acl-share"
 version = "0.0.1a7"
-source = { editable = "../datasette-acl-share" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasette" },
     { name = "datasette-acl" },
     { name = "datasette-vite" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "datasette", specifier = ">=1.0a30" },
-    { name = "datasette-acl", specifier = ">=0.6a1" },
-    { name = "datasette-vite", specifier = ">=0.0.1a4" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "datasette-debug-bar", specifier = ">=0.0.1a1" },
-    { name = "datasette-debug-gotham", specifier = ">=0.1.0a3" },
-    { name = "datasette-user-profiles", specifier = ">=0.1.0a9" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
+sdist = { url = "https://files.pythonhosted.org/packages/c9/b0/ba9eed77a9eb5c92021fd85b381245be4b611f152c2e055951fe0ffb3ad2/datasette_acl_share-0.0.1a7.tar.gz", hash = "sha256:75e177a33a9f22ed52bc4ff4003fe53903ac23d89cbb6ede2f871ca0ac858315", size = 47433, upload-time = "2026-06-23T00:57:09.933Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fe/7e/e78b493909415ed98e7b851c53a1c5e3316a8684fdb04e5659f1668a3170/datasette_acl_share-0.0.1a7-py3-none-any.whl", hash = "sha256:4168136c1532095f4c5e7882b0b39d5afc2418f822dd5545b05649ca558a4703", size = 42520, upload-time = "2026-06-23T00:57:09.015Z" },
 ]
 
 [[package]]
 name = "datasette-paper"
 version = "0.0.2a5"
-source = { editable = "../datasette-paper" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasette" },
     { name = "datasette-acl" },
@@ -269,30 +249,9 @@ dependencies = [
     { name = "sqlite-migrate" },
     { name = "sqlite-utils" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "datasette", specifier = ">1a0" },
-    { name = "datasette-acl", specifier = ">=0.6a1" },
-    { name = "datasette-acl-share", specifier = ">=0.0.1a4" },
-    { name = "datasette-plugin-router", specifier = ">=0.0.1a4" },
-    { name = "datasette-user-profiles", specifier = ">=0.1.0a8" },
-    { name = "datasette-vite", specifier = ">=0.0.1a4" },
-    { name = "markdown-it-py", extras = ["plugins"], specifier = ">=3.0" },
-    { name = "prosemirror", specifier = ">=0.6.1" },
-    { name = "pydantic", specifier = ">=2" },
-    { name = "sqlite-migrate", specifier = ">=0.1b0" },
-    { name = "sqlite-utils", specifier = ">=3.38" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "datasette-agent" },
-    { name = "datasette-debug-gotham", specifier = ">=0.1.0a3" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff", specifier = ">=0.15.12" },
-    { name = "solite", specifier = ">=0.0.1a36" },
+sdist = { url = "https://files.pythonhosted.org/packages/34/ed/41b0fe1c02c7022d0e4689fceb5b28dd64c48caf169258c9245b66180ed6/datasette_paper-0.0.2a5.tar.gz", hash = "sha256:83cfa695fbabe52422884b6f8aa99fbceac169f8918e438552a8bb502301bf9a", size = 649815, upload-time = "2026-07-06T22:56:54.984Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/46/a9/dd9d7b742ed5de1ac44193f5c00edd74dc82b886287f3e77b7c59c25cbcc/datasette_paper-0.0.2a5-py3-none-any.whl", hash = "sha256:672b3648902439410d33b55c7cf64ac300d3a866375c81b2d3d3a275f5397e10", size = 577835, upload-time = "2026-07-06T22:56:53.544Z" },
 ]
 
 [[package]]

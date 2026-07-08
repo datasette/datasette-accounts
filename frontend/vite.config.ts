@@ -1,16 +1,8 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { readFileSync, writeFileSync } from "fs";
-import { compile } from "json-schema-to-typescript";
-import { glob } from "glob";
+import { compileAll, compileSchema } from "./scripts/gen-page-types.mjs";
 
 const DEV_PORT = 5180;
-
-async function compileSchema(file: string) {
-  const schema = JSON.parse(readFileSync(file, "utf-8"));
-  const ts = await compile(schema, "");
-  writeFileSync(file.replace("_schema.json", ".types.ts"), ts);
-}
 
 export default defineConfig({
   server: {
@@ -24,9 +16,7 @@ export default defineConfig({
     {
       name: "page-data-types",
       async buildStart() {
-        for (const file of glob.sync("src/page_data/*_schema.json")) {
-          await compileSchema(file);
-        }
+        await compileAll();
       },
       async handleHotUpdate({ file, server }) {
         if (!file.endsWith("_schema.json")) return;

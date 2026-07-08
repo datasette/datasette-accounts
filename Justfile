@@ -4,9 +4,12 @@
 # Regenerate all TypeScript types (OpenAPI + page-data)
 types: types-pagedata
 
-# Page-data JSON schemas -> TS (also compiled by the Vite buildStart plugin)
+# Page-data Pydantic models -> JSON schemas -> TS. The Python step writes
+# *_schema.json; the node step compiles those to *.types.ts (the same
+# compile the Vite buildStart plugin runs, so a full build isn't required).
 types-pagedata:
     uv run python scripts/typegen-pagedata.py
+    npm run gen-types --prefix frontend
 
 # Build the frontend for production (outputs into the package)
 frontend *flags:
