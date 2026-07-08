@@ -1,11 +1,25 @@
 # datasette-accounts
 
+> [!WARNING]
+> This plugin is experimental!
+
+
 Username/password authentication for [Datasette](https://datasette.io) with
 **accounts stored in the internal database** (not in plugin config). Provisioning,
 password resets, disabling, and admin management all happen at runtime through an
-admin UI and JSON API, guarded by a real Datasette 1.0 permission.
+admin UI, a `datasette accounts` CLI, and a JSON API, guarded by a real Datasette
+1.0 permission.
 
 > **"Basic" as in database-backed basic login — not HTTP Basic auth.**
+
+Users log in at `/-/login`:
+
+![The login page: a Log in heading with username and password fields, and a help note reading "Trouble signing in? Email data-help@example.com."](docs/screenshots/login.png)
+
+Admins manage accounts at `/-/admin/users` — create accounts and disable, lock,
+reset, promote, or delete existing ones:
+
+![The admin accounts table listing users with admin, status, and lock columns and per-user action buttons.](docs/screenshots/admin.png)
 
 ## Features
 
@@ -15,14 +29,10 @@ admin UI and JSON API, guarded by a real Datasette 1.0 permission.
   an admin session list. Disabling an account or revoking a session takes effect
   on the next request.
 - **A registered admin action** (`datasette-accounts-admin`) that is
-  self-answered for `root` and enabled admins, and composes with `datasette-acl`
-  / config `allow` blocks.
-- **Admin-controlled capabilities** — grant global actions like "create a paper"
-  to individual accounts, groups, or "any signed-in user" from a
-  **Capabilities** admin page, no config edits required. Per-document sharing and
-  group management stay in [`datasette-acl`](https://github.com/datasette/datasette-acl);
-  accounts admins get access to it automatically. See
-  [Permissions & capabilities](#permissions--capabilities).
+  self-answered for `root` and enabled admins, and composes with config `allow`
+  blocks.
+- **A `datasette accounts` CLI** for provisioning and managing accounts from the
+  shell — the same audited, guarded code path as the web admin UI.
 - **Security hardening** built in: timing-safe login (no username enumeration),
   PBKDF2 run off the event loop, unconditional CSRF gates, strict `?next=`
   validation, brute-force lockout (shared by login and change-password), forced
@@ -52,88 +62,74 @@ ephemeral. For any real use:
 datasette mydata.db --internal accounts.db
 ```
 
-### 2. Bootstrap the first admin with `--root`
+### 2. Create the first admin
 
-There is no admin until you make one. Start Datasette with `--root`:
+There is no admin until you make one. The quickest way is the CLI, which writes
+directly to the internal database — point it at the same `accounts.db`:
+
+```bash
+datasette accounts bootstrap-admin alice --generate -i accounts.db
+# Created admin alice.
+# Password (shown once): …
+```
+
+`bootstrap-admin` is **idempotent** — if an enabled admin already exists it prints
+`admin already exists — skipping` and exits `0`, so it is safe to drop into a
+container entrypoint or provisioning script. Pass `--password-stdin` to feed a
+password without exposing it in argv, or `--generate` to mint one.
+
+Prefer to bootstrap from the browser? Start Datasette with `--root`:
 
 ```bash
 datasette mydata.db --internal accounts.db --root
 ```
 
 Datasette prints a one-time `http://…/-/auth-token?token=…` URL that logs you in
-as `root`. `root` is always allowed the admin action, so open **`/-/admin/users`**,
-create your first real admin account, then restart without `--root`.
-
-Alternatively, hash a password for scripted setup:
-
-```bash
-datasette hash-password
-# pbkdf2_sha256$480000$…
-```
+as `root`, who is always allowed the admin action. Open **`/-/admin/users`**,
+create your first admin account, then restart without `--root`.
 
 ### 3. Day-to-day
 
 - Users log in at **`/-/login`** and manage their own password at **`/-/account`**.
-- Admins manage accounts at **`/-/admin/users`** and capabilities at
-  **`/-/admin/capabilities`**.
+- Admins manage accounts at **`/-/admin/users`**.
 - The Datasette menu gains **Log in** / **Log out** / **Your account** entries,
-  and **Accounts** / **Capabilities** (plus **Groups & sharing** when
-  `datasette-acl` is installed) for admins.
+  and an **Accounts** link for admins.
 
-## Screenshots
+## Managing accounts from the shell
 
-Users log in at `/-/login`. Admins can add an optional help/contact note shown
-below the form (see [Messages](#messages) below):
+The `datasette accounts` command group is the CLI counterpart to the admin UI. It
+does not touch the internal tables directly — every command reconstructs a
+Datasette instance and calls the same audited, guarded `db.*` functions the web
+routes use, so last-admin guards, session revocation, and the audit trail all
+apply identically. Every mutating command requires `-i/--internal PATH`
+(a persistent DB); every data-emitting command supports `--json`.
 
-![The login page: a Log in heading with username and password fields, and a help note reading "Trouble signing in? Email data-help@example.com."](docs/screenshots/login.png)
+```
+datasette accounts create USERNAME       # --admin, --generate, --password-stdin, --must-change
+datasette accounts bootstrap-admin NAME   # idempotent first-admin creation
+datasette accounts list                   # --admins / --pending / --locked / --disabled
+datasette accounts reset-password USERNAME
+datasette accounts promote / demote USERNAME
+datasette accounts disable / enable USERNAME
+datasette accounts unlock USERNAME        # clear lockout counters
+datasette accounts logout USERNAME        # revoke all of a user's sessions
+datasette accounts delete USERNAME --yes
+datasette accounts audit                  # the admin-audit trail
+datasette accounts login-attempts         # the login-attempt audit
+datasette accounts hash-password [PASSWORD]
+```
 
-Admins manage accounts at `/-/admin/users` — create accounts and disable, lock,
-reset, promote, or delete existing ones:
+Run `datasette accounts COMMAND --help` for the full options of each. Generated
+passwords are printed once to stdout and never written to the audit trail or
+logs.
 
-![The admin accounts table listing users with admin, status, and lock columns and per-user action buttons.](docs/screenshots/admin.png)
+## Messages
 
-Each account's active sessions can be listed and revoked individually:
-
-![The accounts table with a user's session drawer expanded, showing an active session with a Revoke button.](docs/screenshots/admin-sessions.png)
-
-Every sign-in attempt is logged. Admins review them at
-**`/-/admin/login-attempts`** — each attempt's result and reason (wrong
-password, no such account, locked, disabled), filterable by the exact username
-entered or the client IP (the Accounts row menu links here pre-filtered for a
-user):
-
-![The Login attempts page: a table of sign-in attempts with Time, Username, IP, Result, and Reason columns, showing a mix of successes and failures including repeated failures from one IP.](docs/screenshots/login-attempts.png)
-
-Admins grant global capabilities at `/-/admin/capabilities` — here the
-`datasette-paper-create` action (registered by
-[`datasette-paper`](https://github.com/simonw/datasette-paper)) is granted to a
-group, to any signed-in user, and to one account:
-
-![The Capabilities page showing a "Can create new papers" card with Group: Editors, Any signed-in user, and @alice grant chips.](docs/screenshots/capabilities.png)
-
-Adding a grant picks a principal — a specific account, a group, or an audience:
-
-![The Capabilities page with the add-grant row open, showing a principal-type dropdown and account picker.](docs/screenshots/capabilities-add.png)
-
-Users change their own password at `/-/account`:
-
-![The account page: signed in as alice, with current-password and new-password fields.](docs/screenshots/account.png)
-
-### Messages
-
-Admins write optional help text at **`/-/admin/messages`** — a sign-in prompt
-for the homepage and a help/contact note for the login page. Blank hides a
-message. Bodies are admin-authored HTML rendered verbatim, so you can include
-links and `mailto:` contacts (only admins can edit them):
-
-![The Messages admin page with two cards, "Homepage sign-in prompt" and "Login help / contact", each holding a textarea of demo copy and a Save button.](docs/screenshots/messages.png)
-
-The homepage prompt then greets signed-out visitors:
-
-![The Datasette homepage showing a banner reading "Sign in to browse the internal datasets. Need access? Contact the data team." above the database list.](docs/screenshots/homepage-message.png)
-
-These are regenerated with `just shots` (a self-contained Playwright pipeline —
-see [Development](#development)).
+Admins can write optional help text at **`/-/admin/messages`** — a sign-in prompt
+shown on the homepage to signed-out visitors, and a help/contact note shown below
+the login form. Blank hides a message. Bodies are admin-authored HTML rendered
+verbatim, so you can include links and `mailto:` contacts (only admins can edit
+them).
 
 ## Configuration
 
@@ -146,21 +142,15 @@ defaults (a zero-config install works — it just warns about persistence):
 | `password_min_length` | int | `8` | minimum new-password length (max is fixed at 1024) |
 | `lockout_threshold` | int | `5` | consecutive failures before lock; `0` disables lockout |
 | `lockout_minutes` | int | `15` | auto-unlock window after a lock |
-| `secure_cookie` | `"auto"` / `true` / `false` | `"auto"` | Secure flag on the session cookie |
+| `secure_cookie` | `"auto"` / `true` / `false` | `"auto"` | Secure flag on the session cookie; set `true` when serving over HTTPS |
 | `audit_retention_days` | int | `90` | delete `login_audit` rows older than this; `0` = keep forever |
-| `trust_proxy_headers` | bool | `false` | trust `X-Forwarded-Proto` / `X-Forwarded-For` (set only behind a trusted proxy) |
-| `grant_acl_admin` | bool | `true` | make accounts admins full `datasette-acl` admins (manage groups + all resource sharing) |
-| `grantable_actions` | list / null | `null` | explicit allowlist of grantable global actions; `null` = auto-discover |
-| `grantable_actions_deny` | list | `[]` | extra actions to hide from auto-discovery |
-| `public_audience_actions` | list | `[]` | actions for which `everyone` / `anonymous` audiences may be granted |
 
 ```yaml
 plugins:
   datasette-accounts:
     session_ttl_days: 30
     password_min_length: 12
-    secure_cookie: true        # recommended behind a TLS-terminating proxy
-    trust_proxy_headers: true  # only if a trusted proxy sets the forwarded headers
+    secure_cookie: true
     audit_retention_days: 30
 ```
 
@@ -183,118 +173,10 @@ or on the command line:
 datasette mydata.db --internal accounts.db -s permissions.profile_access.id '*'
 ```
 
-## Permissions & capabilities
-
-Datasette 1.0 permissions split into two kinds, and this plugin handles each in
-the place it belongs:
-
-- **Resource-scoped actions** (view/edit/share *this* paper, table ACLs, …) —
-  actions with a `resource_class`. These are owned by
-  [`datasette-acl`](https://github.com/datasette/datasette-acl): grant store,
-  groups, roles, per-resource admin UI, and the
-  [`datasette-acl-share`](https://github.com/datasette/datasette-acl-share)
-  dialog. This plugin does **not** duplicate any of it.
-- **Global / instance-level actions** (create a paper, create a place list, …) —
-  actions with `resource_class=None`. `datasette-acl` ignores these; historically
-  they could only be granted by hand-editing `datasette.yaml`. **This plugin adds
-  an admin UI for them** at `/-/admin/capabilities`.
-
-### Capability grants (`/-/admin/capabilities`)
-
-Admins grant a global action to a principal:
-
-- **an account** (any accounts user),
-- **a group** (a `datasette-acl` group — the picker appears when acl is installed),
-- **any signed-in user** (the `authenticated` audience).
-
-`everyone` / `anonymous` audiences are hidden for these write-oriented actions
-unless you opt an action in via `public_audience_actions`. Grants are
-**allow-only** and compose additively with `datasette.yaml` config and acl. Any
-config `permissions:` block that applies to an action is shown **read-only** on
-the page so you can see why a capability is in effect even with no grants listed.
-
-Which actions are grantable? By default, every registered global action except
-Datasette internals, `datasette-accounts-admin`, and `datasette-acl`. Restrict or
-extend that with `grantable_actions` / `grantable_actions_deny`.
-
-```yaml
-plugins:
-  datasette-accounts:
-    grantable_actions:            # optional — expose exactly these
-      - datasette-paper-create
-      - datasette-places-create
-    public_audience_actions:      # allow everyone/anonymous only where safe
-      - some-read-only-action
-```
-
-### The `datasette-acl` bridge
-
-When `datasette-acl` is installed, accounts admins are automatically granted its
-global `datasette-acl` permission (toggle with `grant_acl_admin`). That means an
-admin can manage **group membership** and **per-document sharing** (e.g. "the
-Editors group can manage papers") through acl's own UI — reachable from the
-**Groups & sharing** menu link — with no duplicate UI here. Accounts users are
-also exposed to acl's group-member picker and share dialog via the
-`datasette_acl_valid_actors` hook.
-
-Design notes and the decision log live in [`plans/permissions/`](plans/permissions/).
-
-### Deploying behind a reverse proxy (nginx / Caddy / Fly / Cloud Run)
-
-When TLS is terminated at a proxy, Datasette sees plain HTTP, so the default
-`secure_cookie: "auto"` will only mark the cookie `Secure` if the proxy forwards
-`X-Forwarded-Proto: https` **and** you set `trust_proxy_headers: true`. The
-simplest robust choice for a proxied production deployment is
-`secure_cookie: true`. `trust_proxy_headers` also governs which client IP is
-recorded in the audit trail — leave it `false` unless a trusted proxy sets those
-headers, or they become attacker-spoofable.
-
-## Security model
-
-- **Identity + global capabilities.** This plugin owns accounts, passwords,
-  sessions, one `is_admin` flag, and admin-managed grants of **global** actions
-  (see [Permissions & capabilities](#permissions--capabilities)). Resource-level
-  authorization (who can see which database/table/document) is delegated to
-  `datasette-acl` or config `allow` blocks, which consume the actor it emits:
-  `{"id": "<ULID>", "username": "…", "is_admin": bool}`. Capability grants are
-  allow-only and never emit a deny.
-- **Passwords** use PBKDF2-HMAC-SHA256 (480,000 iterations), run in a thread so a
-  verification never blocks the event loop.
-- **CSRF** is enforced unconditionally in the plugin (JSON Content-Type +
-  `Origin`/`Sec-Fetch-Site`), not by relying on middleware. All mutation
-  endpoints are POST-only.
-- **Forced password change** is enforced globally via an `asgi_wrapper`: a user
-  with a temporary password can reach only the account/change-password/logout
-  pages until they change it.
-- **Audit**: `login_audit` records login and change-password attempts;
-  `admin_audit` records every admin mutation (who, what, when, target).
-
-See [`plans/start/`](plans/start/) for the full design and decision log.
-
 ## Development
 
-```bash
-uv sync                       # Python deps
-npm install --prefix frontend # frontend deps
-just types                    # regenerate page-data types
-just frontend                 # build the Svelte frontend
-just test                     # pytest
-just check                    # ruff + svelte-check
-just shots                    # regenerate docs/screenshots/*.png (Playwright)
-```
-
-`just shots` boots a throwaway Datasette with seeded demo accounts
-(`frontend/scripts/shot-plugins/seed.py`), drives Playwright through the pages
-(`frontend/scripts/screenshots.mjs`), and writes the committed PNGs. It is
-deterministic — a re-run with no UI change produces no git diff — and is a
-manual local task, never run in CI.
-
-Three-terminal dev loop (Datasette 8006 / Vite 5180):
-
-```bash
-just frontend-dev     # Vite HMR
-just dev-with-hmr     # Datasette, restarts on .py changes
-```
+See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the security model, setup,
+and the dev loop.
 
 ## License
 
