@@ -458,3 +458,195 @@ async def test_invite_link_remint_invalidates_prior_link():
     )
     assert new_attempt.status_code == 200
     assert new_attempt.json()["ok"] is True
+
+
+# --------------------------------------------------------------------------
+# Reset links for existing accounts (admin/api/reset-link)
+# --------------------------------------------------------------------------
+
+
+async def _reset_link(ds, cookies, target_id):
+    r = await ds.client.post(
+        "/-/admin/api/reset-link",
+        content=json.dumps({"id": target_id}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    return r
+
+
+@pytest.mark.asyncio
+async def test_reset_link_minting_does_not_revoke_sessions():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    admin_cookies = await session_cookie(ds, admin_id)
+    await insert_user(ds, "kate")
+    _, kate_cookies = await login(ds, "kate", "password123")
+
+    r = await _reset_link(
+        ds,
+        admin_cookies,
+        (await db.get_user_by_username(ds.get_internal_database(), "kate"))["id"],
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["url"] and "/-/set-password?token=" in body["url"]
+    assert body["url"].startswith("http")
+
+    # Kate stays signed in until the link is actually used.
+    who = await ds.client.get("/-/actor.json", cookies=kate_cookies)
+    assert who.json()["actor"]["username"] == "kate"
+
+    internal = ds.get_internal_database()
+    audit = await internal.execute(
+        f"SELECT operation FROM {db.ADMIN_AUDIT} ORDER BY id DESC LIMIT 1"
+    )
+    assert audit.single_value() == "mint-reset-link"
+
+
+@pytest.mark.asyncio
+async def test_reset_token_page_shows_reset_purpose():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    admin_cookies = await session_cookie(ds, admin_id)
+    kate_id = await insert_user(ds, "kate")
+
+    r = await _reset_link(ds, admin_cookies, kate_id)
+    token = token_from_url(r.json()["url"])
+
+    page = await ds.client.get(f"/-/set-password?token={token}")
+    assert page_data(page) == {
+        "valid": True,
+        "purpose": "reset",
+        "username": "kate",
+        "token": token,
+    }
+
+
+@pytest.mark.asyncio
+async def test_complete_reset_sets_password_revokes_other_sessions_signs_in_fresh():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    admin_cookies = await session_cookie(ds, admin_id)
+    kate_id = await insert_user(ds, "kate")
+    # Two live sessions before the reset — both must die on completion.
+    _, old_cookies_1 = await login(ds, "kate", "password123")
+    _, old_cookies_2 = await login(ds, "kate", "password123")
+
+    token = token_from_url(
+        (await _reset_link(ds, admin_cookies, kate_id)).json()["url"]
+    )
+
+    r = await ds.client.post(
+        "/-/set-password/api/complete",
+        content=json.dumps({"token": token, "new_password": "fresh-password-1"}),
+        headers=JSON,
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "redirect": "/"}
+    new_cookie = r.cookies.get(COOKIE_NAME)
+    assert new_cookie
+
+    # Every pre-existing session is revoked...
+    for old in (old_cookies_1, old_cookies_2):
+        who = await ds.client.get("/-/actor.json", cookies=old)
+        assert who.json()["actor"] is None
+    # ...but the fresh session minted by the completion works.
+    who = await ds.client.get("/-/actor.json", cookies={COOKIE_NAME: new_cookie})
+    assert who.json()["actor"]["username"] == "kate"
+
+    # Old password dead, new password works.
+    old_login, _ = await login(ds, "kate", "password123")
+    assert old_login.status_code == 401
+    new_login, _ = await login(ds, "kate", "fresh-password-1")
+    assert new_login.json()["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_reset_link_requires_admin_and_post():
+    ds = await make_ds()
+    bob_id = await insert_user(ds, "bob")
+    bob_cookies = await session_cookie(ds, bob_id)
+
+    # Non-admin → 403.
+    r = await _reset_link(ds, bob_cookies, bob_id)
+    assert r.status_code == 403
+
+    # GET (wrong method, valid body — see the invite 405 test) → 405.
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    admin_cookies = await session_cookie(ds, admin_id)
+    r = await ds.client.request(
+        "GET",
+        "/-/admin/api/reset-link",
+        content=json.dumps({"id": bob_id}),
+        headers=JSON,
+        cookies=admin_cookies,
+    )
+    assert r.status_code == 405
+
+
+@pytest.mark.asyncio
+async def test_mint_for_unknown_account_404_and_writes_nothing():
+    # Minting checks the account exists inside the write transaction: a token
+    # for a phantom user would still be claimable (the claim-by-delete doesn't
+    # join users), producing a no-op password write + mis-attributed audit row.
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    admin_cookies = await session_cookie(ds, admin_id)
+
+    for path in ("/-/admin/api/reset-link", "/-/admin/api/invite-link"):
+        r = await ds.client.post(
+            path,
+            content=json.dumps({"id": "no-such-user"}),
+            headers=JSON,
+            cookies=admin_cookies,
+        )
+        assert r.status_code == 404, path
+        assert r.json() == {"ok": False, "error": "Unknown account"}, path
+
+    internal = ds.get_internal_database()
+    tokens = (
+        await internal.execute(f"SELECT COUNT(*) FROM {db.PASSWORD_TOKENS}")
+    ).single_value()
+    assert tokens == 0
+    audits = (
+        await internal.execute(
+            f"SELECT COUNT(*) FROM {db.ADMIN_AUDIT} WHERE operation LIKE 'mint-%'"
+        )
+    ).single_value()
+    assert audits == 0
+
+
+@pytest.mark.asyncio
+async def test_admin_reset_password_kills_outstanding_reset_link():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    admin_cookies = await session_cookie(ds, admin_id)
+    kate_id = await insert_user(ds, "kate")
+
+    token = token_from_url(
+        (await _reset_link(ds, admin_cookies, kate_id)).json()["url"]
+    )
+
+    # Admin resets the password out from under the outstanding link.
+    r = await ds.client.post(
+        "/-/admin/api/reset-password",
+        content=json.dumps({"id": kate_id, "password": "admin-chosen-1"}),
+        headers=JSON,
+        cookies=admin_cookies,
+    )
+    assert r.status_code == 200
+
+    # The link is dead end-to-end: page shows invalid, completion 400s.
+    page = await ds.client.get(f"/-/set-password?token={token}")
+    assert page_data(page)["valid"] is False
+    attempt = await ds.client.post(
+        "/-/set-password/api/complete",
+        content=json.dumps({"token": token, "new_password": "link-chosen-pass1"}),
+        headers=JSON,
+    )
+    assert attempt.status_code == 400
+    # And the link's password never took — the admin-chosen one did.
+    ok_login, _ = await login(ds, "kate", "admin-chosen-1")
+    assert ok_login.json()["ok"] is True

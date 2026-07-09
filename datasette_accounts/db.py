@@ -486,11 +486,18 @@ async def mint_password_token(db, actor_id, target_id, purpose, token_sha, ttl_h
     """Mint a fresh token for an existing account, killing any prior one.
 
     One live link per account regardless of purpose — minting always deletes
-    whatever token (invite or reset) the account already had.
+    whatever token (invite or reset) the account already had. Returns False
+    (nothing minted, no audit row) when the account doesn't exist — a token
+    for a phantom user would still be claimable (the claim-by-delete doesn't
+    join users), producing a no-op password write and a mis-attributed audit
+    row. The check runs inside the write transaction, so it can't race the
+    mint.
     """
     operation = "mint-invite-link" if purpose == "invite" else "mint-reset-link"
 
     def write(conn):
+        if not gen.user_id_exists(conn, user_id=target_id):
+            return False
         gen.delete_password_tokens_for_user(conn, user_id=target_id)
         gen.insert_password_token(
             conn,
@@ -501,8 +508,9 @@ async def mint_password_token(db, actor_id, target_id, purpose, token_sha, ttl_h
             created_by=actor_id,
         )
         _audit(conn, operation, actor_id, target_id)
+        return True
 
-    await db.execute_write_fn(write)
+    return await db.execute_write_fn(write)
 
 
 async def use_password_token(db, token_sha, password_hash):

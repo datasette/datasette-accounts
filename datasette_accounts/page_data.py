@@ -278,3 +278,10 @@ class InviteResponse(BaseModel):
     # The absolute one-time set-password URL, shown once.
     url: Optional[str] = None
     error: Optional[str] = None
+
+
+class ResetLinkResponse(BaseModel):
+    ok: bool
+    # The absolute one-time set-password URL, shown once.
+    url: Optional[str] = None
+    error: Optional[str] = None

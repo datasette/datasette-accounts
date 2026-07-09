@@ -175,9 +175,7 @@ async def set_password_complete(
         return Response.json({"ok": False, "error": str(e)}, status=400)
 
     new_hash = await ahash_password(body.new_password)
-    user_id = await db.use_password_token(
-        internal, token_sha256(body.token), new_hash
-    )
+    user_id = await db.use_password_token(internal, token_sha256(body.token), new_hash)
     if user_id is None:
         await db.record_login_attempt(internal, None, ip, False, "bad_token")
         return Response.json(
@@ -188,9 +186,7 @@ async def set_password_complete(
     if not user or user["disabled"]:
         # The password is set (and every session revoked) but a disabled
         # account never gets signed in.
-        return Response.json(
-            {"ok": True, "redirect": datasette.urls.path("/-/login")}
-        )
+        return Response.json({"ok": True, "redirect": datasette.urls.path("/-/login")})
 
     # Otherwise: the link just proved control of the account — sign them in
     # exactly like a successful authenticate() call.
@@ -367,6 +363,25 @@ async def admin_invite(datasette, request, body: Annotated[InviteRequest, Body()
     )
 
 
+async def _mint_link_response(datasette, request, target_id, purpose, ttl_hours):
+    """Shared invite-link / reset-link body: mint + one-time absolute URL."""
+    internal = datasette.get_internal_database()
+    raw_token = mint_token()
+    minted = await db.mint_password_token(
+        internal,
+        request.actor["id"],
+        target_id,
+        purpose,
+        token_sha256(raw_token),
+        ttl_hours,
+    )
+    if not minted:
+        return Response.json({"ok": False, "error": "Unknown account"}, status=404)
+    return Response.json(
+        {"ok": True, "url": _set_password_url(datasette, request, raw_token)}
+    )
+
+
 @router.POST("/-/admin/api/invite-link$")
 @require_admin
 async def admin_invite_link(datasette, request, body: Annotated[TargetRequest, Body()]):
@@ -376,19 +391,30 @@ async def admin_invite_link(datasette, request, body: Annotated[TargetRequest, B
     doesn't enforce that — minting always kills the account's prior
     outstanding link regardless of purpose (D: one live link per account).
     """
-    internal = datasette.get_internal_database()
-    raw_token = mint_token()
-    ttl_hours = security.config(datasette, "invite_ttl_hours")
-    await db.mint_password_token(
-        internal,
-        request.actor["id"],
+    return await _mint_link_response(
+        datasette,
+        request,
         body.id,
         "invite",
-        token_sha256(raw_token),
-        ttl_hours,
+        security.config(datasette, "invite_ttl_hours"),
     )
-    return Response.json(
-        {"ok": True, "url": _set_password_url(datasette, request, raw_token)}
+
+
+@router.POST("/-/admin/api/reset-link$")
+@require_admin
+async def admin_reset_link(datasette, request, body: Annotated[TargetRequest, Body()]):
+    """Mint a one-time reset link for an existing account.
+
+    Minting does NOT revoke the account's live sessions — the user stays
+    signed in until the link is actually used (completion revokes everything
+    and signs them in fresh).
+    """
+    return await _mint_link_response(
+        datasette,
+        request,
+        body.id,
+        "reset",
+        security.config(datasette, "reset_link_ttl_hours"),
     )
 
 
