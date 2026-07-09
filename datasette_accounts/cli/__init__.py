@@ -19,10 +19,12 @@ from . import (  # noqa: E402,F401
     disable,
     enable,
     hash_password,
+    invite,
     list_accounts,
     login_attempts,
     logout,
     promote,
+    reset_link,
     reset_password,
     unlock,
 )

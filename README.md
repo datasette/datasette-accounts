@@ -106,9 +106,11 @@ apply identically. Every mutating command requires `-i/--internal PATH`
 
 ```
 datasette accounts create USERNAME       # --admin, --generate, --password-stdin, --must-change
+datasette accounts invite USERNAME        # create + one-time invite link (--admin, --ttl-hours, --base-url)
 datasette accounts bootstrap-admin NAME   # idempotent first-admin creation
 datasette accounts list                   # --admins / --pending / --locked / --disabled
 datasette accounts reset-password USERNAME
+datasette accounts reset-link USERNAME    # one-time password-reset link (--ttl-hours, --base-url)
 datasette accounts promote / demote USERNAME
 datasette accounts disable / enable USERNAME
 datasette accounts unlock USERNAME        # clear lockout counters

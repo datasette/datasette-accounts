@@ -178,6 +178,30 @@ async def _require_user(internal, username):
     return user
 
 
+def _set_password_link(base_url, raw_token):
+    """The one-time set-password link for ``invite`` / ``reset-link``.
+
+    Path only unless ``--base-url`` supplies the site origin to prefix (the
+    CLI can't know where the site is served). The raw token is urlsafe, so
+    plain concatenation needs no encoding.
+    """
+    path = f"/-/set-password?token={raw_token}"
+    if base_url:
+        return base_url.rstrip("/") + path
+    return path
+
+
+def _base_url_option(f):
+    """Attach ``--base-url`` (origin prefix for printed links) to a command."""
+    return click.option(
+        "--base-url",
+        metavar="URL",
+        help="Site origin to prefix the printed link (e.g. "
+        "https://data.example.com). Without it only the path is printed — "
+        "prefix your site's origin before sending it.",
+    )(f)
+
+
 def _read_password(password, password_stdin):
     """Resolve a caller-supplied password from ``--password`` / ``--password-stdin``.
 
@@ -279,12 +303,13 @@ class AccountsGroup(click.Group):
     than one alphabetical blob."""
 
     SECTIONS = (
-        ("Provisioning", ("create", "bootstrap-admin")),
+        ("Provisioning", ("create", "invite", "bootstrap-admin")),
         (
             "Account lifecycle",
             (
                 "list",
                 "reset-password",
+                "reset-link",
                 "promote",
                 "demote",
                 "disable",
