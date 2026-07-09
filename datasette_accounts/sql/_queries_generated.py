@@ -672,6 +672,17 @@ WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
     return None
 
 
+def list_invited_user_ids(conn: sqlite3.Connection) -> list[str]:
+    sql = """\
+SELECT user_id FROM datasette_accounts_password_tokens
+WHERE purpose = 'invite'
+  AND expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+"""
+    params: dict[str, Any] = {}
+    cursor = conn.execute(sql, params)
+    return [row[0] for row in cursor.fetchall()]
+
+
 def set_password_from_token(
     conn: sqlite3.Connection, password_hash: str, user_id: str
 ) -> None:

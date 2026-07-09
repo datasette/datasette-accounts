@@ -282,6 +282,9 @@
 #app-root .badge-pending {
   color: var(--acc);
 }
+#app-root .badge-invited {
+  color: var(--ok);
+}
 
 /* Inline messages */
 #app-root .msg {

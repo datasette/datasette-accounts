@@ -650,3 +650,42 @@ async def test_admin_reset_password_kills_outstanding_reset_link():
     # And the link's password never took — the admin-chosen one did.
     ok_login, _ = await login(ds, "kate", "admin-chosen-1")
     assert ok_login.json()["ok"] is True
+
+
+# --------------------------------------------------------------------------
+# Invited flag on the admin surfaces (list API + page data)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_admin_surfaces_mark_invited_accounts():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    admin_cookies = await session_cookie(ds, admin_id)
+    _, token = await _invite(ds, admin_cookies, "nia")
+
+    async def flags():
+        listed = await ds.client.post(
+            "/-/admin/api/list", content="{}", headers=JSON, cookies=admin_cookies
+        )
+        api = {u["username"]: u["invited"] for u in listed.json()["users"]}
+        page = await ds.client.get("/-/admin/users", cookies=admin_cookies)
+        shell = {u["username"]: u["invited"] for u in page_data(page)["users"]}
+        # The page shell and the refresh API assemble rows through the same
+        # helper — they must always agree.
+        assert api == shell
+        return api
+
+    invited = await flags()
+    assert invited["nia"] is True
+    assert invited["admin"] is False
+
+    # Completing the invite clears the flag on both surfaces.
+    r = await ds.client.post(
+        "/-/set-password/api/complete",
+        content=json.dumps({"token": token, "new_password": "chosen-by-nia-1"}),
+        headers=JSON,
+    )
+    assert r.status_code == 200
+    invited = await flags()
+    assert invited["nia"] is False

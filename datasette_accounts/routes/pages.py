@@ -114,8 +114,8 @@ async def account_page(datasette, request):
 @require_admin_page
 async def admin_page(datasette, request):
     internal = datasette.get_internal_database()
-    rows = await db.list_users(internal)
-    users = [UserRow(**db.to_user_row(r)) for r in rows]
+    rows = await db.list_user_rows(internal)
+    users = [UserRow(**r) for r in rows]
     page_data = AdminPageData(users=users).model_dump()
     return await _render(
         datasette, request, "src/pages/admin/index.ts", "Accounts", page_data

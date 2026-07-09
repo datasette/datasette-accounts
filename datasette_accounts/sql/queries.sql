@@ -338,6 +338,14 @@ DELETE FROM datasette_accounts_password_tokens WHERE user_id = $user_id::text;
 DELETE FROM datasette_accounts_password_tokens
 WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
 
+-- User ids holding a live (unexpired) invite token. Merged into the admin
+-- user rows as the `invited` flag — deliberately not a users column (see
+-- plans/invite-links: the live token *is* the invited state).
+-- name: listInvitedUserIds :list
+SELECT user_id FROM datasette_accounts_password_tokens
+WHERE purpose = 'invite'
+  AND expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+
 -- Completing a token: set the password, clear must_change_password (the link
 -- itself proved control), stamp updated_at.
 -- name: setPasswordFromToken

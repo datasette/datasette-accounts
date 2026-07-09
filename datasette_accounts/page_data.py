@@ -23,6 +23,9 @@ class UserRow(BaseModel):
     disabled: bool
     must_change_password: bool
     locked: bool
+    # True while the account holds a live invite link (no password chosen yet).
+    # Derived from the password-tokens table, not a users column.
+    invited: bool
     created_at: str
     # None until the first successful sign-in — the account is still "pending".
     last_login_at: Optional[str] = None

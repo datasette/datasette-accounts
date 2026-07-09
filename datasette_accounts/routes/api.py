@@ -294,8 +294,8 @@ def _resolve_password(datasette, provided, generate):
 @require_admin
 async def admin_list(datasette, request):
     internal = datasette.get_internal_database()
-    rows = await db.list_users(internal)
-    users = [UserRow(**db.to_user_row(r)).model_dump() for r in rows]
+    rows = await db.list_user_rows(internal)
+    users = [UserRow(**r).model_dump() for r in rows]
     return Response.json({"ok": True, "users": users})
 
 

@@ -133,6 +133,26 @@ def to_user_row(r):
     }
 
 
+async def list_user_rows(db):
+    """UserRow presentation dicts for the admin surfaces (page + list API).
+
+    The single assembly point for admin user rows, so the page shell and the
+    refresh API can't drift: ``to_user_row`` plus the ``invited`` flag — True
+    while the account holds a live (unexpired) ``purpose='invite'`` token.
+    Deliberately not a users column: the live token *is* the invited state, so
+    completion / expiry / re-mint keep the flag correct for free.
+    """
+
+    def read(conn):
+        invited_ids = set(gen.list_invited_user_ids(conn))
+        return [
+            {**to_user_row(dataclasses.asdict(u)), "invited": u.id in invited_ids}
+            for u in gen.list_users(conn)
+        ]
+
+    return await db.execute_fn(read)
+
+
 async def list_sessions_for_user(db, actor_id):
     rows = await db.execute_fn(
         lambda conn: gen.list_sessions_for_user(conn, actor_id=actor_id)

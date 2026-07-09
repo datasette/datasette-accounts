@@ -335,3 +335,48 @@ async def test_purge_expired_password_tokens_via_db():
         await internal.execute(f"SELECT token_sha256 FROM {db.PASSWORD_TOKENS}")
     ).single_value()
     assert remaining == "live"
+
+
+@pytest.mark.asyncio
+async def test_list_user_rows_merges_invited_flag():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    await db.create_user(
+        internal,
+        actor_id=None,
+        username="norm",
+        password_hash="h",
+        is_admin=False,
+        must_change_password=False,
+    )
+    await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="livey",
+        is_admin=False,
+        token_sha="tok-live",
+        ttl_hours=72,
+    )
+    await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="stale",
+        is_admin=False,
+        token_sha="tok-expired",
+        ttl_hours=-1,
+    )
+
+    rows = {r["username"]: r for r in await db.list_user_rows(internal)}
+    # A regular account is never invited; only a LIVE invite token counts —
+    # an expired one means the invitation lapsed.
+    assert rows["norm"]["invited"] is False
+    assert rows["livey"]["invited"] is True
+    assert rows["stale"]["invited"] is False
+    # The rest of the row keeps the to_user_row shape.
+    assert rows["norm"]["locked"] is False
+    assert rows["norm"]["last_login_at"] is None
+
+    # Completing the invite consumes the token — no longer invited.
+    await db.use_password_token(internal, "tok-live", "newhash")
+    rows = {r["username"]: r for r in await db.list_user_rows(internal)}
+    assert rows["livey"]["invited"] is False
