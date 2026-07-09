@@ -329,6 +329,45 @@ def delete_user(conn: sqlite3.Connection, user_id: str) -> None:
     return None
 
 
+def normalize_future_timestamp(conn: sqlite3.Connection, value: str) -> Any | None:
+    sql = """\
+SELECT CASE
+    WHEN strftime('%Y-%m-%dT%H:%M:%f', $value::text) || '+00:00'
+         > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+    THEN strftime('%Y-%m-%dT%H:%M:%f', $value::text) || '+00:00'
+END;
+"""
+    params = {"value::text": value}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def expiry_in_days(conn: sqlite3.Connection, days: int) -> Any | None:
+    sql = """\
+SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d days', $days::integer))
+       || '+00:00';
+"""
+    params = {"days::integer": days}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def set_user_expiry(
+    conn: sqlite3.Connection, expires_at: str | None, user_id: str
+) -> None:
+    sql = """\
+UPDATE datasette_accounts_users
+SET expires_at = $expires_at::text::,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
+"""
+    params = {"expires_at::text::": expires_at, "user_id::text": user_id}
+    conn.execute(sql, params)
+    return None
+
+
 def select_session(conn: sqlite3.Connection, token_sha256: str) -> SessionRow | None:
     sql = """\
 SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip

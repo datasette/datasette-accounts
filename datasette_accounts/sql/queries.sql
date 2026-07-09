@@ -172,6 +172,41 @@ WHERE id = $user_id::text;
 DELETE FROM datasette_accounts_users WHERE id = $user_id::text;
 
 -- ============================================================================
+-- Account expiry (see plans/account-expiry)
+--
+-- SQL is the only clock: input parsing, offset-to-UTC conversion, relative
+-- deadlines, and the must-be-in-the-future check all happen here. Python only
+-- ferries strings (db.set_user_expiry raises InvalidExpiryError on NULL).
+-- ============================================================================
+
+-- Normalize an admin-supplied timestamp to the canonical millisecond-+00:00
+-- form, or NULL when it is unparseable or not in the future. strftime accepts
+-- the ISO-8601 time-string subset (bare date, ...THH:MM[:SS], optional Z or
+-- ±HH:MM offset — converted to UTC) and returns NULL for anything else, so one
+-- query does validation + normalization in a single place.
+-- name: normalizeFutureTimestamp :value
+SELECT CASE
+    WHEN strftime('%Y-%m-%dT%H:%M:%f', $value::text) || '+00:00'
+         > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+    THEN strftime('%Y-%m-%dT%H:%M:%f', $value::text) || '+00:00'
+END;
+
+-- The relative form: a deadline `days` from now (same printf-modifier
+-- convention as setLockedUntil / insertSession). Positivity is validated in
+-- Python — the one check that isn't a datetime operation.
+-- name: expiryInDays :value
+SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d days', $days::integer))
+       || '+00:00';
+
+-- NULL clears; a non-NULL value has already been normalized by
+-- normalizeFutureTimestamp / expiryInDays inside the same transaction.
+-- name: setUserExpiry
+UPDATE datasette_accounts_users
+SET expires_at = $expires_at::text::,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
+
+-- ============================================================================
 -- Sessions
 -- ============================================================================
 

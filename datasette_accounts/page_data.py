@@ -225,6 +225,15 @@ class ResetPasswordResponse(BaseModel):
     error: Optional[str] = None
 
 
+class SetExpiryRequest(BaseModel):
+    id: str
+    # At most one of the two; both omitted clears the deadline. `expires_at`
+    # is an ISO-ish timestamp parsed/normalized in SQL; `in_days` is a
+    # positive relative deadline computed in SQL.
+    expires_at: Optional[str] = None
+    in_days: Optional[int] = None
+
+
 class RevokeSessionRequest(BaseModel):
     id: str
     token_sha256: str

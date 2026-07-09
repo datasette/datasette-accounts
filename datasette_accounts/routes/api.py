@@ -19,6 +19,7 @@ from ..page_data import (
     RevokeCapabilityRequest,
     RevokeSessionRequest,
     SessionRow,
+    SetExpiryRequest,
     SetSiteMessageRequest,
     TargetRequest,
     UserRow,
@@ -509,6 +510,46 @@ async def admin_unlock(datasette, request, body: Annotated[TargetRequest, Body()
     internal = datasette.get_internal_database()
     await db.unlock_user(internal, request.actor["id"], body.id)
     return Response.json({"ok": True})
+
+
+@router.POST("/-/admin/api/set-expiry$")
+@require_admin
+async def admin_set_expiry(
+    datasette, request, body: Annotated[SetExpiryRequest, Body()]
+):
+    """Set, extend, or clear an account's expiry deadline.
+
+    All timestamp handling lives in db.set_user_expiry (which resolves the
+    stored value in SQL) — this route only maps errors to statuses. Clearing
+    (neither value form supplied) needs no last-admin guard.
+    """
+    if body.expires_at is not None and body.in_days is not None:
+        return Response.json(
+            {"ok": False, "error": "Provide either expires_at or in_days, not both"},
+            status=400,
+        )
+    internal = datasette.get_internal_database()
+    try:
+        result = await db.set_user_expiry(
+            internal,
+            request.actor["id"],
+            body.id,
+            at=body.expires_at,
+            in_days=body.in_days,
+        )
+    except db.InvalidExpiryError:
+        return Response.json(
+            {"ok": False, "error": "Expiry must be a valid timestamp in the future"},
+            status=400,
+        )
+    except db.LastAdminError:
+        return Response.json(
+            {"ok": False, "error": "Cannot set an expiry on the last admin"},
+            status=409,
+        )
+    if result is False:  # unknown target id (None means a successful clear)
+        return Response.json({"ok": False, "error": "Unknown account"}, status=404)
+    return Response.json({"ok": True, "expires_at": result})
 
 
 @router.POST("/-/admin/api/list-sessions$")

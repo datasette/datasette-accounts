@@ -816,6 +816,133 @@ async def test_live_session_dies_once_expiry_passes():
 
 
 # --------------------------------------------------------------------------
+# Account expiry — set/clear API (POST /-/admin/api/set-expiry)
+# --------------------------------------------------------------------------
+
+
+async def _admin_and_target(ds):
+    """An admin session plus a plain target account; returns (cookies, uid)."""
+    await insert_user(ds, "admin", is_admin=True)
+    uid = await insert_user(ds, "temp")
+    _, cookies = await login(ds, "admin", "password123")
+    return cookies, uid
+
+
+async def _set_expiry(ds, cookies, **body):
+    return await ds.client.post(
+        "/-/admin/api/set-expiry",
+        content=json.dumps(body),
+        headers=JSON,
+        cookies=cookies,
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_expiry_api_requires_admin():
+    ds = await make_ds()
+    await insert_user(ds, "plain")
+    _, cookies = await login(ds, "plain", "password123")
+    r = await _set_expiry(ds, cookies, id="whatever", in_days=30)
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_set_expiry_api_rejects_both_forms_and_bad_values():
+    ds = await make_ds()
+    cookies, uid = await _admin_and_target(ds)
+
+    r = await _set_expiry(ds, cookies, id=uid, expires_at="2099-01-01", in_days=30)
+    assert r.status_code == 400
+    assert "not both" in r.json()["error"]
+
+    for bad in (
+        {"expires_at": "not a date"},
+        {"expires_at": "2020-01-01"},
+        {"in_days": 0},
+        {"in_days": -3},
+    ):
+        r = await _set_expiry(ds, cookies, id=uid, **bad)
+        assert r.status_code == 400, bad
+        assert r.json()["error"] == "Expiry must be a valid timestamp in the future"
+
+    r = await _set_expiry(ds, cookies, id="ghost", in_days=30)
+    assert r.status_code == 404
+    assert r.json()["error"] == "Unknown account"
+
+
+@pytest.mark.asyncio
+async def test_set_expiry_api_normalizes_offsets_to_utc():
+    ds = await make_ds()
+    cookies, uid = await _admin_and_target(ds)
+    r = await _set_expiry(ds, cookies, id=uid, expires_at="2099-01-02T03:04:05+02:00")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "expires_at": "2099-01-02T01:04:05.000+00:00"}
+    internal = ds.get_internal_database()
+    user = await db.get_user_by_id(internal, uid)
+    assert user["expires_at"] == "2099-01-02T01:04:05.000+00:00"
+
+
+@pytest.mark.asyncio
+async def test_set_expiry_api_last_admin_409_and_clear():
+    ds = await make_ds()
+    cookies, uid = await _admin_and_target(ds)
+    internal = ds.get_internal_database()
+    admin = await db.get_user_by_username(internal, "admin")
+
+    # Putting a fuse on the only enabled admin is refused.
+    r = await _set_expiry(ds, cookies, id=admin["id"], in_days=30)
+    assert r.status_code == 409
+    assert r.json()["error"] == "Cannot set an expiry on the last admin"
+
+    # Set on a plain account, then clear (no value forms) — clears + audits.
+    r = await _set_expiry(ds, cookies, id=uid, in_days=30)
+    assert r.status_code == 200
+    r = await _set_expiry(ds, cookies, id=uid)
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "expires_at": None}
+    user = await db.get_user_by_id(internal, uid)
+    assert user["expires_at"] is None
+    audit = await db.list_admin_audit(internal, target_id=uid, limit=2)
+    assert [a["operation"] for a in audit] == ["clear-expiry", "set-expiry"]
+
+
+@pytest.mark.asyncio
+async def test_expiry_set_via_api_blocks_login_end_to_end():
+    """The full chain: an admin sets a deadline through the API (proving the
+    API → storage path), the stored deadline is then moved into the past
+    (directly, like test_live_session_dies_once_expiry_passes — no sleeping
+    through a real clock), and ticket 1's enforcement refuses the login with
+    the "expired" audit reason.
+    """
+    ds = await make_ds()
+    cookies, uid = await _admin_and_target(ds)
+    internal = ds.get_internal_database()
+
+    r = await _set_expiry(ds, cookies, id=uid, in_days=30)
+    assert r.status_code == 200
+    stored = r.json()["expires_at"]
+    assert stored is not None
+    assert (await db.get_user_by_id(internal, uid))["expires_at"] == stored
+
+    # The deadline "passes": rewrite the stored value into the past. The API
+    # itself can never set a past deadline (normalizeFutureTimestamp), which
+    # is exactly why the clock is advanced this way.
+    await internal.execute_write(
+        f"UPDATE {db.USERS} SET expires_at = ? WHERE id = ?", [PAST, uid]
+    )
+
+    r, session = await login(ds, "temp", "password123")
+    assert r.status_code == 401
+    assert not session
+    reason = (
+        await internal.execute(
+            f"SELECT reason FROM {db.LOGIN_AUDIT} ORDER BY id DESC LIMIT 1"
+        )
+    ).single_value()
+    assert reason == "expired"
+
+
+# --------------------------------------------------------------------------
 # M6 — user-profiles seeding (skips if user-profiles is not installed)
 # --------------------------------------------------------------------------
 
