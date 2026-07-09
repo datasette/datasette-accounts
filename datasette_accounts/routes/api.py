@@ -22,6 +22,7 @@ from ..page_data import (
     UserRow,
 )
 from ..passwords import (
+    UNUSABLE_PASSWORD,
     PasswordLengthError,
     ahash_password,
     averify_dummy,
@@ -83,14 +84,22 @@ async def authenticate(
 
     # 2/3. Exactly one PBKDF2 verify on every remaining path (dummy on miss).
     # The user-facing error stays generic; the specific reason lives only in the
-    # admin-only audit log.
-    if user and not user["disabled"]:
+    # admin-only audit log. An invited account (no usable password yet) takes
+    # the same dummy-verify branch as no-such-user/disabled — it must be
+    # indistinguishable by response or timing.
+    has_password = user and user["password_hash"] != UNUSABLE_PASSWORD
+    if user and not user["disabled"] and has_password:
         ok = await averify_password(body.password, user["password_hash"])
         reason = "success" if ok else "bad_password"
     else:
         await averify_dummy(body.password)
         ok = False
-        reason = "disabled" if user else "no_such_user"
+        if not user:
+            reason = "no_such_user"
+        elif user["disabled"]:
+            reason = "disabled"
+        else:
+            reason = "no_password"
 
     await db.record_login_attempt(internal, body.username, ip, ok, reason)
 
@@ -111,6 +120,7 @@ async def authenticate(
         ip,
     )
     await db.delete_expired_sessions(internal)
+    await db.purge_expired_password_tokens(internal)
     await db.purge_login_audit(
         internal, security.config(datasette, "audit_retention_days")
     )

@@ -20,6 +20,7 @@ import json as jsonlib
 
 from ulid import ULID
 
+from .passwords import UNUSABLE_PASSWORD
 from .sql import _queries_generated as gen
 
 # Namespaced table names (the internal DB is shared with other plugins). Kept
@@ -31,6 +32,7 @@ LOGIN_AUDIT = "datasette_accounts_login_audit"
 ADMIN_AUDIT = "datasette_accounts_admin_audit"
 CAPABILITY_GRANTS = "datasette_accounts_capability_grants"
 SITE_MESSAGES = "datasette_accounts_site_messages"
+PASSWORD_TOKENS = "datasette_accounts_password_tokens"
 
 # datasette-acl tables we reference (softly) for the "group" principal. We never
 # write them — acl owns them — but we join them to resolve group membership +
@@ -334,6 +336,7 @@ async def reset_password(db, actor_id, target_id, password_hash):
     def write(conn):
         gen.reset_password(conn, password_hash=password_hash, user_id=target_id)
         gen.delete_sessions_for_actor(conn, actor_id=target_id)
+        gen.delete_password_tokens_for_user(conn, user_id=target_id)
         _audit(conn, "reset-password", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -362,6 +365,7 @@ async def disable_user(db, actor_id, target_id):
             _guard_last_admin(conn, exclude_id=target_id)
         gen.set_user_disabled(conn, disabled=1, user_id=target_id)
         gen.delete_sessions_for_actor(conn, actor_id=target_id)
+        gen.delete_password_tokens_for_user(conn, user_id=target_id)
         _audit(conn, "disable", actor_id, target_id)
 
     await db.execute_write_fn(write)
@@ -380,6 +384,7 @@ async def delete_user(db, actor_id, target_id):
         if gen.select_user_is_enabled_admin(conn, user_id=target_id):
             _guard_last_admin(conn, exclude_id=target_id)
         gen.delete_sessions_for_actor(conn, actor_id=target_id)
+        gen.delete_password_tokens_for_user(conn, user_id=target_id)
         gen.delete_user(conn, user_id=target_id)
         _audit(conn, "delete", actor_id, target_id)
 
@@ -431,6 +436,107 @@ def _guard_last_admin(conn, exclude_id):
     """
     if gen.count_other_enabled_admins(conn, exclude_id=exclude_id) == 0:
         raise LastAdminError()
+
+
+# --------------------------------------------------------------------------
+# Password tokens (one-time invite / reset links — see plans/invite-links)
+# --------------------------------------------------------------------------
+
+
+async def create_invited_user(db, actor_id, username, is_admin, token_sha, ttl_hours):
+    """Create an account with no usable password plus its invite token.
+
+    One write transaction: the account (UNUSABLE_PASSWORD, so it can't log in
+    until the link is used), the token, and the audit row.
+    """
+    user_id = new_id()
+
+    def write(conn):
+        if gen.username_exists(conn, username=username):
+            raise UsernameTakenError(username)
+        gen.insert_user(
+            conn,
+            id=user_id,
+            username=username,
+            password_hash=UNUSABLE_PASSWORD,
+            is_admin=1 if is_admin else 0,
+            must_change_password=0,
+        )
+        gen.insert_password_token(
+            conn,
+            token_sha256=token_sha,
+            user_id=user_id,
+            purpose="invite",
+            ttl_hours=ttl_hours,
+            created_by=actor_id,
+        )
+        _audit(
+            conn,
+            "invite",
+            actor_id,
+            user_id,
+            {"username": username, "is_admin": bool(is_admin)},
+        )
+        return user_id
+
+    return await db.execute_write_fn(write)
+
+
+async def mint_password_token(db, actor_id, target_id, purpose, token_sha, ttl_hours):
+    """Mint a fresh token for an existing account, killing any prior one.
+
+    One live link per account regardless of purpose — minting always deletes
+    whatever token (invite or reset) the account already had.
+    """
+    operation = "mint-invite-link" if purpose == "invite" else "mint-reset-link"
+
+    def write(conn):
+        gen.delete_password_tokens_for_user(conn, user_id=target_id)
+        gen.insert_password_token(
+            conn,
+            token_sha256=token_sha,
+            user_id=target_id,
+            purpose=purpose,
+            ttl_hours=ttl_hours,
+            created_by=actor_id,
+        )
+        _audit(conn, operation, actor_id, target_id)
+
+    await db.execute_write_fn(write)
+
+
+async def use_password_token(db, token_sha, password_hash):
+    """Claim a token and set the new password. Returns the user id, or None.
+
+    Claim-by-delete inside the write transaction: the DELETE itself requires
+    an unexpired row, so a double-submit race or an expired-but-unpurged link
+    both simply find nothing to claim. On a successful claim, every session
+    for the account is revoked — a link that could set the password must also
+    be able to force a re-login.
+    """
+
+    def write(conn):
+        user_id = gen.delete_password_token(conn, token_sha256=token_sha)
+        if user_id is None:
+            return None
+        gen.set_password_from_token(conn, password_hash=password_hash, user_id=user_id)
+        gen.delete_sessions_for_actor(conn, actor_id=user_id)
+        _audit(conn, "set-password-via-link", user_id, user_id)
+        return user_id
+
+    return await db.execute_write_fn(write)
+
+
+async def get_password_token(db, token_sha):
+    """The live (non-expired) token row for the GET set-password page, or None."""
+    row = await db.execute_fn(
+        lambda conn: gen.select_password_token(conn, token_sha256=token_sha)
+    )
+    return _as_dict(row)
+
+
+async def purge_expired_password_tokens(db):
+    await db.execute_write_fn(gen.purge_expired_password_tokens)
 
 
 # --------------------------------------------------------------------------

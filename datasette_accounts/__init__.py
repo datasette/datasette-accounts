@@ -169,8 +169,10 @@ def startup(datasette):
                 err=True,
             )
 
-        # Startup housekeeping: purge expired sessions + old audit rows.
+        # Startup housekeeping: purge expired sessions, expired password
+        # tokens, and old audit rows.
         await db.delete_expired_sessions(internal)
+        await db.purge_expired_password_tokens(internal)
         await db.purge_login_audit(
             internal, security.config(datasette, "audit_retention_days")
         )

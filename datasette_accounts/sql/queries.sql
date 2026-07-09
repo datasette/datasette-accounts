@@ -293,3 +293,55 @@ ON CONFLICT(key) DO UPDATE SET
 -- existed, so the helper reports whether anything was cleared.
 -- name: deleteSiteMessage :value
 DELETE FROM datasette_accounts_site_messages WHERE key = $key::text RETURNING key;
+
+-- ============================================================================
+-- Password tokens (one-time invite / reset links — see plans/invite-links)
+-- ============================================================================
+
+-- Insert a fresh token with SQL-side created_at = now, expires_at = now +
+-- ttl_hours.
+-- name: insertPasswordToken
+INSERT INTO datasette_accounts_password_tokens
+    (token_sha256, user_id, purpose, created_at, expires_at, created_by)
+VALUES ($token_sha256::text, $user_id::text, $purpose::text,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d hours', $ttl_hours::integer))
+        || '+00:00',
+        $created_by::text::);
+
+-- Look up a live (non-expired) token for the GET set-password page, joining
+-- the target username for display.
+-- name: selectPasswordToken :row -> PasswordTokenRow
+SELECT t.token_sha256, t.user_id, t.purpose, t.created_at, t.expires_at,
+       t.created_by, u.username
+FROM datasette_accounts_password_tokens t
+JOIN datasette_accounts_users u ON u.id = t.user_id
+WHERE t.token_sha256 = $token_sha256::text
+  AND t.expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+
+-- Claim-by-delete: single-use, and the expiry check lives in the DELETE
+-- itself so an expired-but-unpurged row can never be claimed (a double-submit
+-- race and an expired claim both just find no row). RETURNING user_id is
+-- non-empty only when a live token was actually deleted.
+-- name: deletePasswordToken :value
+DELETE FROM datasette_accounts_password_tokens
+WHERE token_sha256 = $token_sha256::text
+  AND expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+RETURNING user_id;
+
+-- Used when minting (one live link per account) and by disable/delete/reset.
+-- name: deletePasswordTokensForUser
+DELETE FROM datasette_accounts_password_tokens WHERE user_id = $user_id::text;
+
+-- Housekeeping — called alongside deleteExpiredSessions.
+-- name: purgeExpiredPasswordTokens
+DELETE FROM datasette_accounts_password_tokens
+WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+
+-- Completing a token: set the password, clear must_change_password (the link
+-- itself proved control), stamp updated_at.
+-- name: setPasswordFromToken
+UPDATE datasette_accounts_users
+SET password_hash = $password_hash::text, must_change_password = 0,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
