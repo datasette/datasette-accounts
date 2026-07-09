@@ -144,6 +144,8 @@ defaults (a zero-config install works — it just warns about persistence):
 | `lockout_minutes` | int | `15` | auto-unlock window after a lock |
 | `secure_cookie` | `"auto"` / `true` / `false` | `"auto"` | Secure flag on the session cookie; set `true` when serving over HTTPS |
 | `audit_retention_days` | int | `90` | delete `login_audit` rows older than this; `0` = keep forever |
+| `invite_ttl_hours` | int | `72` | invite-link lifetime |
+| `reset_link_ttl_hours` | int | `24` | reset-link lifetime |
 
 ```yaml
 plugins:

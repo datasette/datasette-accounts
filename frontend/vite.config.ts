@@ -43,6 +43,7 @@ export default defineConfig({
         capabilities: "src/pages/capabilities/index.ts",
         messages: "src/pages/messages/index.ts",
         "login-attempts": "src/pages/login-attempts/index.ts",
+        "set-password": "src/pages/set-password/index.ts",
       },
     },
   },
