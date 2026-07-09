@@ -177,3 +177,11 @@ def m006_password_tokens(db: Database):
             ON datasette_accounts_password_tokens (user_id);
         """
     )
+
+
+@internal_migrations()
+def m007_account_expiry(db: Database):
+    # NULL = the account never expires. Compared lexicographically against the
+    # canonical millisecond-ISO "now" (same convention as locked_until /
+    # sessions.expires_at); enforcement is read-side, no background job.
+    db.execute("ALTER TABLE datasette_accounts_users ADD COLUMN expires_at TEXT")

@@ -29,6 +29,10 @@ class UserRow(BaseModel):
     created_at: str
     # None until the first successful sign-in — the account is still "pending".
     last_login_at: Optional[str] = None
+    # None = never expires. Set/clear is a later ticket; this ticket only reads
+    # + enforces it (like `locked`, computed lexicographically against "now").
+    expires_at: Optional[str] = None
+    expired: bool
 
 
 class AdminPageData(BaseModel):
@@ -113,7 +117,8 @@ class LoginAttemptRow(BaseModel):
     # 1 on a successful sign-in, 0 otherwise.
     success: int
     # Why the attempt landed where it did: success / bad_password / no_such_user
-    # / disabled / locked / reauth. NULL on rows written before this was tracked.
+    # / disabled / expired / locked / no_password / reauth. NULL on rows written
+    # before this was tracked.
     reason: Optional[str] = None
 
 

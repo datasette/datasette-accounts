@@ -45,8 +45,15 @@ PUBLIC_PRINCIPALS = ("everyone", "authenticated", "anonymous")
 PRINCIPAL_TYPES = ("actor", "group", *PUBLIC_PRINCIPALS)
 
 # Single source of truth for "is an admin": used by both the permission grant
-# SQL and the last-admin guard so the two definitions can never drift.
-ENABLED_ADMIN_PREDICATE = "is_admin = 1 AND disabled = 0"
+# SQL and the last-admin guard so the two definitions can never drift. The
+# same literal text is duplicated (codegen needs literal SQL) inside
+# countEnabledAdmins / countOtherEnabledAdmins / selectUserIsEnabledAdmin in
+# sql/queries.sql — see test_predicate_matches_queries_sql, which greps for
+# this exact string so the two copies can't drift silently.
+ENABLED_ADMIN_PREDICATE = (
+    "is_admin = 1 AND disabled = 0 AND (expires_at IS NULL OR expires_at > "
+    "strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00')"
+)
 
 # Only refresh sessions.last_seen_at when the stored value is older than this,
 # to avoid a write on the internal DB's single write connection every request.
@@ -130,6 +137,9 @@ def to_user_row(r):
         "created_at": r["created_at"],
         # NULL until the account's first successful sign-in ("pending").
         "last_login_at": r["last_login_at"],
+        # NULL = never expires. Same lexicographic now_iso() comparison as `locked`.
+        "expires_at": r["expires_at"],
+        "expired": bool(r["expires_at"] and r["expires_at"] <= now_iso()),
     }
 
 

@@ -19,6 +19,7 @@
     bad_password: "Wrong password",
     no_such_user: "No such account",
     disabled: "Account disabled",
+    expired: "Account expired",
     locked: "Account locked",
     reauth: "Re-authentication",
   };

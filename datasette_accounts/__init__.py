@@ -203,6 +203,8 @@ async def resolve_actor(datasette, request):
     user = await db.get_user_by_id(internal, session["actor_id"])
     if not user or user["disabled"]:
         return None
+    if user["expires_at"] and user["expires_at"] <= db.now_iso():
+        return None
     await db.touch_last_seen(internal, session["token_sha256"], session["last_seen_at"])
     return {
         "id": user["id"],
@@ -233,8 +235,11 @@ def datasette_acl_valid_actors(datasette):
     async def inner():
         internal = datasette.get_internal_database()
         rows = await db.list_users(internal)
+        now = db.now_iso()
         return [
-            {"id": r["id"], "display": r["username"]} for r in rows if not r["disabled"]
+            {"id": r["id"], "display": r["username"]}
+            for r in rows
+            if not r["disabled"] and not (r["expires_at"] and r["expires_at"] <= now)
         ]
 
     return inner

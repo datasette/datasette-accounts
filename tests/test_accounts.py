@@ -26,14 +26,16 @@ async def insert_user(
     is_admin=False,
     disabled=False,
     must_change_password=False,
+    expires_at=None,
 ):
     internal = ds.get_internal_database()
     user_id = db.new_id()
     ts = db.now_iso()
     await internal.execute_write(
         f"INSERT INTO {db.USERS} (id, username, password_hash, is_admin, disabled, "
-        "must_change_password, failed_attempts, locked_until, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)",
+        "must_change_password, failed_attempts, locked_until, created_at, updated_at, "
+        "expires_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)",
         [
             user_id,
             username,
@@ -43,6 +45,7 @@ async def insert_user(
             1 if must_change_password else 0,
             ts,
             ts,
+            expires_at,
         ],
     )
     return user_id
@@ -739,6 +742,77 @@ async def test_admin_login_attempts_api():
     assert data["ok"]
     assert [a["reason"] for a in data["attempts"]] == ["bad_password"]
     assert data["attempts"][0]["ip"] == "9.9.9.9"
+
+
+# --------------------------------------------------------------------------
+# Account expiry
+# --------------------------------------------------------------------------
+
+PAST = "2020-01-01T00:00:00.000+00:00"
+FUTURE = "2099-01-01T00:00:00.000+00:00"
+
+
+@pytest.mark.asyncio
+async def test_expired_account_cannot_log_in(monkeypatch):
+    ds = await make_ds()
+    await insert_user(ds, "temp", expires_at=PAST)
+
+    calls = {"n": 0}
+    import datasette_accounts.routes.api as api
+
+    real = api.averify_dummy
+
+    async def counting(password):
+        calls["n"] += 1
+        return await real(password)
+
+    monkeypatch.setattr(api, "averify_dummy", counting)
+
+    r, cookies = await login(ds, "temp", "password123")
+    assert r.status_code == 401
+    assert r.json() == {"ok": False, "error": "Invalid username or password"}
+    assert not cookies
+    # Takes the dummy-verify branch — same timing-safe shape as no-such-user /
+    # disabled / no-password.
+    assert calls["n"] == 1
+
+    internal = ds.get_internal_database()
+    reason = (
+        await internal.execute(
+            f"SELECT reason FROM {db.LOGIN_AUDIT} ORDER BY id DESC LIMIT 1"
+        )
+    ).single_value()
+    assert reason == "expired"
+
+
+@pytest.mark.asyncio
+async def test_unexpired_account_still_logs_in():
+    ds = await make_ds()
+    await insert_user(ds, "temp", expires_at=FUTURE)
+    r, cookies = await login(ds, "temp", "password123")
+    assert r.status_code == 200
+    assert cookies
+
+
+@pytest.mark.asyncio
+async def test_live_session_dies_once_expiry_passes():
+    ds = await make_ds()
+    await insert_user(ds, "temp", expires_at=FUTURE)
+    r, cookies = await login(ds, "temp", "password123")
+    assert r.status_code == 200
+
+    # Still resolves while the deadline is in the future.
+    who = await ds.client.get("/-/actor.json", cookies=cookies)
+    assert who.json()["actor"]["username"] == "temp"
+
+    # Push the deadline into the past directly (no clock mocking) — the same
+    # session token must stop resolving on the very next request.
+    internal = ds.get_internal_database()
+    await internal.execute_write(
+        f"UPDATE {db.USERS} SET expires_at = ? WHERE username = 'temp'", [PAST]
+    )
+    who = await ds.client.get("/-/actor.json", cookies=cookies)
+    assert who.json()["actor"] is None
 
 
 # --------------------------------------------------------------------------

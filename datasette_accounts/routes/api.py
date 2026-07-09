@@ -86,20 +86,25 @@ async def authenticate(
 
     # 2/3. Exactly one PBKDF2 verify on every remaining path (dummy on miss).
     # The user-facing error stays generic; the specific reason lives only in the
-    # admin-only audit log. An invited account (no usable password yet) takes
-    # the same dummy-verify branch as no-such-user/disabled — it must be
-    # indistinguishable by response or timing.
+    # admin-only audit log. An invited account (no usable password yet) and an
+    # expired account both take the same dummy-verify branch as no-such-user/
+    # disabled — none of them may be distinguishable by response or timing.
+    expired = bool(user and user["expires_at"] and user["expires_at"] <= db.now_iso())
     has_password = user and user["password_hash"] != UNUSABLE_PASSWORD
-    if user and not user["disabled"] and has_password:
+    if user and not user["disabled"] and not expired and has_password:
         ok = await averify_password(body.password, user["password_hash"])
         reason = "success" if ok else "bad_password"
     else:
         await averify_dummy(body.password)
         ok = False
+        # Precedence when more than one applies (e.g. a disabled account whose
+        # expiry has also passed): disabled > expired > no_password.
         if not user:
             reason = "no_such_user"
         elif user["disabled"]:
             reason = "disabled"
+        elif expired:
+            reason = "expired"
         else:
             reason = "no_password"
 
