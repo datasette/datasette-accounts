@@ -38,23 +38,12 @@ from ..passwords import (
     check_password_length,
     generate_password,
 )
+from ..providers import set_session_cookie
 from ..router import require_actor, require_admin, require_csrf, router
-from ..security import COOKIE_NAME, SIGN_NAMESPACE
+from ..security import COOKIE_NAME
 from ..sessions import current_token_sha, list_own_sessions, mint_token, token_sha256
 
 GENERIC_LOGIN_ERROR = "Invalid username or password"
-
-
-def _set_session_cookie(datasette, request, response, raw_token):
-    response.set_cookie(
-        COOKIE_NAME,
-        datasette.sign(raw_token, SIGN_NAMESPACE),
-        max_age=security.config(datasette, "session_ttl_days") * 86400,
-        path="/",
-        httponly=True,
-        samesite="lax",
-        secure=security.should_secure_cookie(datasette, request),
-    )
 
 
 # --------------------------------------------------------------------------
@@ -146,7 +135,7 @@ async def authenticate(
             "must_change_password": bool(user["must_change_password"]),
         }
     )
-    _set_session_cookie(datasette, request, response, raw_token)
+    set_session_cookie(datasette, request, response, raw_token)
     _clear_stale_core_actor_cookie(request, response)
     return response
 
@@ -295,7 +284,7 @@ async def set_password_complete(
         ip,
     )
     response = Response.json({"ok": True, "redirect": "/"})
-    _set_session_cookie(datasette, request, response, raw_token)
+    set_session_cookie(datasette, request, response, raw_token)
     _clear_stale_core_actor_cookie(request, response)
     return response
 

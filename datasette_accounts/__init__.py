@@ -8,20 +8,26 @@ from datasette.permissions import Action, PermissionSQL
 from datasette_vite import vite_entry
 from sqlite_utils import Database as SqliteUtilsDatabase
 
-from . import db, messages, security
+from datasette.plugins import pm
+
+from . import db, hookspecs as _provider_hookspecs, messages, security
 from .internal_migrations import internal_migrations
 from .passwords import hash_password
 from .router import ADMIN_ACTION, router
 from .security import COOKIE_NAME, SIGN_NAMESPACE
 from .sessions import token_sha256
 
+# Publish the auth-provider hookspec at import time so provider plugins can
+# implement it (mirrors how datasette-user-profiles publishes its own hooks).
+pm.add_hookspecs(_provider_hookspecs)
+
 # Import route modules to register their handlers on the shared router.
-from .routes import api, pages  # noqa: E402
+from .routes import api, pages, providers as provider_routes  # noqa: E402
 
 # Re-exported so pluggy discovers the hookimpl on this plugin module (M6).
 from .seeds import datasette_user_profile_seeds  # noqa: E402,F401
 
-_ = (api, pages)
+_ = (api, pages, provider_routes)
 
 
 @hookimpl
@@ -179,6 +185,28 @@ def startup(datasette):
         await db.purge_admin_audit(
             internal, security.config(datasette, "admin_audit_retention_days")
         )
+
+        # Build the auth-provider registry: the built-in password provider is
+        # always first, then any provider plugins contribute. Duplicate or
+        # invalid keys fail startup loudly — a misconfigured auth surface must
+        # not boot half-working (design §3).
+        from . import providers as providers_mod
+
+        collected = []
+        for result in pm.hook.datasette_accounts_auth_providers(datasette=datasette):
+            if callable(getattr(result, "__await__", None)):
+                result = await result
+            collected.extend(result or [])
+        registry = {}
+        for provider in [providers_mod.PasswordProvider(), *collected]:
+            if provider.key != "password" and not providers_mod.KEY_RE.match(
+                provider.key
+            ):
+                raise RuntimeError(f"Invalid auth provider key: {provider.key!r}")
+            if provider.key in registry:
+                raise RuntimeError(f"Duplicate auth provider key: {provider.key!r}")
+            registry[provider.key] = provider
+        setattr(datasette, providers_mod.REGISTRY_ATTR, registry)
 
     return inner
 

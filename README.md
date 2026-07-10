@@ -155,6 +155,7 @@ defaults (a zero-config install works — it just warns about persistence):
 | `reset_link_ttl_hours` | int | `24` | reset-link lifetime |
 | `max_pending_registrations` | int | `20` | refuse new self-registrations while the pending-approval queue is at this size |
 | `registrations_per_ip_per_day` | int | `5` | per-IP daily self-registration cap (uses the client IP, so `trust_proxy_headers` applies) |
+| `provider_state_ttl_minutes` | int | `10` | lifetime of a sign-in provider's signed `state` cookie (start → callback window) |
 
 ```yaml
 plugins:

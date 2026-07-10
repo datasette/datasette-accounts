@@ -904,6 +904,11 @@ async def set_site_message(db, actor_id, key, body):
 # --------------------------------------------------------------------------
 
 
+async def _get_setting(db, key):
+    """Read a single settings-table value, or None when the row is absent."""
+    return await db.execute_fn(lambda conn: gen.select_setting(conn, key=key))
+
+
 async def get_registration_enabled(db):
     """Whether ``/-/register`` is currently open.
 
@@ -912,9 +917,20 @@ async def get_registration_enabled(db):
     per-request by the register page, the submit endpoint, and (later) the
     login page — a single-row PK lookup, same cost as ``login_help``.
     """
-    value = await db.execute_fn(
-        lambda conn: gen.select_setting(conn, key=REGISTRATION_ENABLED_KEY)
-    )
+    return await _get_setting(db, REGISTRATION_ENABLED_KEY) == "1"
+
+
+async def get_provider_enabled(db, key):
+    """Whether the auth provider ``key`` is currently enabled.
+
+    Settings key ``provider:{key}:enabled`` ('1' / '0'). An absent row means
+    the built-in password provider is enabled and every external provider is
+    disabled — installing a provider package changes nothing until an admin
+    flips it on (design §7).
+    """
+    value = await _get_setting(db, f"provider:{key}:enabled")
+    if value is None:
+        return key == "password"
     return value == "1"
 
 

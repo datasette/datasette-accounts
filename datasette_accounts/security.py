@@ -45,6 +45,11 @@ DEFAULTS = {
     # Make accounts admins full datasette-acl admins (manage groups + all
     # resource sharing through acl's own UI). Set False to keep them separate.
     "grant_acl_admin": True,
+    # --- Pluggable sign-in providers (see plans/auth-providers) ---
+    # Lifetime of the signed provider-state cookie: the start → callback window,
+    # and the step-up proof window. Enablement/signups are deliberately runtime
+    # DB state, not config — this TTL is the only provider knob.
+    "provider_state_ttl_minutes": 10,
 }
 
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
