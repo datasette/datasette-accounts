@@ -764,8 +764,7 @@ async def audit_entries(internal, username, operation):
         target_id = user["id"]
     rows = await db.list_admin_audit(internal, target_id, operation or None)
     return [
-        AdminAuditRow(**{k: r.get(k) for k in AdminAuditRow.model_fields})
-        for r in rows
+        AdminAuditRow(**{k: r.get(k) for k in AdminAuditRow.model_fields}) for r in rows
     ]
 
 
