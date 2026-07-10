@@ -158,7 +158,7 @@ wheels = [
 
 [[package]]
 name = "datasette-accounts"
-version = "0.1a0"
+version = "0.0.1a1"
 source = { editable = "." }
 dependencies = [
     { name = "datasette" },

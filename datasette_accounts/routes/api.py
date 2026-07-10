@@ -9,8 +9,10 @@ from .. import db, grantable, messages, security
 from ..page_data import (
     AuthenticateRequest,
     ChangePasswordRequest,
+    CompleteSetPasswordRequest,
     CreateUserRequest,
     GrantCapabilityRequest,
+    InviteRequest,
     LoginAttemptRow,
     LoginAttemptsRequest,
     ResetPasswordRequest,
@@ -22,6 +24,7 @@ from ..page_data import (
     UserRow,
 )
 from ..passwords import (
+    UNUSABLE_PASSWORD,
     PasswordLengthError,
     ahash_password,
     averify_dummy,
@@ -83,14 +86,22 @@ async def authenticate(
 
     # 2/3. Exactly one PBKDF2 verify on every remaining path (dummy on miss).
     # The user-facing error stays generic; the specific reason lives only in the
-    # admin-only audit log.
-    if user and not user["disabled"]:
+    # admin-only audit log. An invited account (no usable password yet) takes
+    # the same dummy-verify branch as no-such-user/disabled — it must be
+    # indistinguishable by response or timing.
+    has_password = user and user["password_hash"] != UNUSABLE_PASSWORD
+    if user and not user["disabled"] and has_password:
         ok = await averify_password(body.password, user["password_hash"])
         reason = "success" if ok else "bad_password"
     else:
         await averify_dummy(body.password)
         ok = False
-        reason = "disabled" if user else "no_such_user"
+        if not user:
+            reason = "no_such_user"
+        elif user["disabled"]:
+            reason = "disabled"
+        else:
+            reason = "no_password"
 
     await db.record_login_attempt(internal, body.username, ip, ok, reason)
 
@@ -111,6 +122,7 @@ async def authenticate(
         ip,
     )
     await db.delete_expired_sessions(internal)
+    await db.purge_expired_password_tokens(internal)
     await db.purge_login_audit(
         internal, security.config(datasette, "audit_retention_days")
     )
@@ -137,6 +149,59 @@ async def logout(datasette, request):
         await db.delete_session(internal, token_sha)
     response = Response.json({"ok": True, "redirect": "/"})
     response.set_cookie(COOKIE_NAME, "", max_age=0, path="/", expires=0)
+    return response
+
+
+# --------------------------------------------------------------------------
+# Set-password links (invite / reset) — see plans/invite-links
+# --------------------------------------------------------------------------
+
+
+@router.POST("/-/set-password/api/complete$")
+@require_csrf
+async def set_password_complete(
+    datasette, request, body: Annotated[CompleteSetPasswordRequest, Body()]
+):
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+
+    # The length check MUST precede the claim: a password that's simply too
+    # short must not burn the (single-use) link.
+    try:
+        check_password_length(
+            body.new_password, security.config(datasette, "password_min_length")
+        )
+    except PasswordLengthError as e:
+        return Response.json({"ok": False, "error": str(e)}, status=400)
+
+    new_hash = await ahash_password(body.new_password)
+    user_id = await db.use_password_token(internal, token_sha256(body.token), new_hash)
+    if user_id is None:
+        await db.record_login_attempt(internal, None, ip, False, "bad_token")
+        return Response.json(
+            {"ok": False, "error": "This link is invalid or has expired"}, status=400
+        )
+
+    user = await db.get_user_by_id(internal, user_id)
+    if not user or user["disabled"]:
+        # The password is set (and every session revoked) but a disabled
+        # account never gets signed in.
+        return Response.json({"ok": True, "redirect": datasette.urls.path("/-/login")})
+
+    # Otherwise: the link just proved control of the account — sign them in
+    # exactly like a successful authenticate() call.
+    await db.record_login_success(internal, user["id"])
+    raw_token = mint_token()
+    await db.create_session(
+        internal,
+        user["id"],
+        token_sha256(raw_token),
+        security.config(datasette, "session_ttl_days"),
+        request.headers.get("user-agent"),
+        ip,
+    )
+    response = Response.json({"ok": True, "redirect": "/"})
+    _set_session_cookie(datasette, request, response, raw_token)
     return response
 
 
@@ -229,8 +294,8 @@ def _resolve_password(datasette, provided, generate):
 @require_admin
 async def admin_list(datasette, request):
     internal = datasette.get_internal_database()
-    rows = await db.list_users(internal)
-    users = [UserRow(**db.to_user_row(r)).model_dump() for r in rows]
+    rows = await db.list_user_rows(internal)
+    users = [UserRow(**r).model_dump() for r in rows]
     return Response.json({"ok": True, "users": users})
 
 
@@ -261,6 +326,96 @@ async def admin_create(datasette, request, body: Annotated[CreateUserRequest, Bo
     if generated:
         result["password"] = plaintext
     return Response.json(result)
+
+
+def _set_password_url(datasette, request, raw_token):
+    # The raw token is `secrets.token_urlsafe` (base64url charset), so plain
+    # concatenation onto the query string is safe — no encoding needed.
+    path = datasette.urls.path("/-/set-password") + "?token=" + raw_token
+    return datasette.absolute_url(request, path)
+
+
+@router.POST("/-/admin/api/invite$")
+@require_admin
+async def admin_invite(datasette, request, body: Annotated[InviteRequest, Body()]):
+    internal = datasette.get_internal_database()
+    raw_token = mint_token()
+    ttl_hours = security.config(datasette, "invite_ttl_hours")
+    try:
+        user_id = await db.create_invited_user(
+            internal,
+            request.actor["id"],
+            body.username,
+            body.is_admin,
+            token_sha256(raw_token),
+            ttl_hours,
+        )
+    except db.UsernameTakenError:
+        return Response.json(
+            {"ok": False, "error": "Username already taken"}, status=409
+        )
+    return Response.json(
+        {
+            "ok": True,
+            "id": user_id,
+            "url": _set_password_url(datasette, request, raw_token),
+        }
+    )
+
+
+async def _mint_link_response(datasette, request, target_id, purpose, ttl_hours):
+    """Shared invite-link / reset-link body: mint + one-time absolute URL."""
+    internal = datasette.get_internal_database()
+    raw_token = mint_token()
+    minted = await db.mint_password_token(
+        internal,
+        request.actor["id"],
+        target_id,
+        purpose,
+        token_sha256(raw_token),
+        ttl_hours,
+    )
+    if not minted:
+        return Response.json({"ok": False, "error": "Unknown account"}, status=404)
+    return Response.json(
+        {"ok": True, "url": _set_password_url(datasette, request, raw_token)}
+    )
+
+
+@router.POST("/-/admin/api/invite-link$")
+@require_admin
+async def admin_invite_link(datasette, request, body: Annotated[TargetRequest, Body()]):
+    """Re-mint an invite link for an existing account (kills the prior link).
+
+    Meaningful for accounts that never set a password, but the endpoint
+    doesn't enforce that — minting always kills the account's prior
+    outstanding link regardless of purpose (D: one live link per account).
+    """
+    return await _mint_link_response(
+        datasette,
+        request,
+        body.id,
+        "invite",
+        security.config(datasette, "invite_ttl_hours"),
+    )
+
+
+@router.POST("/-/admin/api/reset-link$")
+@require_admin
+async def admin_reset_link(datasette, request, body: Annotated[TargetRequest, Body()]):
+    """Mint a one-time reset link for an existing account.
+
+    Minting does NOT revoke the account's live sessions — the user stays
+    signed in until the link is actually used (completion revokes everything
+    and signs them in fresh).
+    """
+    return await _mint_link_response(
+        datasette,
+        request,
+        body.id,
+        "reset",
+        security.config(datasette, "reset_link_ttl_hours"),
+    )
 
 
 @router.POST("/-/admin/api/reset-password$")

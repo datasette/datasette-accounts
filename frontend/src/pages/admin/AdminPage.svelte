@@ -4,6 +4,7 @@
   import { postJSON } from "../../lib/api.ts";
   import Modal from "../../lib/Modal.svelte";
   import PasswordReveal from "../../lib/PasswordReveal.svelte";
+  import LinkReveal from "../../lib/LinkReveal.svelte";
   import AdminNav from "../../lib/AdminNav.svelte";
 
   type User = AdminPageData["users"][number];
@@ -55,10 +56,15 @@
   let newUsername = $state("");
   let newPassword = $state("");
   let newIsAdmin = $state(false);
-  let newGenerate = $state(true);
+  // How the new account gets its credentials: a one-time invite link (the
+  // user picks their own password), a server-generated password, or one the
+  // admin types.
+  let newMode = $state<"invite" | "generate" | "set">("invite");
   let createError = $state("");
   // Set once the account is created with a generated password (shown once).
   let createdCred = $state<{ username: string; password: string } | null>(null);
+  // Set once the account is created via an invite link (shown once).
+  let createdLink = $state<{ username: string; url: string } | null>(null);
 
   // Reset-password modal
   let resetTarget = $state<User | null>(null);
@@ -94,17 +100,32 @@
     newUsername = "";
     newPassword = "";
     newIsAdmin = false;
-    newGenerate = true;
+    newMode = "invite";
     createError = "";
     createdCred = null;
+    createdLink = null;
     createOpen = true;
   }
 
   async function create(e: Event) {
     e.preventDefault();
     createError = "";
+    if (newMode === "invite") {
+      const { ok, data } = await postJSON<{ ok: boolean; error?: string; url?: string }>(
+        "/-/admin/api/invite",
+        { username: newUsername, is_admin: newIsAdmin },
+      );
+      if (!ok || !data.ok || !data.url) {
+        createError = data.error || "Could not create account";
+        return;
+      }
+      await refresh();
+      // Keep the modal open to reveal the one-time invite URL.
+      createdLink = { username: newUsername, url: data.url };
+      return;
+    }
     const body: Record<string, unknown> = { username: newUsername, is_admin: newIsAdmin };
-    if (newGenerate) body.generate = true;
+    if (newMode === "generate") body.generate = true;
     else body.password = newPassword;
     const { ok, data } = await postJSON<{ ok: boolean; error?: string; password?: string }>(
       "/-/admin/api/create",
@@ -185,6 +206,30 @@
     resetError = "";
     resetCred = null;
   }
+
+  // One-time link modal (row-menu "New invite link…" / "Reset link…").
+  let linkTarget = $state<User | null>(null);
+  let linkKind = $state<"invite" | "reset">("invite");
+  let linkUrl = $state("");
+
+  async function mintLink(u: User, kind: "invite" | "reset") {
+    error = "";
+    const path = kind === "invite" ? "/-/admin/api/invite-link" : "/-/admin/api/reset-link";
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string; url?: string }>(path, {
+      id: u.id,
+    });
+    if (!ok || !data.ok || !data.url) {
+      // Surface failures (e.g. 404 for a just-deleted account) like other
+      // row actions do.
+      error = data.error || "Could not create link";
+      return;
+    }
+    linkTarget = u;
+    linkKind = kind;
+    linkUrl = data.url;
+    // Minting can change invited state (one live link per account).
+    await refresh();
+  }
 </script>
 
 <svelte:window
@@ -230,6 +275,7 @@
               <div class="status">
                 {#if u.disabled}<span class="badge badge-disabled">disabled</span>{/if}
                 {#if u.locked}<span class="badge badge-locked">locked</span>{/if}
+                {#if u.invited}<span class="badge badge-invited">invited</span>{/if}
                 {#if !u.last_login_at}<span class="badge badge-pending">pending</span>{/if}
               </div>
             </td>
@@ -263,6 +309,11 @@
                       <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/unlock"))}>Unlock</button>
                     {/if}
                     <div class="sep"></div>
+                    {#if u.invited}
+                      <button role="menuitem" onclick={() => pick(() => mintLink(u, "invite"))}>New invite link…</button>
+                    {:else}
+                      <button role="menuitem" onclick={() => pick(() => mintLink(u, "reset"))}>Reset link…</button>
+                    {/if}
                     <button role="menuitem" onclick={() => pick(() => openReset(u))}>Reset password…</button>
                     <button role="menuitem" onclick={() => pick(() => openSessions(u))}>Active sessions…</button>
                     <a role="menuitem" href="/-/admin/login-attempts?username={encodeURIComponent(u.username)}">Login attempts…</a>
@@ -286,10 +337,23 @@
 </div>
 
 <!-- Create account -->
-<Modal bind:open={createOpen} onclose={() => (createdCred = null)} title="New account">
+<Modal
+  bind:open={createOpen}
+  onclose={() => {
+    createdCred = null;
+    createdLink = null;
+  }}
+  title="New account"
+>
   {#if createdCred}
     <p class="lead">Account <strong>{createdCred.username}</strong> was created.</p>
     <PasswordReveal username={createdCred.username} password={createdCred.password} />
+  {:else if createdLink}
+    <p class="lead">
+      Account <strong>{createdLink.username}</strong> was created. Send them this link to choose
+      their password.
+    </p>
+    <LinkReveal url={createdLink.url} />
   {:else}
     <form id="create-form" onsubmit={create}>
       {#if createError}<p class="msg msg-error">{createError}</p>{/if}
@@ -297,11 +361,22 @@
         <span>Username</span>
         <input bind:value={newUsername} required />
       </label>
-      <label class="check">
-        <input type="checkbox" bind:checked={newGenerate} />
-        <span>Generate a secure password</span>
-      </label>
-      {#if !newGenerate}
+      <fieldset class="modes">
+        <legend>Password</legend>
+        <label class="check">
+          <input type="radio" bind:group={newMode} value="invite" />
+          <span>Send an invite link — the user chooses their own password</span>
+        </label>
+        <label class="check">
+          <input type="radio" bind:group={newMode} value="generate" />
+          <span>Generate a secure password</span>
+        </label>
+        <label class="check">
+          <input type="radio" bind:group={newMode} value="set" />
+          <span>Set a password now</span>
+        </label>
+      </fieldset>
+      {#if newMode === "set"}
         <label class="field">
           <span>Initial password</span>
           <input type="password" bind:value={newPassword} required />
@@ -314,12 +389,33 @@
     </form>
   {/if}
   {#snippet footer()}
-    {#if createdCred}
+    {#if createdCred || createdLink}
       <button class="btn-primary btn-sm" onclick={() => (createOpen = false)}>Done</button>
     {:else}
       <button class="btn-sm" onclick={() => (createOpen = false)}>Cancel</button>
       <button class="btn-primary btn-sm" type="submit" form="create-form">Create account</button>
     {/if}
+  {/snippet}
+</Modal>
+
+<!-- One-time link (row menu: New invite link… / Reset link…) -->
+<Modal
+  open={linkTarget !== null}
+  onclose={() => (linkTarget = null)}
+  title={linkKind === "invite" ? "New invite link" : "Reset link"}
+>
+  <p class="lead">
+    {#if linkKind === "invite"}
+      New invite link for <strong>{linkTarget?.username}</strong> — any previous link no longer
+      works.
+    {:else}
+      Reset link for <strong>{linkTarget?.username}</strong>. They stay signed in until they use
+      it; completing it sets the new password and signs them out everywhere else.
+    {/if}
+  </p>
+  <LinkReveal url={linkUrl} />
+  {#snippet footer()}
+    <button class="btn-primary btn-sm" onclick={() => (linkTarget = null)}>Done</button>
   {/snippet}
 </Modal>
 
@@ -492,6 +588,22 @@
   }
   .check input {
     width: auto;
+  }
+
+  .modes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    margin: 0 0 1rem;
+    padding: 0;
+    border: none;
+  }
+  .modes legend {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--muted);
+    padding: 0;
+    margin-bottom: 0.35rem;
   }
 
   .sessions {

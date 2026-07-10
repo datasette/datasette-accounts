@@ -106,9 +106,11 @@ apply identically. Every mutating command requires `-i/--internal PATH`
 
 ```
 datasette accounts create USERNAME       # --admin, --generate, --password-stdin, --must-change
+datasette accounts invite USERNAME        # create + one-time invite link (--admin, --ttl-hours, --base-url)
 datasette accounts bootstrap-admin NAME   # idempotent first-admin creation
 datasette accounts list                   # --admins / --pending / --locked / --disabled
 datasette accounts reset-password USERNAME
+datasette accounts reset-link USERNAME    # one-time password-reset link (--ttl-hours, --base-url)
 datasette accounts promote / demote USERNAME
 datasette accounts disable / enable USERNAME
 datasette accounts unlock USERNAME        # clear lockout counters
@@ -144,6 +146,8 @@ defaults (a zero-config install works — it just warns about persistence):
 | `lockout_minutes` | int | `15` | auto-unlock window after a lock |
 | `secure_cookie` | `"auto"` / `true` / `false` | `"auto"` | Secure flag on the session cookie; set `true` when serving over HTTPS |
 | `audit_retention_days` | int | `90` | delete `login_audit` rows older than this; `0` = keep forever |
+| `invite_ttl_hours` | int | `72` | invite-link lifetime |
+| `reset_link_ttl_hours` | int | `24` | reset-link lifetime |
 
 ```yaml
 plugins:

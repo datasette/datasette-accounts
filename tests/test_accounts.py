@@ -76,6 +76,7 @@ async def test_plugin_installed_and_tables_created():
         "datasette_accounts_admin_audit",
         "datasette_accounts_capability_grants",
         "datasette_accounts_login_audit",
+        "datasette_accounts_password_tokens",
         "datasette_accounts_sessions",
         "datasette_accounts_site_messages",
         "datasette_accounts_users",
@@ -151,6 +152,77 @@ async def test_unknown_username_still_verifies_once(monkeypatch):
     monkeypatch.setattr(api, "averify_dummy", counting)
     await login(ds, "ghost", "whatever")
     assert calls["n"] == 1  # dummy verify happened exactly once
+
+
+def test_unusable_password_sentinel_never_verifies():
+    from datasette_accounts.passwords import UNUSABLE_PASSWORD, verify_password
+
+    # Defensive: nothing (including the sentinel itself, or an empty
+    # password) can ever verify against the sentinel — this is what makes the
+    # change-password re-auth path safe even if it were ever reached for an
+    # unusable-password account.
+    assert verify_password("", UNUSABLE_PASSWORD) is False
+    assert verify_password("anything", UNUSABLE_PASSWORD) is False
+    assert verify_password(UNUSABLE_PASSWORD, UNUSABLE_PASSWORD) is False
+
+
+@pytest.mark.asyncio
+async def test_invited_account_login_burns_dummy_verify_and_is_generic(monkeypatch):
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="invitee",
+        is_admin=False,
+        token_sha="tok1",
+        ttl_hours=72,
+    )
+
+    calls = {"n": 0}
+    import datasette_accounts.routes.api as api
+
+    real = api.averify_dummy
+
+    async def counting(password):
+        calls["n"] += 1
+        return await real(password)
+
+    monkeypatch.setattr(api, "averify_dummy", counting)
+
+    r, cookies = await login(ds, "invitee", "whatever")
+    assert r.status_code == 401
+    assert r.json() == {"ok": False, "error": "Invalid username or password"}
+    assert not cookies
+    # Not a fast path: the dummy KDF verify still ran exactly once, same as
+    # the no-such-user branch — an invited account must not be distinguishable
+    # by timing.
+    assert calls["n"] == 1
+
+    reason = (
+        await internal.execute(
+            f"SELECT reason FROM {db.LOGIN_AUDIT} ORDER BY id DESC LIMIT 1"
+        )
+    ).single_value()
+    assert reason == "no_password"
+
+
+@pytest.mark.asyncio
+async def test_invited_account_login_indistinguishable_from_unknown_user():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="invitee",
+        is_admin=False,
+        token_sha="tok1",
+        ttl_hours=72,
+    )
+    r_invited, _ = await login(ds, "invitee", "whatever")
+    r_unknown, _ = await login(ds, "ghost", "whatever")
+    assert r_invited.status_code == r_unknown.status_code == 401
+    assert r_invited.json() == r_unknown.json()
 
 
 @pytest.mark.asyncio

@@ -67,6 +67,17 @@ class SiteMessageRow:
     body: str
 
 
+@dataclass
+class PasswordTokenRow:
+    token_sha256: str | None
+    user_id: str
+    purpose: str
+    created_at: str
+    expires_at: str
+    created_by: str | None
+    username: str
+
+
 def select_user_by_username(conn: sqlite3.Connection, username: str) -> UserRow | None:
     sql = """\
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
@@ -582,3 +593,105 @@ def delete_site_message(conn: sqlite3.Connection, key: str) -> str | None:
     cursor = conn.execute(sql, params)
     row = cursor.fetchone()
     return row[0] if row is not None else None
+
+
+def insert_password_token(
+    conn: sqlite3.Connection,
+    token_sha256: str,
+    user_id: str,
+    purpose: str,
+    ttl_hours: int,
+    created_by: str | None,
+) -> None:
+    sql = """\
+INSERT INTO datasette_accounts_password_tokens
+    (token_sha256, user_id, purpose, created_at, expires_at, created_by)
+VALUES ($token_sha256::text, $user_id::text, $purpose::text,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d hours', $ttl_hours::integer))
+        || '+00:00',
+        $created_by::text::);
+"""
+    params = {
+        "token_sha256::text": token_sha256,
+        "user_id::text": user_id,
+        "purpose::text": purpose,
+        "ttl_hours::integer": ttl_hours,
+        "created_by::text::": created_by,
+    }
+    conn.execute(sql, params)
+    return None
+
+
+def select_password_token(
+    conn: sqlite3.Connection, token_sha256: str
+) -> PasswordTokenRow | None:
+    sql = """\
+SELECT t.token_sha256, t.user_id, t.purpose, t.created_at, t.expires_at,
+       t.created_by, u.username
+FROM datasette_accounts_password_tokens t
+JOIN datasette_accounts_users u ON u.id = t.user_id
+WHERE t.token_sha256 = $token_sha256::text
+  AND t.expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+"""
+    params = {"token_sha256::text": token_sha256}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return PasswordTokenRow(*row) if row is not None else None
+
+
+def delete_password_token(conn: sqlite3.Connection, token_sha256: str) -> str | None:
+    sql = """\
+DELETE FROM datasette_accounts_password_tokens
+WHERE token_sha256 = $token_sha256::text
+  AND expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+RETURNING user_id;
+"""
+    params = {"token_sha256::text": token_sha256}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def delete_password_tokens_for_user(conn: sqlite3.Connection, user_id: str) -> None:
+    sql = (
+        "DELETE FROM datasette_accounts_password_tokens WHERE user_id = $user_id::text;"
+    )
+    params = {"user_id::text": user_id}
+    conn.execute(sql, params)
+    return None
+
+
+def purge_expired_password_tokens(conn: sqlite3.Connection) -> None:
+    sql = """\
+DELETE FROM datasette_accounts_password_tokens
+WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+"""
+    params: dict[str, Any] = {}
+    conn.execute(sql, params)
+    return None
+
+
+def list_invited_user_ids(conn: sqlite3.Connection) -> list[str]:
+    sql = """\
+SELECT user_id FROM datasette_accounts_password_tokens
+WHERE purpose = 'invite'
+  AND expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+"""
+    params: dict[str, Any] = {}
+    cursor = conn.execute(sql, params)
+    return [row[0] for row in cursor.fetchall()]
+
+
+def set_password_from_token(
+    conn: sqlite3.Connection, password_hash: str, user_id: str
+) -> None:
+    sql = """\
+UPDATE datasette_accounts_users
+SET password_hash = $password_hash::text, must_change_password = 0,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
+"""
+    params = {"password_hash::text": password_hash, "user_id::text": user_id}
+    conn.execute(sql, params)
+    return None

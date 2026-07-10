@@ -16,6 +16,7 @@ import re
 import pytest
 
 from datasette_accounts import db
+from datasette_accounts.passwords import UNUSABLE_PASSWORD
 
 # Millisecond ISO-8601 with a +00:00 offset, e.g. 2026-07-07T22:09:25.087+00:00.
 TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+00:00$")
@@ -122,3 +123,260 @@ async def test_touch_last_seen_throttle():
     after = (await db.get_session(internal, "tok"))["last_seen_at"]
     assert after >= before
     assert TS_RE.match(after)
+
+
+# --------------------------------------------------------------------------
+# Password tokens (invite links / reset links)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_invited_user_has_unusable_password_and_live_token():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await db.create_invited_user(
+        internal,
+        actor_id="admin1",
+        username="alice",
+        is_admin=False,
+        token_sha="tok1",
+        ttl_hours=72,
+    )
+    user = await db.get_user_by_id(internal, uid)
+    assert user["password_hash"] == UNUSABLE_PASSWORD
+    assert user["must_change_password"] == 0
+    token = await db.get_password_token(internal, "tok1")
+    assert token is not None
+    assert token["user_id"] == uid
+    assert token["purpose"] == "invite"
+    assert token["username"] == "alice"
+    assert _parse(token["expires_at"]) > _now()
+    # Duplicate username is rejected atomically (no orphaned token row).
+    with pytest.raises(db.UsernameTakenError):
+        await db.create_invited_user(
+            internal,
+            actor_id="admin1",
+            username="alice",
+            is_admin=False,
+            token_sha="tok2",
+            ttl_hours=72,
+        )
+    assert await db.get_password_token(internal, "tok2") is None
+
+
+@pytest.mark.asyncio
+async def test_use_password_token_claims_once_sets_password_and_revokes_sessions():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="bob",
+        is_admin=False,
+        token_sha="tok1",
+        ttl_hours=72,
+    )
+    await db.create_session(internal, uid, "sess1", 7, "UA", "1.1.1.1")
+    assert await db.get_session(internal, "sess1") is not None
+
+    result_uid = await db.use_password_token(internal, "tok1", "newhash")
+    assert result_uid == uid
+
+    user = await db.get_user_by_id(internal, uid)
+    assert user["password_hash"] == "newhash"
+    assert user["must_change_password"] == 0
+    # All the user's sessions are revoked as part of completing the link.
+    assert await db.get_session(internal, "sess1") is None
+    # Audit row: actor and target are both the user themselves.
+    audit = await db.list_admin_audit(internal, target_id=uid)
+    ops = [row["operation"] for row in audit]
+    assert "set-password-via-link" in ops
+    set_row = next(r for r in audit if r["operation"] == "set-password-via-link")
+    assert set_row["actor_id"] == uid
+    assert set_row["target_id"] == uid
+
+    # Second claim of the same (now-deleted) token fails.
+    assert await db.use_password_token(internal, "tok1", "otherhash") is None
+    user = await db.get_user_by_id(internal, uid)
+    assert user["password_hash"] == "newhash"  # unchanged by the failed claim
+
+
+@pytest.mark.asyncio
+async def test_expired_token_not_claimable():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="carol",
+        is_admin=False,
+        token_sha="tok1",
+        ttl_hours=-1,
+    )
+    assert await db.get_password_token(internal, "tok1") is None
+    assert await db.use_password_token(internal, "tok1", "newhash") is None
+    user = await db.get_user_by_id(internal, uid)
+    assert user["password_hash"] == UNUSABLE_PASSWORD
+
+
+@pytest.mark.asyncio
+async def test_mint_password_token_invalidates_prior_link():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="dave",
+        is_admin=False,
+        token_sha="tok1",
+        ttl_hours=72,
+    )
+    await db.mint_password_token(
+        internal,
+        actor_id="admin1",
+        target_id=uid,
+        purpose="invite",
+        token_sha="tok2",
+        ttl_hours=72,
+    )
+    assert await db.get_password_token(internal, "tok1") is None
+    row = await db.get_password_token(internal, "tok2")
+    assert row is not None and row["user_id"] == uid
+
+    audit = await db.list_admin_audit(internal, target_id=uid)
+    assert "mint-invite-link" in [r["operation"] for r in audit]
+
+
+@pytest.mark.asyncio
+async def test_mint_reset_link_audits_distinct_operation():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await db.create_user(
+        internal,
+        actor_id=None,
+        username="erin",
+        password_hash="h",
+        is_admin=False,
+        must_change_password=False,
+    )
+    await db.mint_password_token(
+        internal,
+        actor_id="admin1",
+        target_id=uid,
+        purpose="reset",
+        token_sha="tok1",
+        ttl_hours=24,
+    )
+    token = await db.get_password_token(internal, "tok1")
+    assert token["purpose"] == "reset"
+    audit = await db.list_admin_audit(internal, target_id=uid)
+    assert "mint-reset-link" in [r["operation"] for r in audit]
+
+
+@pytest.mark.asyncio
+async def test_disable_delete_reset_kill_outstanding_tokens():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+
+    uid1 = await db.create_user(
+        internal, None, "frank", "h", is_admin=False, must_change_password=False
+    )
+    await db.mint_password_token(
+        internal, None, uid1, "reset", "tok-disable", ttl_hours=24
+    )
+    await db.disable_user(internal, actor_id=None, target_id=uid1)
+    assert await db.get_password_token(internal, "tok-disable") is None
+
+    uid2 = await db.create_user(
+        internal, None, "grace", "h", is_admin=False, must_change_password=False
+    )
+    await db.mint_password_token(
+        internal, None, uid2, "reset", "tok-delete", ttl_hours=24
+    )
+    await db.delete_user(internal, actor_id=None, target_id=uid2)
+    assert await db.get_password_token(internal, "tok-delete") is None
+
+    uid3 = await db.create_user(
+        internal, None, "henry", "h", is_admin=False, must_change_password=False
+    )
+    await db.mint_password_token(
+        internal, None, uid3, "reset", "tok-reset", ttl_hours=24
+    )
+    await db.reset_password(internal, actor_id=None, target_id=uid3, password_hash="h2")
+    assert await db.get_password_token(internal, "tok-reset") is None
+
+
+@pytest.mark.asyncio
+async def test_purge_expired_password_tokens_via_db():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="ivy",
+        is_admin=False,
+        token_sha="live",
+        ttl_hours=72,
+    )
+    await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="jack",
+        is_admin=False,
+        token_sha="dead",
+        ttl_hours=-1,
+    )
+    await db.purge_expired_password_tokens(internal)
+    count = (
+        await internal.execute(f"SELECT COUNT(*) FROM {db.PASSWORD_TOKENS}")
+    ).single_value()
+    assert count == 1
+    remaining = (
+        await internal.execute(f"SELECT token_sha256 FROM {db.PASSWORD_TOKENS}")
+    ).single_value()
+    assert remaining == "live"
+
+
+@pytest.mark.asyncio
+async def test_list_user_rows_merges_invited_flag():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    await db.create_user(
+        internal,
+        actor_id=None,
+        username="norm",
+        password_hash="h",
+        is_admin=False,
+        must_change_password=False,
+    )
+    await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="livey",
+        is_admin=False,
+        token_sha="tok-live",
+        ttl_hours=72,
+    )
+    await db.create_invited_user(
+        internal,
+        actor_id=None,
+        username="stale",
+        is_admin=False,
+        token_sha="tok-expired",
+        ttl_hours=-1,
+    )
+
+    rows = {r["username"]: r for r in await db.list_user_rows(internal)}
+    # A regular account is never invited; only a LIVE invite token counts —
+    # an expired one means the invitation lapsed.
+    assert rows["norm"]["invited"] is False
+    assert rows["livey"]["invited"] is True
+    assert rows["stale"]["invited"] is False
+    # The rest of the row keeps the to_user_row shape.
+    assert rows["norm"]["locked"] is False
+    assert rows["norm"]["last_login_at"] is None
+
+    # Completing the invite consumes the token — no longer invited.
+    await db.use_password_token(internal, "tok-live", "newhash")
+    rows = {r["username"]: r for r in await db.list_user_rows(internal)}
+    assert rows["livey"]["invited"] is False

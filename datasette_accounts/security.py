@@ -19,6 +19,9 @@ DEFAULTS = {
     "secure_cookie": "auto",  # "auto" | True | False
     "audit_retention_days": 90,
     "trust_proxy_headers": False,  # trust X-Forwarded-* (proto + client IP)
+    # --- Invite / reset links (see plans/invite-links) ---
+    "invite_ttl_hours": 72,  # invite-link lifetime
+    "reset_link_ttl_hours": 24,  # reset-link lifetime
     # --- Capability grants (F1) / acl bridge (F2) ---
     # Explicit allowlist of grantable global actions; None = auto-discover all
     # global (resource_class=None) actions minus the built-in denylist.

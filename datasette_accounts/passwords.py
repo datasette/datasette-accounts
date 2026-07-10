@@ -20,6 +20,13 @@ ITERATIONS = 480000
 # attacker-controlled input into the KDF is a needless DoS vector.
 PASSWORD_MAX_LENGTH = 1024
 
+# Sentinel stored in `password_hash` for accounts that have no usable password
+# yet (invited but not set up). Django convention. Never a valid PBKDF2 hash
+# (no '$' fields at all), so it can never verify — callers must route it
+# through `averify_dummy` rather than `averify_password` so login timing
+# doesn't distinguish invited accounts from any other login failure.
+UNUSABLE_PASSWORD = "!"
+
 
 def hash_password(password, salt=None, iterations=ITERATIONS):
     if salt is None:
@@ -34,6 +41,11 @@ def hash_password(password, salt=None, iterations=ITERATIONS):
 
 
 def verify_password(password, password_hash):
+    # Defensive belt-and-braces: the sentinel already fails the '$'-count check
+    # below (it has none), but call this out explicitly so the "an unusable
+    # hash can never verify" invariant doesn't depend on the sentinel's shape.
+    if password_hash == UNUSABLE_PASSWORD:
+        return False
     if (password_hash or "").count("$") != 3:
         return False
     password_hash = password_hash.strip()

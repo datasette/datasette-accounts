@@ -16,9 +16,11 @@ from ..page_data import (
     LoginAttemptsPageData,
     LoginPageData,
     MessagesPageData,
+    SetPasswordPageData,
     UserRow,
 )
 from ..router import require_admin_page, router
+from ..sessions import token_sha256
 
 
 async def _render(datasette, request, entrypoint, page_title, page_data):
@@ -45,6 +47,35 @@ async def login_page(datasette, request):
     page_data = LoginPageData(next=next_value, help=help_text).model_dump()
     return await _render(
         datasette, request, "src/pages/login/index.ts", "Log in", page_data
+    )
+
+
+@router.GET("/-/set-password$")
+async def set_password_page(datasette, request):
+    # Anonymous: an invite/reset link proves control of the account, not a
+    # signed-in session. Never say *why* a token is invalid (missing, expired,
+    # already used, or unknown) — one generic state for all of them, and a
+    # login_audit row so admins can see probing.
+    token = request.args.get("token") or ""
+    internal = datasette.get_internal_database()
+    row = await db.get_password_token(internal, token_sha256(token)) if token else None
+    if row:
+        page_data = SetPasswordPageData(
+            valid=True,
+            purpose=row["purpose"],
+            username=row["username"],
+            token=token,
+        ).model_dump()
+    else:
+        ip = security.client_ip(datasette, request)
+        await db.record_login_attempt(internal, None, ip, False, "bad_token")
+        page_data = SetPasswordPageData(valid=False).model_dump()
+    return await _render(
+        datasette,
+        request,
+        "src/pages/set-password/index.ts",
+        "Set your password",
+        page_data,
     )
 
 
@@ -83,8 +114,8 @@ async def account_page(datasette, request):
 @require_admin_page
 async def admin_page(datasette, request):
     internal = datasette.get_internal_database()
-    rows = await db.list_users(internal)
-    users = [UserRow(**db.to_user_row(r)) for r in rows]
+    rows = await db.list_user_rows(internal)
+    users = [UserRow(**r) for r in rows]
     page_data = AdminPageData(users=users).model_dump()
     return await _render(
         datasette, request, "src/pages/admin/index.ts", "Accounts", page_data

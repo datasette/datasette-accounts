@@ -23,6 +23,9 @@ class UserRow(BaseModel):
     disabled: bool
     must_change_password: bool
     locked: bool
+    # True while the account holds a live invite link (no password chosen yet).
+    # Derived from the password-tokens table, not a users column.
+    invited: bool
     created_at: str
     # None until the first successful sign-in — the account is still "pending".
     last_login_at: Optional[str] = None
@@ -122,6 +125,21 @@ class LoginAttemptsPageData(BaseModel):
     filter_ip: str = ""
 
 
+# --- Set-password page (invite / reset links) ---
+
+
+class SetPasswordPageData(BaseModel):
+    # False for a missing/invalid/expired/already-used token — the page then
+    # shows one generic error, never distinguishing the reason.
+    valid: bool
+    # "invite" or "reset"; "" when invalid.
+    purpose: str = ""
+    username: str = ""
+    # The raw token, echoed back so the completion POST can send it; "" when
+    # invalid.
+    token: str = ""
+
+
 __exports__ = [
     LoginPageData,
     AdminPageData,
@@ -129,6 +147,7 @@ __exports__ = [
     CapabilitiesPageData,
     MessagesPageData,
     LoginAttemptsPageData,
+    SetPasswordPageData,
 ]
 
 
@@ -241,3 +260,31 @@ class LoginAttemptsRequest(BaseModel):
     # Exact-match filters; "" / omitted means unfiltered.
     username: str = ""
     ip: str = ""
+
+
+# --- Invite / reset links (see plans/invite-links) ---
+
+
+class CompleteSetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+class InviteRequest(BaseModel):
+    username: str
+    is_admin: bool = False
+
+
+class InviteResponse(BaseModel):
+    ok: bool
+    id: Optional[str] = None
+    # The absolute one-time set-password URL, shown once.
+    url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ResetLinkResponse(BaseModel):
+    ok: bool
+    # The absolute one-time set-password URL, shown once.
+    url: Optional[str] = None
+    error: Optional[str] = None

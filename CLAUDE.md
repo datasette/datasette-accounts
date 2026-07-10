@@ -11,6 +11,11 @@ grants + datasette-acl bridge), all built on the `permissions-admin` branch.
 `plans/site-messages/` is the design for the root bootstrap prompt + admin-
 editable site messages (homepage sign-in prompt, login help), built on the
 `site-messages` branch.
+Planned, not yet built: `plans/invite-links/` (one-time invite + reset URLs),
+`plans/account-expiry/` (`expires_at` on accounts), `plans/self-registration/`
+(opt-in signup + approval queue), `plans/session-list/` (user-facing session
+list on `/-/account`), `plans/admin-audit-viewer/` (`/-/admin/audit` page).
+Each claims "the next free migration slot" — renumber at build time.
 
 ## Build status
 - M0–M8 built and tested (`uv run pytest`, 22 tests green; `npm run check` clean).

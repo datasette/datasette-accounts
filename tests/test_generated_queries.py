@@ -134,6 +134,132 @@ def test_site_message_delete_returning(conn):
 
 
 # ==========================================================================
+# Password tokens
+# ==========================================================================
+
+
+def test_insert_select_and_claim_password_token(conn):
+    gen.insert_user(
+        conn,
+        id="u1",
+        username="alice",
+        password_hash="!",
+        is_admin=0,
+        must_change_password=0,
+    )
+    gen.insert_password_token(
+        conn,
+        token_sha256="tok1",
+        user_id="u1",
+        purpose="invite",
+        ttl_hours=72,
+        created_by=None,
+    )
+    row = gen.select_password_token(conn, token_sha256="tok1")
+    assert row is not None
+    assert row.user_id == "u1"
+    assert row.purpose == "invite"
+    assert row.username == "alice"
+    assert _parse(row.expires_at) > _now()
+    # Claim-by-delete: RETURNING user_id on the live row...
+    assert gen.delete_password_token(conn, token_sha256="tok1") == "u1"
+    # ...and nothing left to claim a second time (single-use).
+    assert gen.delete_password_token(conn, token_sha256="tok1") is None
+    assert gen.select_password_token(conn, token_sha256="tok1") is None
+
+
+def test_expired_password_token_not_selectable_or_claimable(conn):
+    gen.insert_user(
+        conn,
+        id="u1",
+        username="bob",
+        password_hash="!",
+        is_admin=0,
+        must_change_password=0,
+    )
+    gen.insert_password_token(
+        conn,
+        token_sha256="tok1",
+        user_id="u1",
+        purpose="reset",
+        ttl_hours=-1,
+        created_by=None,
+    )
+    assert gen.select_password_token(conn, token_sha256="tok1") is None
+    # The DELETE itself requires expires_at > now, so an expired-but-unpurged
+    # row is never claimable either.
+    assert gen.delete_password_token(conn, token_sha256="tok1") is None
+
+
+def test_purge_expired_password_tokens_removes_only_expired(conn):
+    gen.insert_user(
+        conn,
+        id="u1",
+        username="carol",
+        password_hash="!",
+        is_admin=0,
+        must_change_password=0,
+    )
+    gen.insert_password_token(
+        conn,
+        token_sha256="live",
+        user_id="u1",
+        purpose="invite",
+        ttl_hours=72,
+        created_by=None,
+    )
+    gen.insert_password_token(
+        conn,
+        token_sha256="dead",
+        user_id="u1",
+        purpose="invite",
+        ttl_hours=-1,
+        created_by=None,
+    )
+    gen.purge_expired_password_tokens(conn)
+    remaining = conn.execute(
+        "SELECT token_sha256 FROM datasette_accounts_password_tokens"
+    ).fetchall()
+    assert [r[0] for r in remaining] == ["live"]
+
+
+def test_delete_password_tokens_for_user(conn):
+    gen.insert_user(
+        conn,
+        id="u1",
+        username="dave",
+        password_hash="!",
+        is_admin=0,
+        must_change_password=0,
+    )
+    gen.insert_password_token(
+        conn,
+        token_sha256="tok1",
+        user_id="u1",
+        purpose="invite",
+        ttl_hours=72,
+        created_by=None,
+    )
+    gen.delete_password_tokens_for_user(conn, user_id="u1")
+    assert gen.select_password_token(conn, token_sha256="tok1") is None
+
+
+def test_set_password_from_token(conn):
+    gen.insert_user(
+        conn,
+        id="u1",
+        username="erin",
+        password_hash="!",
+        is_admin=0,
+        must_change_password=1,
+    )
+    gen.set_password_from_token(conn, password_hash="newhash", user_id="u1")
+    row = gen.select_user_by_id(conn, user_id="u1")
+    assert row.password_hash == "newhash"
+    assert row.must_change_password == 0
+
+
+# ==========================================================================
 # SQL-generated timestamps
 # ==========================================================================
 

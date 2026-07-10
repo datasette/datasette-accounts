@@ -155,3 +155,25 @@ def m005_login_audit_reason(db: Database):
             ON datasette_accounts_admin_audit (timestamp);
         """
     )
+
+
+@internal_migrations()
+def m006_password_tokens(db: Database):
+    # One-time "set a password" links. The raw token lives only in the URL the
+    # admin copies; we store sha256(token) — same rule as sessions. purpose
+    # distinguishes the two flows: 'invite' (account has never had a usable
+    # password) vs 'reset' (existing account, sessions revoked on completion).
+    db.executescript(
+        """
+        CREATE TABLE datasette_accounts_password_tokens (
+            token_sha256 TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            purpose TEXT NOT NULL CHECK (purpose IN ('invite', 'reset')),
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_by TEXT
+        );
+        CREATE INDEX idx_accounts_pwtokens_user
+            ON datasette_accounts_password_tokens (user_id);
+        """
+    )
