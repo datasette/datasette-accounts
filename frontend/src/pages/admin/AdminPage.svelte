@@ -26,27 +26,6 @@
   let search = $state("");
   let openMenu = $state<string | null>(null);
 
-  // Self-registration switch (see plans/self-registration): optimistic flip
-  // with rollback on error, so the header state always chases the server's.
-  let regEnabled = $state(Boolean(pageData.registration_enabled));
-  let regBusy = $state(false);
-
-  async function toggleRegistration() {
-    const next = !regEnabled;
-    regEnabled = next; // optimistic
-    regBusy = true;
-    error = "";
-    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(
-      "/-/admin/api/set-registration",
-      { enabled: next },
-    );
-    regBusy = false;
-    if (!ok || !data.ok) {
-      regEnabled = !next; // rollback
-      error = data.error || "Could not update self-registration";
-    }
-  }
-
   function toggleMenu(e: Event, id: string) {
     e.stopPropagation();
     openMenu = openMenu === id ? null : id;
@@ -176,7 +155,10 @@
     }
   }
 
-  async function toggle(u: User, path: string) {
+  // One-click mutations get a native are-you-sure prompt; the destructive
+  // flows (delete, reject) keep their richer confirm modals.
+  async function toggle(u: User, path: string, confirmMsg: string) {
+    if (!window.confirm(confirmMsg)) return;
     if (await op(path, { id: u.id })) await refresh();
   }
 
@@ -188,6 +170,7 @@
   }
 
   async function approve(u: User) {
+    if (!window.confirm(`Approve the account request from “${u.username}”?`)) return;
     if (await op("/-/admin/api/approve", { id: u.id })) await refresh();
   }
 
@@ -234,6 +217,7 @@
   async function revoke(token: string) {
     const u = sessionsTarget;
     if (!u) return;
+    if (!window.confirm(`Revoke this session for “${u.username}”? They will be signed out on that device.`)) return;
     if (await op("/-/admin/api/revoke-session", { id: u.id, token_sha256: token })) {
       const { data } = await postJSON<{ sessions: Session[] }>("/-/admin/api/list-sessions", {
         id: u.id,
@@ -325,33 +309,7 @@
 <div class="page">
   <header class="bar">
     <h1>Accounts</h1>
-    <div class="bar-actions">
-      <div class="reg-toggle">
-        <span class="reg-label" id="reg-label">Self-registration</span>
-        <button
-          class="switch"
-          class:on={regEnabled}
-          role="switch"
-          aria-checked={regEnabled}
-          aria-labelledby="reg-label"
-          disabled={regBusy}
-          onclick={toggleRegistration}
-        >
-          <span class="knob" aria-hidden="true"></span>
-          <span class="state">{regEnabled ? "On" : "Off"}</span>
-        </button>
-      </div>
-      <button class="btn-primary" onclick={openCreate}>
-        + New account
-      </button>
-    </div>
   </header>
-  {#if regEnabled}
-    <p class="reg-note">
-      Self-registration is on — anyone can request an account at
-      <code>/-/register</code>. New requests wait below for your approval.
-    </p>
-  {/if}
   <AdminNav current="accounts" />
 
   {#if error}<p class="msg msg-error">{error}</p>{/if}
@@ -379,9 +337,14 @@
     </section>
   {/if}
 
-  <div class="search">
-    <span class="ico" aria-hidden="true">⌕</span>
-    <input class="input" placeholder="Search accounts…" bind:value={search} />
+  <div class="toolbar">
+    <div class="search">
+      <span class="ico" aria-hidden="true">⌕</span>
+      <input class="input" placeholder="Search accounts…" bind:value={search} />
+    </div>
+    <button class="btn-primary" onclick={openCreate}>
+      + New account
+    </button>
   </div>
 
   <div class="card table-wrap">
@@ -399,7 +362,9 @@
       <tbody>
         {#each filtered as u (u.id)}
           <tr>
-            <td class="uname">{u.username}</td>
+            <td class="uname">
+              {u.username}{#if u.id === pageData.viewer_id}<span class="you">(you)</span>{/if}
+            </td>
             <td>
               {#if u.is_admin}<span class="badge badge-admin">admin</span>{/if}
             </td>
@@ -437,16 +402,27 @@
                 >
                 {#if openMenu === u.id}
                   <div class="menu" role="menu" tabindex="-1">
-                    <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/toggle-admin"))}>
+                    <button
+                      role="menuitem"
+                      onclick={() =>
+                        pick(() =>
+                          toggle(
+                            u,
+                            "/-/admin/api/toggle-admin",
+                            u.is_admin
+                              ? `Revoke admin from “${u.username}”?`
+                              : `Make “${u.username}” an admin?`,
+                          ))}
+                    >
                       {u.is_admin ? "Revoke admin" : "Make admin"}
                     </button>
                     {#if u.disabled}
-                      <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/enable"))}>Enable</button>
+                      <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/enable", `Enable the account “${u.username}”?`))}>Enable</button>
                     {:else}
-                      <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/disable"))}>Disable</button>
+                      <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/disable", `Disable the account “${u.username}”? They will no longer be able to sign in.`))}>Disable</button>
                     {/if}
                     {#if u.locked}
-                      <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/unlock"))}>Unlock</button>
+                      <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/unlock", `Unlock the account “${u.username}”?`))}>Unlock</button>
                     {/if}
                     <button role="menuitem" onclick={() => pick(() => openExpiry(u))}>Set expiry…</button>
                     <div class="sep"></div>
@@ -676,84 +652,10 @@
 
 <style>
   .bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
     margin-bottom: 1rem;
   }
   .bar h1 {
     margin: 0;
-  }
-  .bar-actions {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
-
-  /* Self-registration switch — an explicit On/Off control with the state
-     spelled out, so it can't be mistaken for a table filter. */
-  .reg-toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  .reg-label {
-    font-size: 0.85rem;
-    color: var(--muted);
-    white-space: nowrap;
-  }
-  .switch {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.25rem 0.7rem 0.25rem 0.3rem;
-    background: transparent;
-    cursor: pointer;
-  }
-  .switch:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-  .switch .knob {
-    position: relative;
-    width: 1.7rem;
-    height: 0.95rem;
-    border-radius: 999px;
-    background: var(--border);
-    transition: background 0.15s ease;
-  }
-  .switch .knob::after {
-    content: "";
-    position: absolute;
-    top: 1px;
-    left: 1px;
-    width: calc(0.95rem - 2px);
-    height: calc(0.95rem - 2px);
-    border-radius: 50%;
-    background: #fff;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-    transition: transform 0.15s ease;
-  }
-  .switch.on .knob {
-    background: var(--ok, #16a34a);
-  }
-  .switch.on .knob::after {
-    transform: translateX(0.75rem);
-  }
-  .switch .state {
-    font-size: 0.8rem;
-    font-weight: 600;
-  }
-  .reg-note {
-    margin: -0.5rem 0 1rem;
-    color: var(--muted);
-    font-size: 0.85rem;
-  }
-  .reg-note code {
-    font-size: 0.8rem;
   }
 
   /* Awaiting-approval queue — pinned above the main table with a warn accent
@@ -802,9 +704,16 @@
     gap: 0.5rem;
   }
 
+  .toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
   .search {
     position: relative;
-    margin-bottom: 1rem;
+    flex: 1;
     max-width: 340px;
   }
   .search .ico {
@@ -849,6 +758,12 @@
   }
   .uname {
     font-weight: 600;
+  }
+  .you {
+    margin-left: 0.4rem;
+    font-weight: 400;
+    font-size: 0.8rem;
+    color: var(--muted);
   }
   .status {
     display: flex;

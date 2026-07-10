@@ -13,10 +13,10 @@ from ..page_data import (
     AdminAuditPageData,
     AdminPageData,
     CapabilitiesPageData,
+    ConfigPageData,
     LoginAttemptRow,
     LoginAttemptsPageData,
     LoginPageData,
-    MessagesPageData,
     RegisterPageData,
     SetPasswordPageData,
     UserRow,
@@ -150,8 +150,7 @@ async def admin_page(datasette, request):
     rows = await db.list_user_rows(internal)
     users = [UserRow(**r) for r in rows]
     page_data = AdminPageData(
-        users=users,
-        registration_enabled=await db.get_registration_enabled(internal),
+        users=users, viewer_id=request.actor["id"]
     ).model_dump()
     return await _render(
         datasette, request, "src/pages/admin/index.ts", "Accounts", page_data
@@ -173,14 +172,17 @@ async def capabilities_page(datasette, request):
     )
 
 
-@router.GET("/-/admin/messages$")
+@router.GET("/-/admin/config$")
 @require_admin_page
-async def messages_page(datasette, request):
+async def config_page(datasette, request):
     internal = datasette.get_internal_database()
     view = await messages.slots_view(internal)
-    page_data = MessagesPageData(**view).model_dump()
+    page_data = ConfigPageData(
+        **view,
+        registration_enabled=await db.get_registration_enabled(internal),
+    ).model_dump()
     return await _render(
-        datasette, request, "src/pages/messages/index.ts", "Messages", page_data
+        datasette, request, "src/pages/config/index.ts", "Configuration", page_data
     )
 
 
@@ -228,6 +230,6 @@ async def admin_audit_page(datasette, request):
         datasette,
         request,
         "src/pages/audit/index.ts",
-        "Audit trail",
+        "Admin history",
         page_data,
     )

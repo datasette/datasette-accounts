@@ -635,12 +635,12 @@ def page_data_of(r):
 
 
 @pytest.mark.asyncio
-async def test_admin_page_data_carries_registration_state():
+async def test_config_page_data_carries_registration_state():
     ds = await make_ds()
     await insert_user(ds, "boss", is_admin=True)
     _, cookies = await login(ds, "boss", "password123")
 
-    r = await ds.client.get("/-/admin/users", cookies=cookies)
+    r = await ds.client.get("/-/admin/config", cookies=cookies)
     assert page_data_of(r)["registration_enabled"] is False
 
     on = await ds.client.post(
@@ -651,7 +651,7 @@ async def test_admin_page_data_carries_registration_state():
     )
     assert on.status_code == 200
 
-    r = await ds.client.get("/-/admin/users", cookies=cookies)
+    r = await ds.client.get("/-/admin/config", cookies=cookies)
     assert page_data_of(r)["registration_enabled"] is True
 
 

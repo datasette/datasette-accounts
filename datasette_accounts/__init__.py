@@ -343,34 +343,11 @@ def menu_links(datasette, actor):
             return [{"href": datasette.urls.path("/-/login"), "label": "Log in"}]
         links = []
         if await datasette.allowed(action=ADMIN_ACTION, actor=actor):
+            # One entry — the other admin sections are tabs on the page itself.
             links.append(
                 {
                     "href": datasette.urls.path("/-/admin/users"),
-                    "label": "Accounts",
-                }
-            )
-            links.append(
-                {
-                    "href": datasette.urls.path("/-/admin/capabilities"),
-                    "label": "Capabilities",
-                }
-            )
-            links.append(
-                {
-                    "href": datasette.urls.path("/-/admin/messages"),
-                    "label": "Messages",
-                }
-            )
-            links.append(
-                {
-                    "href": datasette.urls.path("/-/admin/login-attempts"),
-                    "label": "Login attempts",
-                }
-            )
-            links.append(
-                {
-                    "href": datasette.urls.path("/-/admin/audit"),
-                    "label": "Audit trail",
+                    "label": "Admin",
                 }
             )
             # F2 — admins are acl admins, so link to acl's group + sharing UI

@@ -48,9 +48,9 @@ class UserRow(BaseModel):
 
 class AdminPageData(BaseModel):
     users: List[UserRow]
-    # Current state of the runtime self-registration toggle, so the header
-    # switch renders with the live value. See plans/self-registration.
-    registration_enabled: bool = False
+    # The viewing admin's own account id, so the table can mark their row
+    # with a "(you)" label.
+    viewer_id: str
 
 
 class OwnSessionRow(BaseModel):
@@ -131,8 +131,13 @@ class SiteMessageSlot(BaseModel):
     body: str = ""
 
 
-class MessagesPageData(BaseModel):
+class ConfigPageData(BaseModel):
+    """The /-/admin/config page: site messages + the self-registration toggle."""
+
     slots: List[SiteMessageSlot]
+    # Current state of the runtime self-registration toggle, so the switch
+    # renders with the live value. See plans/self-registration.
+    registration_enabled: bool = False
 
 
 # --- Login attempts (admin audit view) ---
@@ -208,7 +213,7 @@ __exports__ = [
     AdminPageData,
     AccountPageData,
     CapabilitiesPageData,
-    MessagesPageData,
+    ConfigPageData,
     LoginAttemptsPageData,
     SetPasswordPageData,
     AdminAuditPageData,

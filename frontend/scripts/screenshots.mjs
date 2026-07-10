@@ -328,17 +328,21 @@ function buildShots(browser) {
       await ctx.close();
     },
 
-    // The Messages admin page: admin-editable help text surfaced in the app
-    // (homepage sign-in prompt + login help/contact), seeded with demo copy.
-    messages: async () => {
+    // The Configuration admin page: the self-registration toggle + the
+    // admin-editable site messages (homepage sign-in prompt + login
+    // help/contact), seeded with demo copy.
+    config: async () => {
       const { ctx, page } = await loginContext(
         browser,
         "admin",
-        "/-/admin/messages",
+        "/-/admin/config",
       );
       await page
-        .getByRole("heading", { name: "Messages" })
+        .getByRole("heading", { name: "Configuration" })
         .waitFor({ timeout: 15_000 });
+      await page
+        .getByRole("heading", { name: "Self-registration" })
+        .waitFor();
       await page
         .getByRole("heading", { name: "Homepage sign-in prompt" })
         .waitFor();
@@ -346,7 +350,7 @@ function buildShots(browser) {
         .getByRole("heading", { name: "Login help / contact" })
         .waitFor();
       await freezeVolatile(page);
-      await shotClipped(page, out("messages"));
+      await shotClipped(page, out("config"));
       await ctx.close();
     },
 
@@ -368,7 +372,7 @@ function buildShots(browser) {
       await ctx.close();
     },
 
-    // The Audit trail admin page: every admin mutation with its actor,
+    // The Admin history page: every admin mutation with its actor,
     // target, and detail chips, filterable by target username/operation
     // (seeded demo rows, including a CLI actor and a deleted target).
     audit: async () => {
@@ -378,7 +382,7 @@ function buildShots(browser) {
         "/-/admin/audit",
       );
       await page
-        .getByRole("heading", { name: "Audit trail" })
+        .getByRole("heading", { name: "Admin history" })
         .waitFor({ timeout: 15_000 });
       // Wait for the seeded rows (the CLI actor) to render.
       await page.getByText("cli:ops").first().waitFor();
@@ -387,7 +391,7 @@ function buildShots(browser) {
       await ctx.close();
     },
 
-    // A regular user's own account page (change-password form).
+    // A regular user's own account page (Password tab, change-password form).
     account: async () => {
       const { ctx, page } = await loginContext(browser, "alice", "/-/account");
       await page.getByRole("heading", { name: "Your account" }).waitFor({
@@ -396,6 +400,20 @@ function buildShots(browser) {
       await page.getByText("Signed in as").waitFor();
       await freezeVolatile(page);
       await shotClipped(page, out("account"));
+      await ctx.close();
+    },
+
+    // The account page's Sessions tab (hash-routed): the user's own sessions
+    // with per-session revoke + log-out-others.
+    "account-sessions": async () => {
+      const { ctx, page } = await loginContext(
+        browser,
+        "alice",
+        "/-/account#sessions",
+      );
+      await page.getByText("This device").waitFor({ timeout: 15_000 });
+      await freezeVolatile(page);
+      await shotClipped(page, out("account-sessions"));
       await ctx.close();
     },
   };

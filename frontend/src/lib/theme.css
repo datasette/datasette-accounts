@@ -46,6 +46,15 @@
   letter-spacing: -0.01em;
 }
 
+/* Muted lead-in paragraph under a page's heading/tab strip. Deliberately NOT
+ * class="intro" — Datasette core styles that at 1.5rem. */
+#app-root .page-intro {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0 0 1.25rem;
+  max-width: 42rem;
+}
+
 /* Card / panel */
 #app-root .card {
   background: var(--surface);

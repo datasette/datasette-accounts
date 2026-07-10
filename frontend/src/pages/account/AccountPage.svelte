@@ -5,6 +5,15 @@
 
   const pageData = loadPageData<AccountPageData>();
 
+  // Client-side tab "routing" via the URL hash — /-/account#sessions is
+  // linkable and the back button walks tab switches; no server round-trip.
+  // During the forced-password-change state the tabs are hidden entirely and
+  // the page stays password-only.
+  type Tab = "password" | "sessions";
+  const tabFromHash = (): Tab =>
+    window.location.hash === "#sessions" ? "sessions" : "password";
+  let tab = $state<Tab>(tabFromHash());
+
   let current = $state("");
   let next = $state("");
   let message = $state("");
@@ -83,15 +92,25 @@
   }
 </script>
 
-<div class="page narrow">
+<svelte:window onhashchange={() => (tab = tabFromHash())} />
+
+<!-- Not .narrow: the sessions table needs room; the password card caps its
+     own width instead. -->
+<div class="page">
   <h1>Your account</h1>
   <p class="who">Signed in as <strong class="me">{pageData.username}</strong></p>
 
   {#if pageData.must_change_password}
     <p class="msg msg-error">Set a new password before continuing.</p>
+  {:else}
+    <nav class="tabs" aria-label="Account sections">
+      <a href="#password" class:active={tab === "password"} aria-current={tab === "password" ? "page" : undefined}>Password</a>
+      <a href="#sessions" class:active={tab === "sessions"} aria-current={tab === "sessions" ? "page" : undefined}>Sessions</a>
+    </nav>
   {/if}
 
-  <form class="card" onsubmit={submit}>
+  {#if pageData.must_change_password || tab === "password"}
+  <form class="card pw-card" onsubmit={submit}>
     <h2>Change password</h2>
     {#if message}<p class="msg msg-ok">{message}</p>{/if}
     {#if error}<p class="msg msg-error">{error}</p>{/if}
@@ -135,9 +154,8 @@
       {busy ? "Saving…" : "Change password"}
     </button>
   </form>
-
-  {#if !pageData.must_change_password}
-    <div class="card sessions-card">
+  {:else}
+    <div class="card">
       <h2>Sessions</h2>
       {#if sessionsError}<p class="msg msg-error">{sessionsError}</p>{/if}
       {#if sessions.length === 0}
@@ -223,8 +241,32 @@
     border: 0;
   }
 
-  .sessions-card {
-    margin-top: 1.5rem;
+  /* Same look as the admin pages' AdminNav tab strip. */
+  .tabs {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: 1.25rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .tabs a {
+    padding: 0.5rem 0.9rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tabs a:hover {
+    color: var(--ink);
+  }
+  .tabs a.active {
+    color: var(--acc);
+    border-bottom-color: var(--acc);
+  }
+
+  .pw-card {
+    max-width: 460px;
   }
   .muted {
     color: var(--muted);
@@ -262,7 +304,7 @@
   }
   .ua {
     display: inline-block;
-    max-width: 220px;
+    max-width: 340px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

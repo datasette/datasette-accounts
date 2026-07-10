@@ -1,7 +1,7 @@
 import "../../lib/theme.css";
 import { mount } from "svelte";
-import MessagesPage from "./MessagesPage.svelte";
+import ConfigPage from "./ConfigPage.svelte";
 
-export default mount(MessagesPage, {
+export default mount(ConfigPage, {
   target: document.getElementById("app-root")!,
 });

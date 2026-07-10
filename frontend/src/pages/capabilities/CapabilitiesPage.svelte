@@ -130,7 +130,7 @@
   </header>
   <AdminNav current="capabilities" />
 
-  <p class="intro">
+  <p class="page-intro">
     Grant instance-wide capabilities to accounts, groups, or everyone. These are
     global actions (like “create a paper”) that aren’t tied to one document.
     {#if hasAcl}
@@ -226,12 +226,6 @@
 <style>
   .bar h1 {
     margin: 0 0 0.75rem;
-  }
-  .intro {
-    color: var(--muted);
-    margin: 0 0 1.25rem;
-    max-width: 60ch;
-    line-height: 1.5;
   }
   .stack {
     display: flex;

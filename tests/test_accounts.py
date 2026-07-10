@@ -275,6 +275,45 @@ async def test_logout_destroys_session_but_get_does_not():
 
 
 @pytest.mark.asyncio
+async def test_login_and_logout_clear_stale_core_actor_cookie():
+    # A leftover core `ds_actor` cookie (e.g. an old root login) makes
+    # Datasette's base template render a second Log out button; our login and
+    # logout responses must expire it. No ds_actor cookie → no Set-Cookie.
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+
+    r = await ds.client.post(
+        "/-/login/api/authenticate",
+        content=json.dumps({"username": "alice", "password": "password123"}),
+        headers=JSON,
+        cookies={"ds_actor": "stale"},
+    )
+    assert r.status_code == 200
+    set_cookies = r.headers.get_list("set-cookie")
+    assert any(c.startswith('ds_actor="";') for c in set_cookies)
+
+    cookies = {COOKIE_NAME: r.cookies.get(COOKIE_NAME)}
+    r = await ds.client.post(
+        "/-/logout/perform",
+        content="{}",
+        headers=JSON,
+        cookies={**cookies, "ds_actor": "stale"},
+    )
+    assert any(
+        c.startswith('ds_actor="";') for c in r.headers.get_list("set-cookie")
+    )
+
+    # Without the stale cookie, nothing touches ds_actor.
+    _, cookies = await login(ds, "alice", "password123")
+    r = await ds.client.post(
+        "/-/logout/perform", content="{}", headers=JSON, cookies=cookies
+    )
+    assert not any(
+        c.startswith("ds_actor=") for c in r.headers.get_list("set-cookie")
+    )
+
+
+@pytest.mark.asyncio
 async def test_lockout_after_threshold():
     ds = await make_ds(lockout_threshold=3, lockout_minutes=15)
     await insert_user(ds, "alice")
@@ -1126,6 +1165,20 @@ async def test_admin_audit_page_requires_admin():
     _, cookies = await login(ds, "bob", "password123")
     r = await ds.client.get("/-/admin/audit", cookies=cookies)
     assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_admin_page_anonymous_redirects_to_login():
+    # No session at all → almost certainly an admin whose session expired,
+    # so bounce to the login page with ?next= back to the requested page
+    # (query string included). A signed-in non-admin still 403s (above).
+    ds = await make_ds()
+    r = await ds.client.get("/-/admin/audit?username=alice")
+    assert r.status_code == 302
+    assert (
+        r.headers["location"]
+        == "/-/login?next=%2F-%2Fadmin%2Faudit%3Fusername%3Dalice"
+    )
 
 
 @pytest.mark.asyncio

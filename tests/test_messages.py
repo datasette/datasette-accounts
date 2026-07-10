@@ -210,11 +210,11 @@ async def test_messages_endpoints_require_admin():
 
 
 @pytest.mark.asyncio
-async def test_messages_page_requires_admin():
+async def test_config_page_requires_admin():
     ds = await make_ds()
     uid = await insert_user(ds, "alice")
     cookies = await session_cookie(ds, uid)
-    r = await ds.client.get("/-/admin/messages", cookies=cookies)
+    r = await ds.client.get("/-/admin/config", cookies=cookies)
     assert r.status_code == 403
 
 

@@ -42,7 +42,7 @@ export default defineConfig({
         admin: "src/pages/admin/index.ts",
         account: "src/pages/account/index.ts",
         capabilities: "src/pages/capabilities/index.ts",
-        messages: "src/pages/messages/index.ts",
+        config: "src/pages/config/index.ts",
         "login-attempts": "src/pages/login-attempts/index.ts",
         "set-password": "src/pages/set-password/index.ts",
         audit: "src/pages/audit/index.ts",

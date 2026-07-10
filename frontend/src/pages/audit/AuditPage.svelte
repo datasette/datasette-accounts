@@ -80,7 +80,7 @@
     );
     loading = false;
     if (!ok || !data.ok) {
-      error = data.error || "Could not load the audit trail";
+      error = data.error || "Could not load the admin history";
       return;
     }
     entries = data.entries ?? [];
@@ -97,22 +97,22 @@
 
 <div class="page">
   <header class="bar">
-    <h1>Audit trail</h1>
+    <h1>Admin history</h1>
   </header>
   <AdminNav current="audit" />
 
-  <p class="intro">
+  <p class="page-intro">
     Every admin action — who created, disabled, reset, granted, and deleted
     what — most recent first. Filter by the exact target username or by
     operation.
   </p>
 
-  <form class="filters" onsubmit={apply}>
-    <label class="field">
+  <form class="filter-bar" onsubmit={apply}>
+    <label class="filter-field">
       <span>Target username</span>
       <input class="input" bind:value={username} placeholder="Any account" />
     </label>
-    <label class="field">
+    <label class="filter-field">
       <span>Operation</span>
       <select class="input" bind:value={operation} onchange={apply}>
         <option value="">All operations</option>
@@ -121,7 +121,7 @@
         {/each}
       </select>
     </label>
-    <div class="actions">
+    <div class="filter-actions">
       <button class="btn-primary btn-sm" type="submit" disabled={loading}>
         {loading ? "Loading…" : "Apply"}
       </button>
@@ -178,34 +178,42 @@
   .bar h1 {
     margin: 0;
   }
-  .intro {
-    color: var(--muted);
-    margin: 0 0 1.25rem;
-    max-width: 42rem;
-  }
 
-  .filters {
+  /* Deliberately NOT class="filters"/"field" — those collide with Datasette
+   * core's table-filter panel and theme.css's modal field styles. */
+  .filter-bar {
     display: flex;
     flex-wrap: wrap;
     align-items: flex-end;
     gap: 0.75rem;
     margin-bottom: 1rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--acc-l);
   }
-  .field {
+  .filter-field {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
   }
-  .field span {
+  .filter-field span {
     font-size: 0.75rem;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--muted);
   }
-  .field .input {
+  .filter-field .input {
     min-width: 200px;
   }
-  .actions {
+  /* Same height for inputs and buttons so the flex-end row reads as
+   * vertically centered. */
+  .filter-bar .input,
+  .filter-actions button {
+    height: 2.4rem;
+  }
+  .filter-actions {
     display: flex;
     gap: 0.5rem;
   }

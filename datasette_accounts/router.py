@@ -5,6 +5,7 @@ CSRF gates are unconditional and enforced here for every state-changing method
 """
 
 from functools import wraps
+from urllib.parse import quote
 
 from datasette import Forbidden, Response
 from datasette_plugin_router import Router
@@ -80,11 +81,23 @@ def require_admin(func):
 
 
 def require_admin_page(func):
-    """The admin action for an HTML page — raises Forbidden on failure."""
+    """The admin action for an HTML page.
+
+    Anonymous visitors are sent to the login page with ?next= back here —
+    the common case is an admin whose session expired, not a probe. A
+    signed-in non-admin still gets the hard 403 (logging in again would not
+    change the answer). The login page re-validates `next` before using it.
+    """
 
     @wraps(func)
     async def wrapper(datasette, request, **kwargs):
         if not await datasette.allowed(action=ADMIN_ACTION, actor=request.actor):
+            if not request.actor:
+                return Response.redirect(
+                    datasette.urls.path(
+                        "/-/login?next=" + quote(request.full_path, safe="")
+                    )
+                )
             raise Forbidden("Admin permission required")
         return await func(datasette=datasette, request=request, **kwargs)
 
