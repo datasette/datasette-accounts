@@ -205,6 +205,11 @@ async def resolve_actor(datasette, request):
         return None
     if user["expires_at"] and user["expires_at"] <= db.now_iso():
         return None
+    # Defense in depth: a pending (self-registered, unapproved) account should
+    # never hold a live session in the first place — see
+    # plans/self-registration — but treat it like `disabled` here too.
+    if user["pending_approval"]:
+        return None
     await db.touch_last_seen(internal, session["token_sha256"], session["last_seen_at"])
     return {
         "id": user["id"],
@@ -239,7 +244,12 @@ def datasette_acl_valid_actors(datasette):
         return [
             {"id": r["id"], "display": r["username"]}
             for r in rows
-            if not r["disabled"] and not (r["expires_at"] and r["expires_at"] <= now)
+            if not r["disabled"]
+            and not (r["expires_at"] and r["expires_at"] <= now)
+            # Pending (self-registered, unapproved) accounts are invisible to
+            # acl's picker/autocomplete until an admin approves them — see
+            # plans/self-registration.
+            and not r["pending_approval"]
         ]
 
     return inner

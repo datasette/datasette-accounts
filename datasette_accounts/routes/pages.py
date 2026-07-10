@@ -5,7 +5,7 @@ Each page renders the single base template with a Vite `entrypoint` and
 logout page is a tiny dependency-free redirect (no Svelte needed).
 """
 
-from datasette import Response
+from datasette import NotFound, Response
 
 from .. import db, grantable, messages, security
 from ..page_data import (
@@ -16,6 +16,7 @@ from ..page_data import (
     LoginAttemptsPageData,
     LoginPageData,
     MessagesPageData,
+    RegisterPageData,
     SetPasswordPageData,
     UserRow,
 )
@@ -47,6 +48,24 @@ async def login_page(datasette, request):
     page_data = LoginPageData(next=next_value, help=help_text).model_dump()
     return await _render(
         datasette, request, "src/pages/login/index.ts", "Log in", page_data
+    )
+
+
+@router.GET("/-/register$")
+async def register_page(datasette, request):
+    # 404 (not e.g. a signed-out redirect) while signups are closed — the
+    # page's existence isn't advertised any differently than a route that
+    # was never registered. Re-checked on submit too, since the toggle can
+    # flip between page load and submit.
+    internal = datasette.get_internal_database()
+    if not await db.get_registration_enabled(internal):
+        raise NotFound("Not found")
+    if request.actor:
+        return Response.redirect(datasette.urls.path("/"))
+    help_text = await db.get_site_message(internal, "register_help") or ""
+    page_data = RegisterPageData(help=help_text).model_dump()
+    return await _render(
+        datasette, request, "src/pages/register/index.ts", "Register", page_data
     )
 
 

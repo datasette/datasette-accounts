@@ -39,6 +39,48 @@ DEFAULTS = {
 
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
+# --------------------------------------------------------------------------
+# Username validation — public registration only
+#
+# Admin-created accounts (create_user, invite) go through no such check:
+# admins are trusted, and existing deployments may already have usernames
+# this rule would reject. The public self-registration surface (see
+# plans/self-registration) needs a rule precisely because anyone can submit
+# it. Loosening this later is easy; tightening it after accounts exist isn't.
+# --------------------------------------------------------------------------
+
+USERNAME_MIN_LENGTH = 3
+USERNAME_MAX_LENGTH = 64
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Case-insensitive: "Root"/"ROOT" would still collide with the bootstrap
+# actor in anything that compares usernames loosely, and blocking the
+# lookalikes closes an obvious impersonation trick.
+_RESERVED_USERNAMES = frozenset({"root"})
+
+
+def validate_username(username):
+    """Return a human-readable rule violation, or None when `username` is valid.
+
+    Same shape as `csrf_error`: a string means reject, None means proceed.
+    Rules: 3-64 characters, `^[A-Za-z0-9][A-Za-z0-9._-]*$` (must start with a
+    letter or digit), and the reserved name `root` (case-insensitively) is
+    rejected.
+    """
+    if not username or not (
+        USERNAME_MIN_LENGTH <= len(username) <= USERNAME_MAX_LENGTH
+    ):
+        return (
+            f"Username must be {USERNAME_MIN_LENGTH}-{USERNAME_MAX_LENGTH} characters"
+        )
+    if not _USERNAME_RE.match(username):
+        return (
+            "Username may only contain letters, numbers, '.', '_', and '-', "
+            "and must start with a letter or number"
+        )
+    if username.lower() in _RESERVED_USERNAMES:
+        return "That username is reserved"
+    return None
+
 
 def config(datasette, key):
     plugin_config = datasette.plugin_config(PLUGIN_NAME) or {}

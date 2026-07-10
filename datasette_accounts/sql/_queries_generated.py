@@ -25,6 +25,7 @@ class UserRow:
     updated_at: str
     last_login_at: str | None
     expires_at: str | None
+    pending_approval: int
 
 
 @dataclass
@@ -83,7 +84,7 @@ def select_user_by_username(conn: sqlite3.Connection, username: str) -> UserRow 
     sql = """\
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
        failed_attempts, locked_until, created_at, updated_at, last_login_at,
-       expires_at
+       expires_at, pending_approval
 FROM datasette_accounts_users
 WHERE username = $username::text;
 """
@@ -97,7 +98,7 @@ def select_user_by_id(conn: sqlite3.Connection, user_id: str) -> UserRow | None:
     sql = """\
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
        failed_attempts, locked_until, created_at, updated_at, last_login_at,
-       expires_at
+       expires_at, pending_approval
 FROM datasette_accounts_users
 WHERE id = $user_id::text;
 """
@@ -111,7 +112,7 @@ def list_users(conn: sqlite3.Connection) -> list[UserRow]:
     sql = """\
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
        failed_attempts, locked_until, created_at, updated_at, last_login_at,
-       expires_at
+       expires_at, pending_approval
 FROM datasette_accounts_users
 ORDER BY username;
 """
@@ -197,15 +198,17 @@ def insert_user(
     password_hash: str,
     is_admin: int,
     must_change_password: int,
+    pending_approval: int,
 ) -> None:
     sql = """\
 INSERT INTO datasette_accounts_users
     (id, username, password_hash, is_admin, disabled, must_change_password,
-     failed_attempts, locked_until, created_at, updated_at)
+     failed_attempts, locked_until, created_at, updated_at, pending_approval)
 VALUES ($id::text, $username::text, $password_hash::text, $is_admin::integer, 0,
         $must_change_password::integer, 0, NULL,
         strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
-        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00');
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        $pending_approval::integer);
 """
     params = {
         "id::text": id,
@@ -213,6 +216,7 @@ VALUES ($id::text, $username::text, $password_hash::text, $is_admin::integer, 0,
         "password_hash::text": password_hash,
         "is_admin::integer": is_admin,
         "must_change_password::integer": must_change_password,
+        "pending_approval::integer": pending_approval,
     }
     conn.execute(sql, params)
     return None
@@ -639,6 +643,37 @@ def delete_site_message(conn: sqlite3.Connection, key: str) -> str | None:
     cursor = conn.execute(sql, params)
     row = cursor.fetchone()
     return row[0] if row is not None else None
+
+
+def select_setting(conn: sqlite3.Connection, key: str) -> str | None:
+    sql = "SELECT value FROM datasette_accounts_settings WHERE key = $key::text;"
+    params = {"key::text": key}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def upsert_setting(
+    conn: sqlite3.Connection, key: str, value: str, updated_by: str | None
+) -> None:
+    sql = """\
+INSERT INTO datasette_accounts_settings (key, value, updated_at, updated_by)
+VALUES ($key::text, $value::text,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00', $updated_by::text::)
+ON CONFLICT(key) DO UPDATE SET
+    value = excluded.value, updated_at = excluded.updated_at,
+    updated_by = excluded.updated_by;
+"""
+    params = {"key::text": key, "value::text": value, "updated_by::text::": updated_by}
+    conn.execute(sql, params)
+    return None
+
+
+def delete_setting(conn: sqlite3.Connection, key: str) -> None:
+    sql = "DELETE FROM datasette_accounts_settings WHERE key = $key::text;"
+    params = {"key::text": key}
+    conn.execute(sql, params)
+    return None
 
 
 def insert_password_token(

@@ -45,21 +45,21 @@
 -- name: selectUserByUsername :row -> UserRow
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
        failed_attempts, locked_until, created_at, updated_at, last_login_at,
-       expires_at
+       expires_at, pending_approval
 FROM datasette_accounts_users
 WHERE username = $username::text;
 
 -- name: selectUserById :row -> UserRow
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
        failed_attempts, locked_until, created_at, updated_at, last_login_at,
-       expires_at
+       expires_at, pending_approval
 FROM datasette_accounts_users
 WHERE id = $user_id::text;
 
 -- name: listUsers :rows -> UserRow
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
        failed_attempts, locked_until, created_at, updated_at, last_login_at,
-       expires_at
+       expires_at, pending_approval
 FROM datasette_accounts_users
 ORDER BY username;
 
@@ -106,14 +106,18 @@ SELECT failed_attempts FROM datasette_accounts_users WHERE id = $user_id::text;
 -- Users (writes)
 -- ============================================================================
 
+-- $pending_approval is a param (not a hard-coded 0) rather than a near-clone
+-- insertPendingUser query — admin create (0) and self-registration (1) are
+-- the only two callers, and both stamp the rest of the row identically.
 -- name: insertUser
 INSERT INTO datasette_accounts_users
     (id, username, password_hash, is_admin, disabled, must_change_password,
-     failed_attempts, locked_until, created_at, updated_at)
+     failed_attempts, locked_until, created_at, updated_at, pending_approval)
 VALUES ($id::text, $username::text, $password_hash::text, $is_admin::integer, 0,
         $must_change_password::integer, 0, NULL,
         strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
-        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00');
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
+        $pending_approval::integer);
 
 -- name: bumpFailedAttempts
 UPDATE datasette_accounts_users
@@ -339,6 +343,31 @@ ON CONFLICT(key) DO UPDATE SET
 -- existed, so the helper reports whether anything was cleared.
 -- name: deleteSiteMessage :value
 DELETE FROM datasette_accounts_site_messages WHERE key = $key::text RETURNING key;
+
+-- ============================================================================
+-- Settings (admin-toggleable runtime switches — see plans/self-registration)
+--
+-- Mirrors the site_messages shape: one row per known key, absence = the
+-- key's safe default (no seed row needed on a fresh install). Values are
+-- opaque text; the set of valid keys lives in code, not the schema. First
+-- key: 'registration_enabled' ('1' when self-registration is open).
+-- ============================================================================
+
+-- name: selectSetting :value
+SELECT value FROM datasette_accounts_settings WHERE key = $key::text;
+
+-- name: upsertSetting
+INSERT INTO datasette_accounts_settings (key, value, updated_at, updated_by)
+VALUES ($key::text, $value::text,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00', $updated_by::text::)
+ON CONFLICT(key) DO UPDATE SET
+    value = excluded.value, updated_at = excluded.updated_at,
+    updated_by = excluded.updated_by;
+
+-- Absence of the row *is* the off state, so the caller need not know whether
+-- a row existed — unlike deleteSiteMessage, no RETURNING is needed here.
+-- name: deleteSetting
+DELETE FROM datasette_accounts_settings WHERE key = $key::text;
 
 -- ============================================================================
 -- Password tokens (one-time invite / reset links — see plans/invite-links)

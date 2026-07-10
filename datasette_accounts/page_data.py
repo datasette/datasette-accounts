@@ -16,6 +16,11 @@ class LoginPageData(BaseModel):
     help: str = ""
 
 
+class RegisterPageData(BaseModel):
+    # Optional admin-authored help/contact note, rendered like login_help.
+    help: str = ""
+
+
 class UserRow(BaseModel):
     id: str
     username: str
@@ -33,6 +38,9 @@ class UserRow(BaseModel):
     # + enforces it (like `locked`, computed lexicographically against "now").
     expires_at: Optional[str] = None
     expired: bool
+    # True for a self-registered account awaiting an admin's approve/reject
+    # (see plans/self-registration). Distinct from `disabled` — no verdict yet.
+    pending_approval: bool
 
 
 class AdminPageData(BaseModel):
@@ -147,6 +155,7 @@ class SetPasswordPageData(BaseModel):
 
 __exports__ = [
     LoginPageData,
+    RegisterPageData,
     AdminPageData,
     AccountPageData,
     CapabilitiesPageData,
@@ -302,3 +311,15 @@ class ResetLinkResponse(BaseModel):
     # The absolute one-time set-password URL, shown once.
     url: Optional[str] = None
     error: Optional[str] = None
+
+
+# --- Self-registration (see plans/self-registration) ---
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class SetRegistrationRequest(BaseModel):
+    enabled: bool

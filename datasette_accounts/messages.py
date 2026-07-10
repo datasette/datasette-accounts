@@ -40,6 +40,16 @@ SITE_MESSAGE_SLOTS = [
         ),
         "audience": "login-page",
     },
+    {
+        "key": "register_help",
+        "label": "Registration help",
+        "description": (
+            "Shown on the registration page (see plans/self-registration) — "
+            "e.g. what happens after signing up or who to contact with "
+            'questions ("An admin reviews requests within one business day").'
+        ),
+        "audience": "register-page",
+    },
 ]
 
 SLOT_KEYS = frozenset(slot["key"] for slot in SITE_MESSAGE_SLOTS)

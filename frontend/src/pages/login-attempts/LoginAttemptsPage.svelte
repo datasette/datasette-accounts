@@ -22,6 +22,8 @@
     expired: "Account expired",
     locked: "Account locked",
     reauth: "Re-authentication",
+    pending_approval: "Awaiting approval",
+    register: "Registration attempt",
   };
   function reasonLabel(r: string | null | undefined): string {
     if (!r) return "—";

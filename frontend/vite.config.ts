@@ -38,6 +38,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         login: "src/pages/login/index.ts",
+        register: "src/pages/register/index.ts",
         admin: "src/pages/admin/index.ts",
         account: "src/pages/account/index.ts",
         capabilities: "src/pages/capabilities/index.ts",

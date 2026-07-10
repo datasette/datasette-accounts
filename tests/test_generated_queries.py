@@ -55,6 +55,7 @@ def test_insert_and_select_user(conn):
         password_hash="hash",
         is_admin=1,
         must_change_password=0,
+        pending_approval=0,
     )
     by_name = gen.select_user_by_username(conn, username="alice")
     by_id = gen.select_user_by_id(conn, user_id="u1")
@@ -75,6 +76,7 @@ def test_value_and_existence_helpers(conn):
         password_hash="h",
         is_admin=1,
         must_change_password=0,
+        pending_approval=0,
     )
     assert gen.count_enabled_admins(conn) == 1
     assert gen.count_other_enabled_admins(conn, exclude_id="u1") == 0
@@ -146,6 +148,7 @@ def test_insert_select_and_claim_password_token(conn):
         password_hash="!",
         is_admin=0,
         must_change_password=0,
+        pending_approval=0,
     )
     gen.insert_password_token(
         conn,
@@ -176,6 +179,7 @@ def test_expired_password_token_not_selectable_or_claimable(conn):
         password_hash="!",
         is_admin=0,
         must_change_password=0,
+        pending_approval=0,
     )
     gen.insert_password_token(
         conn,
@@ -199,6 +203,7 @@ def test_purge_expired_password_tokens_removes_only_expired(conn):
         password_hash="!",
         is_admin=0,
         must_change_password=0,
+        pending_approval=0,
     )
     gen.insert_password_token(
         conn,
@@ -231,6 +236,7 @@ def test_delete_password_tokens_for_user(conn):
         password_hash="!",
         is_admin=0,
         must_change_password=0,
+        pending_approval=0,
     )
     gen.insert_password_token(
         conn,
@@ -252,6 +258,7 @@ def test_set_password_from_token(conn):
         password_hash="!",
         is_admin=0,
         must_change_password=1,
+        pending_approval=0,
     )
     gen.set_password_from_token(conn, password_hash="newhash", user_id="u1")
     row = gen.select_user_by_id(conn, user_id="u1")
@@ -282,6 +289,7 @@ def test_insert_user_stamps_matching_created_updated(conn):
         password_hash="h",
         is_admin=0,
         must_change_password=0,
+        pending_approval=0,
     )
     row = gen.select_user_by_id(conn, user_id="u1")
     assert row is not None
@@ -300,6 +308,7 @@ def test_set_locked_until_is_now_plus_minutes(conn):
         password_hash="h",
         is_admin=0,
         must_change_password=0,
+        pending_approval=0,
     )
     gen.set_locked_until(conn, lockout_minutes=15, user_id="u1")
     row = gen.select_user_by_id(conn, user_id="u1")
@@ -394,6 +403,7 @@ def test_set_user_expiry_writes_and_clears(conn):
         password_hash="h",
         is_admin=0,
         must_change_password=0,
+        pending_approval=0,
     )
     gen.set_user_expiry(conn, expires_at="2099-01-02T00:00:00.000+00:00", user_id="u1")
     row = gen.select_user_by_id(conn, user_id="u1")

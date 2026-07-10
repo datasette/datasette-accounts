@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from datasette import Response
+from datasette import NotFound, Response
 from datasette_plugin_router import Body
 
 from .. import db, grantable, messages, security
@@ -15,11 +15,13 @@ from ..page_data import (
     InviteRequest,
     LoginAttemptRow,
     LoginAttemptsRequest,
+    RegisterRequest,
     ResetPasswordRequest,
     RevokeCapabilityRequest,
     RevokeSessionRequest,
     SessionRow,
     SetExpiryRequest,
+    SetRegistrationRequest,
     SetSiteMessageRequest,
     TargetRequest,
     UserRow,
@@ -87,25 +89,32 @@ async def authenticate(
 
     # 2/3. Exactly one PBKDF2 verify on every remaining path (dummy on miss).
     # The user-facing error stays generic; the specific reason lives only in the
-    # admin-only audit log. An invited account (no usable password yet) and an
-    # expired account both take the same dummy-verify branch as no-such-user/
-    # disabled — none of them may be distinguishable by response or timing.
+    # admin-only audit log. An invited account (no usable password yet), an
+    # expired account, and a self-registered account still awaiting approval
+    # all take the same dummy-verify branch as no-such-user/disabled — none of
+    # them may be distinguishable by response or timing. Telling the *visitor*
+    # their account is pending is the register page's job, not the login form's
+    # — the login form must not confirm account state to a third party.
     expired = bool(user and user["expires_at"] and user["expires_at"] <= db.now_iso())
+    pending = bool(user and user["pending_approval"])
     has_password = user and user["password_hash"] != UNUSABLE_PASSWORD
-    if user and not user["disabled"] and not expired and has_password:
+    if user and not user["disabled"] and not expired and not pending and has_password:
         ok = await averify_password(body.password, user["password_hash"])
         reason = "success" if ok else "bad_password"
     else:
         await averify_dummy(body.password)
         ok = False
         # Precedence when more than one applies (e.g. a disabled account whose
-        # expiry has also passed): disabled > expired > no_password.
+        # expiry has also passed): disabled > expired > pending_approval >
+        # no_password.
         if not user:
             reason = "no_such_user"
         elif user["disabled"]:
             reason = "disabled"
         elif expired:
             reason = "expired"
+        elif pending:
+            reason = "pending_approval"
         else:
             reason = "no_password"
 
@@ -156,6 +165,49 @@ async def logout(datasette, request):
     response = Response.json({"ok": True, "redirect": "/"})
     response.set_cookie(COOKIE_NAME, "", max_age=0, path="/", expires=0)
     return response
+
+
+# --------------------------------------------------------------------------
+# Self-registration (see plans/self-registration)
+# --------------------------------------------------------------------------
+
+
+@router.POST("/-/register/api/submit$")
+@require_csrf
+async def register_submit(datasette, request, body: Annotated[RegisterRequest, Body()]):
+    internal = datasette.get_internal_database()
+    # Re-checked here, not just on the GET page — the toggle can flip between
+    # page load and submit. No audit row for this refusal: an unauthenticated
+    # probe against a closed endpoint isn't a registration attempt.
+    if not await db.get_registration_enabled(internal):
+        raise NotFound("Not found")
+
+    ip = security.client_ip(datasette, request)
+
+    error = security.validate_username(body.username)
+    if error:
+        return Response.json({"ok": False, "error": error}, status=400)
+    try:
+        check_password_length(
+            body.password, security.config(datasette, "password_min_length")
+        )
+    except PasswordLengthError as e:
+        return Response.json({"ok": False, "error": str(e)}, status=400)
+
+    password_hash = await ahash_password(body.password)
+    try:
+        await db.register_user(internal, body.username, password_hash, ip)
+    except db.UsernameTakenError:
+        # Yes, this confirms the username is taken — a signup form cannot
+        # avoid that. It's exactly why accounts stay pending and invisible
+        # until a human approves them.
+        await db.record_login_attempt(internal, body.username, ip, False, "register")
+        return Response.json(
+            {"ok": False, "error": "Username already taken"}, status=409
+        )
+    await db.record_login_attempt(internal, body.username, ip, True, "register")
+    # No session: the account is pending, so nothing to sign in to yet.
+    return Response.json({"ok": True})
 
 
 # --------------------------------------------------------------------------
@@ -685,3 +737,22 @@ async def admin_messages_set(
         internal, request.actor["id"], body.key, body.body
     )
     return Response.json({"ok": True, "body": stored})
+
+
+# --------------------------------------------------------------------------
+# Self-registration toggle (see plans/self-registration)
+# --------------------------------------------------------------------------
+
+
+@router.POST("/-/admin/api/set-registration$")
+@require_admin
+async def admin_set_registration(
+    datasette, request, body: Annotated[SetRegistrationRequest, Body()]
+):
+    """Flip the runtime signups toggle. Takes effect on the very next request
+    to /-/register — nothing about the toggle is cached."""
+    internal = datasette.get_internal_database()
+    enabled = await db.set_registration_enabled(
+        internal, request.actor["id"], body.enabled
+    )
+    return Response.json({"ok": True, "enabled": enabled})
