@@ -3,30 +3,14 @@
 Username/password auth for Datasette with **database-backed accounts** in the
 internal DB, an admin permission, and a Svelte/Vite/TS frontend.
 
-## Design spec
-`plans/start/` is the authoritative design (read `plans/start/README.md` first).
-Security review findings are in `todos/security-review/` (all applied + built).
-`plans/permissions/` is the design for admin-controlled permissions (capability
-grants + datasette-acl bridge), all built on the `permissions-admin` branch.
-`plans/site-messages/` is the design for the root bootstrap prompt + admin-
-editable site messages (homepage sign-in prompt, login help), built on the
-`site-messages` branch.
-Planned, not yet built: `plans/invite-links/` (one-time invite + reset URLs),
-`plans/account-expiry/` (`expires_at` on accounts), `plans/self-registration/`
-(opt-in signup + approval queue), `plans/session-list/` (user-facing session
-list on `/-/account`), `plans/admin-audit-viewer/` (`/-/admin/audit` page).
-Each claims "the next free migration slot" — renumber at build time.
-
-## Build status
-- M0–M8 built and tested (`uv run pytest`, 22 tests green; `npm run check` clean).
-  All milestones complete.
-- Frontend: Svelte 5 pages (`frontend/src/pages/{login,admin,account}`) built by
+## Frontend
+- Svelte 5 pages (`frontend/src/pages/{login,admin,account}`) built by
   Vite into `datasette_accounts/static/gen/` + `manifest.json` (shipped).
   `routes/pages.py` renders `templates/accounts_base.html`, which mounts the
   page bundle on `#app-root` and reads `#pageData`. Pages call the JSON API via
   `frontend/src/lib/api.ts` (`postJSON`), not openapi-fetch.
 - Rebuild the frontend after changing Svelte/TS: `just frontend` (or `just types`
-  first if page-data models changed).
+  first if page-data models changed). `npm run check` type-checks.
 
 ## Layout
 - `__init__.py` — hooks (routes, actions, permission SQL, startup, actor,
