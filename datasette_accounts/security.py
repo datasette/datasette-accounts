@@ -22,6 +22,12 @@ DEFAULTS = {
     # --- Invite / reset links (see plans/invite-links) ---
     "invite_ttl_hours": 72,  # invite-link lifetime
     "reset_link_ttl_hours": 24,  # reset-link lifetime
+    # --- Self-registration abuse caps (see plans/self-registration) ---
+    # Both refuse with one generic message that never says which cap tripped.
+    # These are config (deployment policy); the signups on/off switch itself
+    # is runtime DB state, deliberately NOT config.
+    "max_pending_registrations": 20,  # refuse signups while the queue is at cap
+    "registrations_per_ip_per_day": 5,  # per-IP daily cap (client_ip; proxy trust applies)
     # --- Capability grants (F1) / acl bridge (F2) ---
     # Explicit allowlist of grantable global actions; None = auto-discover all
     # global (resource_class=None) actions minus the built-in denylist.

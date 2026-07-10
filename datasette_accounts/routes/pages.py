@@ -45,7 +45,11 @@ async def login_page(datasette, request):
     )
     internal = datasette.get_internal_database()
     help_text = await db.get_site_message(internal, "login_help") or ""
-    page_data = LoginPageData(next=next_value, help=help_text).model_dump()
+    page_data = LoginPageData(
+        next=next_value,
+        help=help_text,
+        allow_register=await db.get_registration_enabled(internal),
+    ).model_dump()
     return await _render(
         datasette, request, "src/pages/login/index.ts", "Log in", page_data
     )
@@ -135,7 +139,10 @@ async def admin_page(datasette, request):
     internal = datasette.get_internal_database()
     rows = await db.list_user_rows(internal)
     users = [UserRow(**r) for r in rows]
-    page_data = AdminPageData(users=users).model_dump()
+    page_data = AdminPageData(
+        users=users,
+        registration_enabled=await db.get_registration_enabled(internal),
+    ).model_dump()
     return await _render(
         datasette, request, "src/pages/admin/index.ts", "Accounts", page_data
     )

@@ -934,9 +934,21 @@ async def register_user(db, username, password_hash, ip):
 async def count_pending_users(db):
     """How many self-registered accounts are awaiting a verdict.
 
-    Drives the admin homepage banner (and, in a later ticket, the queue cap).
+    Drives the admin homepage banner and the registration queue cap.
     """
     return await db.execute_fn(gen.count_pending_users)
+
+
+async def count_recent_registrations(db, ip):
+    """Registration attempts (successful or refused) from `ip` in the last day.
+
+    Backs the per-IP signup throttle. ``None`` (no resolvable client IP)
+    counts as 0 — the queue cap still applies, and NULL would never equal a
+    stored ip anyway.
+    """
+    if ip is None:
+        return 0
+    return await db.execute_fn(lambda conn: gen.count_recent_registrations(conn, ip=ip))
 
 
 async def approve_user(db, actor_id, target_id):

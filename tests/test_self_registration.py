@@ -1,9 +1,12 @@
-"""Self-registration tracer (ticket 1 of plans/self-registration): a runtime
-toggle gates /-/register; a visitor registers with their own password and
-lands in a pending-approval queue that cannot log in or act.
+"""Self-registration (plans/self-registration): a runtime toggle gates
+/-/register; a visitor registers with their own password and lands in a
+pending-approval queue that cannot log in or act until an admin approves.
+Covers the tracer, the approval queue, the toggle/login page data, and the
+abuse caps.
 """
 
 import json
+import re
 
 import pytest
 from datasette.app import Datasette
@@ -613,3 +616,184 @@ async def test_admin_list_includes_pending_rows_with_flag():
     users = {u["username"]: u for u in listed.json()["users"]}
     assert users["newperson"]["pending_approval"] is True
     assert users["boss"]["pending_approval"] is False
+
+
+# --------------------------------------------------------------------------
+# Toggle UI + login-page entry point (ticket 3): page-data contracts
+# --------------------------------------------------------------------------
+
+
+def page_data_of(r):
+    """Parse the embedded #pageData JSON out of a rendered page shell."""
+    m = re.search(
+        r'<script type="application/json" id="pageData">(.*?)</script>',
+        r.text,
+        re.S,
+    )
+    assert m, "no #pageData script tag in the page"
+    return json.loads(m.group(1))
+
+
+@pytest.mark.asyncio
+async def test_admin_page_data_carries_registration_state():
+    ds = await make_ds()
+    await insert_user(ds, "boss", is_admin=True)
+    _, cookies = await login(ds, "boss", "password123")
+
+    r = await ds.client.get("/-/admin/users", cookies=cookies)
+    assert page_data_of(r)["registration_enabled"] is False
+
+    on = await ds.client.post(
+        "/-/admin/api/set-registration",
+        content=json.dumps({"enabled": True}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert on.status_code == 200
+
+    r = await ds.client.get("/-/admin/users", cookies=cookies)
+    assert page_data_of(r)["registration_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_login_page_data_carries_allow_register():
+    ds = await make_ds()
+    await insert_user(ds, "boss", is_admin=True)
+    _, cookies = await login(ds, "boss", "password123")
+
+    r = await ds.client.get("/-/login")
+    assert page_data_of(r)["allow_register"] is False
+
+    # Flip via the admin API — the login page reflects it on the next request.
+    await ds.client.post(
+        "/-/admin/api/set-registration",
+        content=json.dumps({"enabled": True}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    r = await ds.client.get("/-/login")
+    assert page_data_of(r)["allow_register"] is True
+
+    await ds.client.post(
+        "/-/admin/api/set-registration",
+        content=json.dumps({"enabled": False}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    r = await ds.client.get("/-/login")
+    assert page_data_of(r)["allow_register"] is False
+
+
+# --------------------------------------------------------------------------
+# Abuse caps (ticket 4): per-IP daily cap + global pending-queue cap
+# --------------------------------------------------------------------------
+
+GENERIC_CLOSED = "Registration is currently closed — try again later."
+
+
+async def submit(ds, username, ip=None, password="password123"):
+    """POST a registration, optionally faking the client IP via X-Forwarded-For
+    (only honoured when the ds was made with trust_proxy_headers=True)."""
+    headers = dict(JSON)
+    if ip:
+        headers["x-forwarded-for"] = ip
+    return await ds.client.post(
+        "/-/register/api/submit",
+        content=json.dumps({"username": username, "password": password}),
+        headers=headers,
+    )
+
+
+@pytest.mark.asyncio
+async def test_per_ip_cap_refuses_but_other_ips_unaffected():
+    ds = await make_ds(trust_proxy_headers=True, registrations_per_ip_per_day=2)
+    internal = ds.get_internal_database()
+    await db.set_registration_enabled(internal, "root", True)
+
+    # Under the cap: registrations from IP A are unaffected.
+    assert (await submit(ds, "user1", ip="5.5.5.5")).status_code == 200
+    assert (await submit(ds, "user2", ip="5.5.5.5")).status_code == 200
+
+    # At the cap: the same IP is refused generically...
+    r = await submit(ds, "user3", ip="5.5.5.5")
+    assert r.status_code == 429
+    assert r.json() == {"ok": False, "error": GENERIC_CLOSED}
+    assert await db.get_user_by_username(internal, "user3") is None
+
+    # ...and the refusal itself was recorded, so repeat abuse keeps counting
+    # instead of probing for free.
+    rows = (
+        await internal.execute(
+            f"SELECT success FROM {db.LOGIN_AUDIT} "
+            "WHERE reason = 'register' AND ip = '5.5.5.5' ORDER BY id"
+        )
+    ).rows
+    assert [row[0] for row in rows] == [1, 1, 0]
+
+    # A different IP is unaffected (same username retries fine too — the
+    # refused attempt never created an account).
+    assert (await submit(ds, "user3", ip="6.6.6.6")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_queue_cap_refuses_regardless_of_ip():
+    ds = await make_ds(trust_proxy_headers=True, max_pending_registrations=1)
+    internal = ds.get_internal_database()
+    await db.set_registration_enabled(internal, "root", True)
+
+    assert (await submit(ds, "user1", ip="1.2.3.4")).status_code == 200
+
+    # A brand-new IP is still refused — the queue is full.
+    r = await submit(ds, "user2", ip="9.8.7.6")
+    assert r.status_code == 429
+    assert r.json() == {"ok": False, "error": GENERIC_CLOSED}
+
+    # Approving drains the queue and reopens registration.
+    user = await db.get_user_by_username(internal, "user1")
+    await db.approve_user(internal, "root", user["id"])
+    assert (await submit(ds, "user2", ip="9.8.7.6")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_both_caps_share_one_generic_message():
+    per_ip_ds = await make_ds(trust_proxy_headers=True, registrations_per_ip_per_day=1)
+    await db.set_registration_enabled(per_ip_ds.get_internal_database(), "root", True)
+    assert (await submit(per_ip_ds, "user1", ip="5.5.5.5")).status_code == 200
+    per_ip = await submit(per_ip_ds, "user2", ip="5.5.5.5")
+
+    queue_ds = await make_ds(trust_proxy_headers=True, max_pending_registrations=1)
+    await db.set_registration_enabled(queue_ds.get_internal_database(), "root", True)
+    assert (await submit(queue_ds, "user1", ip="5.5.5.5")).status_code == 200
+    queue = await submit(queue_ds, "user2", ip="7.7.7.7")
+
+    # Which cap tripped must not be distinguishable from the response.
+    assert per_ip.status_code == queue.status_code == 429
+    assert per_ip.json() == queue.json() == {"ok": False, "error": GENERIC_CLOSED}
+
+
+@pytest.mark.asyncio
+async def test_cap_refusals_write_no_admin_audit_rows():
+    ds = await make_ds(trust_proxy_headers=True, registrations_per_ip_per_day=1)
+    internal = ds.get_internal_database()
+    await db.set_registration_enabled(internal, "root", True)
+
+    assert (await submit(ds, "user1", ip="5.5.5.5")).status_code == 200
+    assert (await submit(ds, "user2", ip="5.5.5.5")).status_code == 429
+
+    count = (
+        await internal.execute(
+            f"SELECT COUNT(*) FROM {db.ADMIN_AUDIT} WHERE operation = 'register'"
+        )
+    ).single_value()
+    assert count == 1  # only the successful registration
+
+
+@pytest.mark.asyncio
+async def test_default_caps_leave_normal_registration_unaffected():
+    # No overrides: a handful of registrations from one IP stay under both
+    # default caps (5/day per IP, 20 pending).
+    ds = await make_ds(trust_proxy_headers=True)
+    internal = ds.get_internal_database()
+    await db.set_registration_enabled(internal, "root", True)
+    for i in range(3):
+        assert (await submit(ds, f"user{i}", ip="5.5.5.5")).status_code == 200

@@ -293,6 +293,17 @@ WHERE ($username::text:: IS NULL OR username = $username::text::)
 ORDER BY id DESC
 LIMIT $limit::integer;
 
+-- Registration attempts from one IP in the last day — the per-IP signup
+-- throttle (see plans/self-registration) reuses login_audit rather than
+-- inventing an event table. Counts BOTH successful and refused attempts
+-- (reason = 'register' is recorded for both, deliberately): repeat abuse
+-- must not extend the budget. Relative cutoff via the strftime-modifier
+-- convention.
+-- name: countRecentRegistrations :value
+SELECT COUNT(*) FROM datasette_accounts_login_audit
+WHERE ip = $ip::text AND reason = 'register'
+  AND timestamp > strftime('%Y-%m-%dT%H:%M:%f', 'now', '-1 day') || '+00:00';
+
 -- Purge audit rows older than `retention_days`.
 -- name: purgeLoginAudit
 DELETE FROM datasette_accounts_login_audit

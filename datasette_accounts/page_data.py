@@ -14,6 +14,9 @@ class LoginPageData(BaseModel):
     next: str = "/"
     # Optional admin-authored help/contact note (plain text), "" when unset.
     help: str = ""
+    # True while self-registration is open (the runtime DB toggle) — shows the
+    # "Request an account" link under the form. See plans/self-registration.
+    allow_register: bool = False
 
 
 class RegisterPageData(BaseModel):
@@ -45,6 +48,9 @@ class UserRow(BaseModel):
 
 class AdminPageData(BaseModel):
     users: List[UserRow]
+    # Current state of the runtime self-registration toggle, so the header
+    # switch renders with the live value. See plans/self-registration.
+    registration_enabled: bool = False
 
 
 class AccountPageData(BaseModel):

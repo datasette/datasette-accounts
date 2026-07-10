@@ -184,6 +184,30 @@ async def register_submit(datasette, request, body: Annotated[RegisterRequest, B
 
     ip = security.client_ip(datasette, request)
 
+    # Abuse caps (fail generic and closed), checked before validation/hashing
+    # so a capped client can't spend our KDF time: a per-IP daily cap counted
+    # from the 'register' rows already in login_audit, and a global
+    # pending-queue cap. One message for both — which limit tripped is an
+    # abuse signal we don't reveal. 429 (not 400): the request itself is
+    # well-formed; the refusal is about volume/state, the same semantics as
+    # the lockout path's 429.
+    per_ip_cap = security.config(datasette, "registrations_per_ip_per_day")
+    queue_cap = security.config(datasette, "max_pending_registrations")
+    if (
+        await db.count_recent_registrations(internal, ip) >= per_ip_cap
+        or await db.count_pending_users(internal) >= queue_cap
+    ):
+        # Refused attempts are recorded too — repeat abuse counts toward the
+        # per-IP cap rather than probing it for free.
+        await db.record_login_attempt(internal, body.username, ip, False, "register")
+        return Response.json(
+            {
+                "ok": False,
+                "error": "Registration is currently closed — try again later.",
+            },
+            status=429,
+        )
+
     error = security.validate_username(body.username)
     if error:
         return Response.json({"ok": False, "error": error}, status=400)

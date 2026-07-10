@@ -149,6 +149,8 @@ defaults (a zero-config install works — it just warns about persistence):
 | `audit_retention_days` | int | `90` | delete `login_audit` rows older than this; `0` = keep forever |
 | `invite_ttl_hours` | int | `72` | invite-link lifetime |
 | `reset_link_ttl_hours` | int | `24` | reset-link lifetime |
+| `max_pending_registrations` | int | `20` | refuse new self-registrations while the pending-approval queue is at this size |
+| `registrations_per_ip_per_day` | int | `5` | per-IP daily self-registration cap (uses the client IP, so `trust_proxy_headers` applies) |
 
 ```yaml
 plugins:

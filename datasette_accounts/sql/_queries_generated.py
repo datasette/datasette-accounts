@@ -543,6 +543,18 @@ LIMIT $limit::integer;
     return [LoginAttemptRow(*row) for row in cursor.fetchall()]
 
 
+def count_recent_registrations(conn: sqlite3.Connection, ip: str) -> Any | None:
+    sql = """\
+SELECT COUNT(*) FROM datasette_accounts_login_audit
+WHERE ip = $ip::text AND reason = 'register'
+  AND timestamp > strftime('%Y-%m-%dT%H:%M:%f', 'now', '-1 day') || '+00:00';
+"""
+    params = {"ip::text": ip}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
 def purge_login_audit(conn: sqlite3.Connection, retention_days: int) -> None:
     sql = """\
 DELETE FROM datasette_accounts_login_audit
