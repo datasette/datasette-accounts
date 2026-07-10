@@ -131,6 +131,9 @@ async def authenticate(
     await db.purge_login_audit(
         internal, security.config(datasette, "audit_retention_days")
     )
+    await db.purge_admin_audit(
+        internal, security.config(datasette, "admin_audit_retention_days")
+    )
 
     base_url = datasette.setting("base_url") or "/"
     redirect = security.validate_next(body.next, base_url)

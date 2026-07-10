@@ -191,31 +191,44 @@ async def count_enabled_admins(db):
     return await db.execute_fn(gen.count_enabled_admins)
 
 
-# Cap the admin-audit read (shell `accounts audit`) so a large trail can't be
-# dumped in a single query; the CLI `--limit` narrows further.
+# Cap the admin-audit read (shell `accounts audit`, admin trail page) so a
+# large trail can't be dumped in a single query; callers' own `limit`/filters
+# narrow further.
 ADMIN_AUDIT_MAX = 500
 
 
-async def list_admin_audit(db, target_id=None, limit=200):
+async def list_admin_audit(db, target_id=None, operation=None, limit=200):
     """Most-recent-first admin-audit rows, optionally filtered to one target
-    user. Joins the target's username for display. `limit` is clamped to
+    user and/or one operation (AND-combined, exact). Resolves actor/target
+    usernames (None when the account no longer exists, or the actor is
+    synthetic, e.g. "root" / "cli:$USER"). `limit` is clamped to
     ADMIN_AUDIT_MAX.
-
-    Hand-written (not codegen): a small read used only by the CLI; keeping it
-    here avoids a codegen round-trip for a query with no runtime callers.
     """
     clamped = max(1, min(limit, ADMIN_AUDIT_MAX))
-    sql = f"""
-        SELECT a.id, a.timestamp, a.operation, a.actor_id, a.target_id, a.detail,
-               (SELECT username FROM {USERS} WHERE id = a.target_id)
-                   AS target_username
-        FROM {ADMIN_AUDIT} a
-        WHERE (:target_id IS NULL OR a.target_id = :target_id)
-        ORDER BY a.id DESC
-        LIMIT :limit
-    """
-    result = await db.execute(sql, {"target_id": target_id or None, "limit": clamped})
-    return [dict(r) for r in result.rows]
+    rows = await db.execute_fn(
+        lambda conn: gen.list_admin_audit(
+            conn,
+            target_id=target_id or None,
+            operation=operation or None,
+            limit=clamped,
+        )
+    )
+    return [dataclasses.asdict(r) for r in rows]
+
+
+async def list_admin_audit_operations(db):
+    """Distinct operation names recorded in the admin-audit trail, sorted."""
+    rows = await db.execute_fn(gen.list_admin_audit_operations)
+    return [r.operation for r in rows]
+
+
+async def purge_admin_audit(db, retention_days):
+    if not retention_days:
+        return
+    # SQL computes the cutoff as `now - retention_days`.
+    await db.execute_write_fn(
+        lambda conn: gen.purge_admin_audit(conn, retention_days=retention_days)
+    )
 
 
 # --------------------------------------------------------------------------

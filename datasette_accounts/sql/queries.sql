@@ -321,6 +321,36 @@ INSERT INTO datasette_accounts_admin_audit
 VALUES (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
         $operation::text, $actor_id::text::, $target_id::text::, $detail::text::);
 
+-- Most-recent-first admin-audit rows with optional exact target/operation
+-- filters (AND-combined), plus actor/target usernames resolved via a scalar
+-- subselect (NULL when the account has been deleted or the actor is
+-- synthetic, e.g. "root" / "cli:$USER" — the ids stay in the row so callers
+-- can fall back). `limit` is clamped in db.py.
+-- name: listAdminAudit :rows -> AdminAuditRow
+SELECT a.id, a.timestamp, a.operation, a.actor_id, a.target_id, a.detail,
+       (SELECT username FROM datasette_accounts_users WHERE id = a.actor_id)
+           AS actor_username,
+       (SELECT username FROM datasette_accounts_users WHERE id = a.target_id)
+           AS target_username
+FROM datasette_accounts_admin_audit a
+WHERE ($target_id::text:: IS NULL OR a.target_id = $target_id::text::)
+  AND ($operation::text:: IS NULL OR a.operation = $operation::text::)
+ORDER BY a.id DESC
+LIMIT $limit::integer;
+
+-- Distinct operations recorded in the trail, for the filter dropdown —
+-- truthful even for operations no current code writes (e.g. rows from older
+-- releases).
+-- name: listAdminAuditOperations :rows
+SELECT DISTINCT operation FROM datasette_accounts_admin_audit ORDER BY 1;
+
+-- Purge admin-audit rows older than `retention_days`.
+-- name: purgeAdminAudit
+DELETE FROM datasette_accounts_admin_audit
+WHERE timestamp <
+    strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('-%d days', $retention_days::integer))
+    || '+00:00';
+
 -- ============================================================================
 -- Capability grants
 -- ============================================================================

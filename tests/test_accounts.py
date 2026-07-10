@@ -734,6 +734,148 @@ async def test_list_login_attempts_filters():
     assert len(by_both) == 1 and by_both[0]["reason"] == "success"
 
 
+# --------------------------------------------------------------------------
+# Admin audit — codegen promotion, filters, retention
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_admin_audit_resolves_usernames():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    internal = ds.get_internal_database()
+    target_id = await db.create_user(
+        internal, admin_id, "carol", hash_password("password123"), False, False
+    )
+    rows = await db.list_admin_audit(internal)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["operation"] == "create"
+    assert row["actor_id"] == admin_id
+    assert row["actor_username"] == "admin"
+    assert row["target_id"] == target_id
+    assert row["target_username"] == "carol"
+
+
+@pytest.mark.asyncio
+async def test_list_admin_audit_target_and_operation_filters_and_combine():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    internal = ds.get_internal_database()
+    alice_id = await db.create_user(
+        internal, admin_id, "alice", hash_password("password123"), False, False
+    )
+    bob_id = await db.create_user(
+        internal, admin_id, "bob", hash_password("password123"), False, False
+    )
+    await db.disable_user(internal, admin_id, alice_id)
+    await db.disable_user(internal, admin_id, bob_id)
+
+    # target_id alone: both of alice's rows (create + disable).
+    by_target = await db.list_admin_audit(internal, target_id=alice_id)
+    assert {r["operation"] for r in by_target} == {"create", "disable"}
+    assert all(r["target_id"] == alice_id for r in by_target)
+
+    # operation alone: every disable, regardless of target.
+    by_operation = await db.list_admin_audit(internal, operation="disable")
+    assert {r["target_id"] for r in by_operation} == {alice_id, bob_id}
+
+    # Both together AND-combine to a single row.
+    by_both = await db.list_admin_audit(
+        internal, target_id=alice_id, operation="disable"
+    )
+    assert len(by_both) == 1
+    assert by_both[0]["target_id"] == alice_id
+    assert by_both[0]["operation"] == "disable"
+
+    # A mismatched pair yields nothing.
+    none = await db.list_admin_audit(internal, target_id=alice_id, operation="delete")
+    assert none == []
+
+
+@pytest.mark.asyncio
+async def test_list_admin_audit_deleted_target_falls_back_to_id():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    internal = ds.get_internal_database()
+    target_id = await db.create_user(
+        internal, admin_id, "carol", hash_password("password123"), False, False
+    )
+    await db.delete_user(internal, admin_id, target_id)
+
+    rows = await db.list_admin_audit(internal, operation="delete")
+    assert len(rows) == 1
+    assert rows[0]["target_id"] == target_id
+    assert rows[0]["target_username"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_admin_audit_operations_distinct_and_sorted():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    internal = ds.get_internal_database()
+    alice_id = await db.create_user(
+        internal, admin_id, "alice", hash_password("password123"), False, False
+    )
+    bob_id = await db.create_user(
+        internal, admin_id, "bob", hash_password("password123"), False, False
+    )
+    await db.disable_user(internal, admin_id, alice_id)
+    await db.disable_user(internal, admin_id, bob_id)
+
+    ops = await db.list_admin_audit_operations(internal)
+    assert ops == ["create", "disable"]  # distinct + alphabetically sorted
+
+
+@pytest.mark.asyncio
+async def test_admin_audit_retention_zero_keeps_everything():
+    ds = await make_ds(admin_audit_retention_days=0)
+    internal = ds.get_internal_database()
+    await internal.execute_write(
+        f"INSERT INTO {db.ADMIN_AUDIT} (timestamp, operation, actor_id, target_id, detail) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ["2000-01-01T00:00:00.000+00:00", "create", "root", "old", None],
+    )
+    await db.purge_admin_audit(internal, 0)
+    count = (
+        await internal.execute(f"SELECT COUNT(*) FROM {db.ADMIN_AUDIT}")
+    ).single_value()
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_admin_audit_retention_purges_only_old_rows():
+    ds = await make_ds(admin_audit_retention_days=30)
+    internal = ds.get_internal_database()
+    await internal.execute_write(
+        f"INSERT INTO {db.ADMIN_AUDIT} (timestamp, operation, actor_id, target_id, detail) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ["2000-01-01T00:00:00.000+00:00", "create", "root", "old", None],
+    )
+    await internal.execute_write(
+        f"INSERT INTO {db.ADMIN_AUDIT} (timestamp, operation, actor_id, target_id, detail) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [db.now_iso(), "create", "root", "new", None],
+    )
+    await db.purge_admin_audit(internal, 30)
+    remaining = await internal.execute(f"SELECT target_id FROM {db.ADMIN_AUDIT}")
+    assert [r[0] for r in remaining.rows] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_list_admin_audit_limit_clamps_at_500():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    now = db.now_iso()
+    await internal.execute_write_many(
+        f"INSERT INTO {db.ADMIN_AUDIT} (timestamp, operation, actor_id, target_id, detail) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(now, "create", "root", str(i), None) for i in range(510)],
+    )
+    rows = await db.list_admin_audit(internal, limit=10_000)
+    assert len(rows) == db.ADMIN_AUDIT_MAX
+
+
 @pytest.mark.asyncio
 async def test_admin_login_attempts_api():
     ds = await make_ds()
