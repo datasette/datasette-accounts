@@ -17,9 +17,12 @@ be absent at runtime, so codegen can't type them — those stay hand-written her
 import dataclasses
 import datetime
 import json as jsonlib
+import re
+import secrets
 
 from ulid import ULID
 
+from . import security
 from .passwords import UNUSABLE_PASSWORD
 from .sql import _queries_generated as gen
 
@@ -34,9 +37,11 @@ CAPABILITY_GRANTS = "datasette_accounts_capability_grants"
 SITE_MESSAGES = "datasette_accounts_site_messages"
 PASSWORD_TOKENS = "datasette_accounts_password_tokens"
 SETTINGS = "datasette_accounts_settings"
+IDENTITIES = "datasette_accounts_identities"
 
-# The one settings key this ticket uses — see plans/self-registration.
-REGISTRATION_ENABLED_KEY = "registration_enabled"
+# Self-registration is now the password provider's signups setting (decision
+# D5 / m009): the legacy 'registration_enabled' row is migrated to this key.
+PASSWORD_SIGNUPS_KEY = "provider:password:signups"
 
 # datasette-acl tables we reference (softly) for the "group" principal. We never
 # write them — acl owns them — but we join them to resolve group membership +
@@ -252,7 +257,7 @@ async def purge_admin_audit(db, retention_days):
 # --------------------------------------------------------------------------
 
 
-async def record_login_attempt(db, username, ip, success, reason=None):
+async def record_login_attempt(db, username, ip, success, reason=None, provider=None):
     await db.execute_write_fn(
         lambda conn: gen.insert_login_attempt(
             conn,
@@ -260,6 +265,7 @@ async def record_login_attempt(db, username, ip, success, reason=None):
             ip=ip,
             success=1 if success else 0,
             reason=reason,
+            provider=provider,
         )
     )
 
@@ -310,8 +316,11 @@ async def record_login_success(db, user_id):
     )
 
 
-async def create_session(db, actor_id, token_sha, ttl_days, user_agent, ip):
+async def create_session(
+    db, actor_id, token_sha, ttl_days, user_agent, ip, provider="password"
+):
     # SQL stamps created_at/last_seen_at = now and expires_at = now + ttl_days.
+    # `provider` records which sign-in provider minted the session (provenance).
     await db.execute_write_fn(
         lambda conn: gen.insert_session(
             conn,
@@ -320,6 +329,7 @@ async def create_session(db, actor_id, token_sha, ttl_days, user_agent, ip):
             ttl_days=ttl_days,
             user_agent=user_agent,
             ip=ip,
+            provider=provider,
         )
     )
 
@@ -462,6 +472,10 @@ async def delete_user(db, actor_id, target_id):
             _guard_last_admin(conn, exclude_id=target_id)
         gen.delete_sessions_for_actor(conn, actor_id=target_id)
         gen.delete_password_tokens_for_user(conn, user_id=target_id)
+        # External sign-in links go too (like sessions/tokens) — the account no
+        # longer exists to sign in to. disable_user deliberately does NOT do
+        # this (re-enabling restores SSO — design §5).
+        gen.delete_identities_for_user(conn, user_id=target_id)
         gen.delete_user(conn, user_id=target_id)
         _audit(conn, "delete", actor_id, target_id)
 
@@ -909,15 +923,28 @@ async def _get_setting(db, key):
     return await db.execute_fn(lambda conn: gen.select_setting(conn, key=key))
 
 
+async def get_provider_signups(db, key):
+    """The signups policy for provider ``key`` — ``off`` / ``approval`` / ``auto``.
+
+    Settings key ``provider:{key}:signups``. An absent row means ``off`` (the
+    safe default for every provider, absence-is-default like the other runtime
+    switches — a fresh install needs no seed row). Drives whether an unmatched
+    external identity may provision an account, and whether ``/-/register`` is
+    open for the built-in password provider (plans/auth-providers §4).
+    """
+    return await _get_setting(db, f"provider:{key}:signups") or "off"
+
+
 async def get_registration_enabled(db):
     """Whether ``/-/register`` is currently open.
 
-    Mirrors the site_messages absence-is-default convention: a missing row
-    means signups are closed, so a fresh install needs no seed row. Read
-    per-request by the register page, the submit endpoint, and (later) the
-    login page — a single-row PK lookup, same cost as ``login_help``.
+    Compatibility shim: self-registration is now the password provider's
+    signups policy (decision D5). Every existing caller — the login page's
+    ``allow_register``, the register page + submit endpoint — tracks the
+    migrated ``provider:password:signups`` setting through this one predicate:
+    open whenever password signups are anything other than ``off``.
     """
-    return await _get_setting(db, REGISTRATION_ENABLED_KEY) == "1"
+    return await get_provider_signups(db, "password") != "off"
 
 
 async def get_provider_enabled(db, key):
@@ -944,16 +971,18 @@ async def set_registration_enabled(db, actor_id, enabled):
     """
 
     def write(conn):
-        current = gen.select_setting(conn, key=REGISTRATION_ENABLED_KEY) == "1"
+        # Signups are "on" when the policy is anything other than off/absent
+        # (e.g. a 'auto' value set later by the CLI still counts as enabled).
+        current = (gen.select_setting(conn, key=PASSWORD_SIGNUPS_KEY) or "off") != "off"
         if bool(enabled) == current:
             return current
         if enabled:
             gen.upsert_setting(
-                conn, key=REGISTRATION_ENABLED_KEY, value="1", updated_by=actor_id
+                conn, key=PASSWORD_SIGNUPS_KEY, value="approval", updated_by=actor_id
             )
             _audit(conn, "enable-registration", actor_id, None)
         else:
-            gen.delete_setting(conn, key=REGISTRATION_ENABLED_KEY)
+            gen.delete_setting(conn, key=PASSWORD_SIGNUPS_KEY)
             _audit(conn, "disable-registration", actor_id, None)
         return bool(enabled)
 
@@ -1054,8 +1083,165 @@ async def reject_user(db, actor_id, target_id):
             raise NotPendingError(target_id)
         gen.delete_sessions_for_actor(conn, actor_id=target_id)
         gen.delete_password_tokens_for_user(conn, user_id=target_id)
+        # A pending account provisioned via an external provider carries an
+        # identity link — drop it in the same tx (like delete_user).
+        gen.delete_identities_for_user(conn, user_id=target_id)
         gen.delete_user(conn, user_id=target_id)
         _audit(conn, "reject", actor_id, target_id, {"username": user.username})
         return True
+
+    return await db.execute_write_fn(write)
+
+
+# --------------------------------------------------------------------------
+# External sign-in identities + provisioning (see plans/auth-providers §§4–5)
+# --------------------------------------------------------------------------
+
+
+# Charset kept by the slugifier: the validate_username charset minus its
+# start-anchor (leading non-alnum is stripped separately).
+_SLUG_KEEP_RE = re.compile(r"[^a-z0-9._-]")
+_SLUG_LEADING_RE = re.compile(r"^[^a-z0-9]+")
+
+
+def _slugify_username(hint):
+    """Best-effort slug of a provider-supplied hint toward the username charset.
+
+    Lowercase, drop anything outside ``[a-z0-9._-]``, strip leading non-alnum
+    (validate_username requires an alphanumeric first char), truncate to 64.
+    The result still has to clear ``security.validate_username`` — this only
+    shapes the input; the caller decides whether it's usable.
+    """
+    if not hint:
+        return ""
+    s = _SLUG_KEEP_RE.sub("", hint.lower())
+    s = _SLUG_LEADING_RE.sub("", s)
+    return s[:64]
+
+
+def derive_username(hint, provider_key, taken):
+    """Pick a free, valid username for a provisioned external account (design §5).
+
+    Slugify ``hint``; if the slug fails ``validate_username`` (too short, empty,
+    reserved like ``root``, …), fall back to ``{provider_key}-{8 hex}``. Then
+    append ``-2``, ``-3``, … on collision, bounded; if even that can't find a
+    gap, use the random fallback. ``taken`` is a ``set``/container of existing
+    usernames or a ``callable(name) -> bool``.
+    """
+    is_taken = taken if callable(taken) else (lambda name: name in taken)
+    base = _slugify_username(hint)
+    if security.validate_username(base) is not None:
+        base = f"{provider_key}-{secrets.token_hex(4)}"
+    candidate = base
+    for i in range(2, 50):
+        if not is_taken(candidate):
+            return candidate
+        candidate = f"{base}-{i}"
+    return f"{provider_key}-{secrets.token_hex(4)}"
+
+
+async def get_identity(db, provider, subject):
+    """The account linked to ``(provider, subject)``, or None. Matching is by
+    ``(provider, subject)`` ONLY — never email (decision D6)."""
+    row = await db.execute_fn(
+        lambda conn: gen.select_identity(conn, provider=provider, subject=subject)
+    )
+    return _as_dict(row)
+
+
+async def list_identities(db, user_id):
+    """All external sign-in identities linked to one account (oldest first)."""
+    rows = await db.execute_fn(
+        lambda conn: gen.list_identities_for_user(conn, user_id=user_id)
+    )
+    return [dataclasses.asdict(r) for r in rows]
+
+
+async def touch_identity_login(db, provider, subject):
+    """Stamp ``last_login_at = now`` on one identity after a successful sign-in."""
+    await db.execute_write_fn(
+        lambda conn: gen.touch_identity_last_login(
+            conn, provider=provider, subject=subject
+        )
+    )
+
+
+async def link_identity(db, actor_id, user_id, identity):
+    """Link an ``ExternalIdentity`` to an existing account (one write tx + audit).
+
+    ``identity`` is an ``providers.ExternalIdentity``. Ticket 04's linking routes
+    call this; it is the single insert point for a new ``(provider, subject)``
+    row on an already-existing account.
+    """
+
+    def write(conn):
+        gen.insert_identity(
+            conn,
+            provider=identity.provider,
+            subject=identity.subject,
+            user_id=user_id,
+            email=identity.email,
+            display_name=identity.display_name,
+        )
+        _audit(
+            conn,
+            "link-identity",
+            actor_id,
+            user_id,
+            {"provider": identity.provider, "subject": identity.subject},
+        )
+
+    await db.execute_write_fn(write)
+
+
+async def provision_external_user(db, identity, ip, *, pending):
+    """Create a fresh account for an unmatched external identity + link it.
+
+    One write tx (modeled on ``register_user`` / ``create_invited_user``):
+    derive a free username from the hint, insert the user with
+    ``password_hash = UNUSABLE_PASSWORD`` (SSO-only — password login answers
+    ``no_password`` via the dummy-verify branch), ``must_change_password = 0``,
+    and ``pending_approval = 1`` when ``pending`` else ``0``; insert the identity
+    row; audit ``register`` (pending, lands in the approval queue) or
+    ``provision`` (auto-activated). Returns the new account id.
+    """
+    user_id = new_id()
+
+    def write(conn):
+        username = derive_username(
+            identity.username_hint,
+            identity.provider,
+            lambda name: gen.username_exists(conn, username=name) is not None,
+        )
+        gen.insert_user(
+            conn,
+            id=user_id,
+            username=username,
+            password_hash=UNUSABLE_PASSWORD,
+            is_admin=0,
+            must_change_password=0,
+            pending_approval=1 if pending else 0,
+        )
+        gen.insert_identity(
+            conn,
+            provider=identity.provider,
+            subject=identity.subject,
+            user_id=user_id,
+            email=identity.email,
+            display_name=identity.display_name,
+        )
+        _audit(
+            conn,
+            "register" if pending else "provision",
+            None,
+            user_id,
+            {
+                "provider": identity.provider,
+                "subject": identity.subject,
+                "username_hint": identity.username_hint,
+                "ip": ip,
+            },
+        )
+        return user_id
 
     return await db.execute_write_fn(write)

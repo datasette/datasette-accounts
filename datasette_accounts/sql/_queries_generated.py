@@ -46,6 +46,17 @@ class SessionRow:
 
 
 @dataclass
+class IdentityRow:
+    provider: str
+    subject: str
+    user_id: str
+    email: str | None
+    display_name: str | None
+    created_at: str
+    last_login_at: str | None
+
+
+@dataclass
 class LoginAttemptRow:
     id: int | None
     username: str | None
@@ -450,16 +461,18 @@ def insert_session(
     ttl_days: int,
     user_agent: str | None,
     ip: str | None,
+    provider: str,
 ) -> None:
     sql = """\
 INSERT INTO datasette_accounts_sessions
-    (token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip)
+    (token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip,
+     provider)
 VALUES ($token_sha256::text, $actor_id::text,
         strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
         strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d days', $ttl_days::integer))
         || '+00:00',
         strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
-        $user_agent::text::, $ip::text::);
+        $user_agent::text::, $ip::text::, $provider::text);
 """
     params = {
         "token_sha256::text": token_sha256,
@@ -467,6 +480,7 @@ VALUES ($token_sha256::text, $actor_id::text,
         "ttl_days::integer": ttl_days,
         "user_agent::text::": user_agent,
         "ip::text::": ip,
+        "provider::text": provider,
     }
     conn.execute(sql, params)
     return None
@@ -531,24 +545,111 @@ WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
     return None
 
 
+def select_identity(
+    conn: sqlite3.Connection, provider: str, subject: str
+) -> IdentityRow | None:
+    sql = """\
+SELECT provider, subject, user_id, email, display_name, created_at, last_login_at
+FROM datasette_accounts_identities
+WHERE provider = $provider::text AND subject = $subject::text;
+"""
+    params = {"provider::text": provider, "subject::text": subject}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return IdentityRow(*row) if row is not None else None
+
+
+def list_identities_for_user(
+    conn: sqlite3.Connection, user_id: str
+) -> list[IdentityRow]:
+    sql = """\
+SELECT provider, subject, user_id, email, display_name, created_at, last_login_at
+FROM datasette_accounts_identities
+WHERE user_id = $user_id::text
+ORDER BY created_at;
+"""
+    params = {"user_id::text": user_id}
+    cursor = conn.execute(sql, params)
+    return [IdentityRow(*row) for row in cursor.fetchall()]
+
+
+def insert_identity(
+    conn: sqlite3.Connection,
+    provider: str,
+    subject: str,
+    user_id: str,
+    email: str | None,
+    display_name: str | None,
+) -> None:
+    sql = """\
+INSERT INTO datasette_accounts_identities
+    (provider, subject, user_id, email, display_name, created_at, last_login_at)
+VALUES ($provider::text, $subject::text, $user_id::text,
+        $email::text::, $display_name::text::,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00', NULL);
+"""
+    params = {
+        "provider::text": provider,
+        "subject::text": subject,
+        "user_id::text": user_id,
+        "email::text::": email,
+        "display_name::text::": display_name,
+    }
+    conn.execute(sql, params)
+    return None
+
+
+def touch_identity_last_login(
+    conn: sqlite3.Connection, provider: str, subject: str
+) -> None:
+    sql = """\
+UPDATE datasette_accounts_identities
+SET last_login_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE provider = $provider::text AND subject = $subject::text;
+"""
+    params = {"provider::text": provider, "subject::text": subject}
+    conn.execute(sql, params)
+    return None
+
+
+def delete_identity(conn: sqlite3.Connection, provider: str, subject: str) -> None:
+    sql = """\
+DELETE FROM datasette_accounts_identities
+WHERE provider = $provider::text AND subject = $subject::text;
+"""
+    params = {"provider::text": provider, "subject::text": subject}
+    conn.execute(sql, params)
+    return None
+
+
+def delete_identities_for_user(conn: sqlite3.Connection, user_id: str) -> None:
+    sql = "DELETE FROM datasette_accounts_identities WHERE user_id = $user_id::text;"
+    params = {"user_id::text": user_id}
+    conn.execute(sql, params)
+    return None
+
+
 def insert_login_attempt(
     conn: sqlite3.Connection,
     username: str | None,
     ip: str | None,
     success: int,
     reason: str | None,
+    provider: str | None,
 ) -> None:
     sql = """\
-INSERT INTO datasette_accounts_login_audit (username, ip, timestamp, success, reason)
+INSERT INTO datasette_accounts_login_audit
+    (username, ip, timestamp, success, reason, provider)
 VALUES ($username::text::, $ip::text::,
         strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
-        $success::integer, $reason::text::);
+        $success::integer, $reason::text::, $provider::text::);
 """
     params = {
         "username::text::": username,
         "ip::text::": ip,
         "success::integer": success,
         "reason::text::": reason,
+        "provider::text::": provider,
     }
     conn.execute(sql, params)
     return None

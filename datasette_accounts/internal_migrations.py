@@ -210,3 +210,53 @@ def m008_self_registration(db: Database):
         );
         """
     )
+
+
+@internal_migrations()
+def m009_auth_providers(db: Database):
+    # External sign-in identities: a (provider, subject) pair mapped to an
+    # account (plans/auth-providers §7). Matching is by (provider, subject)
+    # ONLY — never email (decision D6): there is deliberately no email column
+    # on users to match against, so the classic OAuth account-takeover vector
+    # is structurally absent. email/display_name here are audit detail + future
+    # use, never matched. No `password` rows live here (decision D4) — the users
+    # table stays the source of truth for password auth.
+    db.executescript(
+        """
+        CREATE TABLE datasette_accounts_identities (
+            provider TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            email TEXT,
+            display_name TEXT,
+            created_at TEXT NOT NULL,
+            last_login_at TEXT,
+            PRIMARY KEY (provider, subject)
+        );
+        CREATE INDEX idx_accounts_identities_user
+            ON datasette_accounts_identities (user_id);
+        """
+    )
+    # Session + login-audit provenance: which provider minted / attempted. The
+    # session default keeps every pre-existing (password) session correct
+    # without a backfill; login_audit is nullable — pre-existing rows predate
+    # the concept.
+    db.execute(
+        "ALTER TABLE datasette_accounts_sessions"
+        " ADD COLUMN provider TEXT NOT NULL DEFAULT 'password'"
+    )
+    db.execute("ALTER TABLE datasette_accounts_login_audit ADD COLUMN provider TEXT")
+    # registration_enabled becomes the password provider's signups setting
+    # (decision D5): self-registration unifies into per-provider signups. The
+    # old '1' toggle maps to 'approval' (self-registered accounts land in the
+    # approval queue); any registration_enabled row is then removed.
+    db.execute(
+        """
+        UPDATE datasette_accounts_settings
+        SET key = 'provider:password:signups', value = 'approval'
+        WHERE key = 'registration_enabled' AND value = '1'
+        """
+    )
+    db.execute(
+        "DELETE FROM datasette_accounts_settings WHERE key = 'registration_enabled'"
+    )

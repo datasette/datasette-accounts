@@ -193,14 +193,16 @@ def clear_stale_core_actor_cookie(request, response):
         response.set_cookie("ds_actor", "", max_age=0, path="/", expires=0)
 
 
-async def mint_session(datasette, request, response, user):
+async def mint_session(datasette, request, response, user, provider="password"):
     """The single session mint: stamp login success, create the session row,
     and set the session + stale-core cookies on ``response``.
 
     This is exactly authenticate()'s historical success half minus the periodic
     housekeeping, so callers that want housekeeping (finish_login) run it around
     this and callers that never did (set-password completion) don't. The one
-    ``db.create_session`` call in the plugin lives here.
+    ``db.create_session`` call in the plugin lives here. ``provider`` is stamped
+    on the session row as provenance (which provider minted it — 'password' for
+    the built-in flow, the external provider's key otherwise).
     """
     internal = datasette.get_internal_database()
     ip = security.client_ip(datasette, request)
@@ -213,6 +215,7 @@ async def mint_session(datasette, request, response, user):
         security.config(datasette, "session_ttl_days"),
         request.headers.get("user-agent"),
         ip,
+        provider=provider,
     )
     set_session_cookie(datasette, request, response, raw_token)
     clear_stale_core_actor_cookie(request, response)
@@ -232,53 +235,220 @@ async def finish_login(
     response_mode="redirect",
     state=None,
 ):
-    """Terminate a sign-in flow: run account gates, then mint the session.
+    """Terminate a sign-in flow: run account gates + policy, then mint.
 
-    `provider_key` is the key of the provider that produced `identity` (carried
-    for the provenance column ticket 03 adds; unused here). This ticket handles
-    LocalIdentity only; ExternalIdentity raises NotImplementedError (ticket 03).
+    `provider_key` is the key of the provider that produced `identity`; it is
+    stamped on the session + login_audit rows as provenance. LocalIdentity
+    (password / invite / reset completion) loads the user directly;
+    ExternalIdentity maps `(provider, subject)` through the identities table and
+    applies the per-provider signups policy for an unmatched identity.
     """
     if isinstance(identity, LocalIdentity):
         return await _finish_local(
             datasette,
             request,
             identity,
+            provider_key=provider_key,
             response_mode=response_mode,
             state=state,
         )
     if isinstance(identity, ExternalIdentity):
-        raise NotImplementedError(
-            "ExternalIdentity is implemented in a later milestone (ticket 03)"
+        return await _finish_external(
+            datasette,
+            request,
+            identity,
+            provider_key=provider_key,
+            response_mode=response_mode,
+            state=state,
         )
     raise TypeError(f"Unknown identity type: {type(identity)!r}")
 
 
-async def _finish_local(datasette, request, identity, *, response_mode, state):
+def _gate_reason(user, *, external):
+    """Shared account gate for both identity kinds — disabled > expired >
+    pending_approval precedence. Returns a login_audit reason string, or None
+    when the account may sign in. External flows use the `provider_*` reasons so
+    the admin audit distinguishes an SSO refusal from a password one."""
+    expired = bool(user and user["expires_at"] and user["expires_at"] <= db.now_iso())
+    if user is None:
+        return "provider_no_account" if external else "no_such_user"
+    if user["disabled"]:
+        return "provider_disabled" if external else "disabled"
+    if expired:
+        return "provider_expired" if external else "expired"
+    if user["pending_approval"]:
+        return "provider_pending" if external else "pending_approval"
+    return None
+
+
+async def _finish_local(datasette, request, identity, *, provider_key, response_mode, state):
     internal = datasette.get_internal_database()
     ip = security.client_ip(datasette, request)
     user = await db.get_user_by_id(internal, identity.user_id)
 
     # Same gates, same precedence as authenticate(): disabled > expired >
     # pending_approval. (The password verify — and its gate routing — already
-    # ran in the caller; this is the shared, defense-in-depth chokepoint.)
-    expired = bool(user and user["expires_at"] and user["expires_at"] <= db.now_iso())
-    if user is None:
-        reason = "no_such_user"
-    elif user["disabled"]:
-        reason = "disabled"
-    elif expired:
-        reason = "expired"
-    elif user["pending_approval"]:
-        reason = "pending_approval"
-    else:
-        reason = None
-
+    # ran in the caller; this is the shared, defense-in-depth chokepoint. The
+    # success login_audit row is the verify half's job, so we write only
+    # refusals here — untouched division of labor.)
+    reason = _gate_reason(user, external=False)
     if reason is not None:
         await db.record_login_attempt(
             internal, user["username"] if user else None, ip, False, reason
         )
         return _refuse(response_mode)
 
+    return await _mint_and_respond(
+        datasette,
+        request,
+        user,
+        provider_key=provider_key,
+        response_mode=response_mode,
+        state=state,
+    )
+
+
+async def _finish_external(
+    datasette, request, identity, *, provider_key, response_mode, state
+):
+    # A provider handing back another provider's identity is a bug, not a
+    # runtime condition — fail loud (500), never silently map across providers.
+    assert identity.provider == provider_key, (
+        f"provider {provider_key!r} returned identity for {identity.provider!r}"
+    )
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+
+    # Defense in depth: the mount already checked the enabled bit, but a
+    # provider could call finish_login from anywhere. A disabled provider can
+    # never mint.
+    if not await db.get_provider_enabled(internal, provider_key):
+        await db.record_login_attempt(
+            internal, None, ip, False, "provider_disabled", provider=provider_key
+        )
+        return _refuse(response_mode)
+
+    existing = await db.get_identity(internal, provider_key, identity.subject)
+    if existing is not None:
+        # Linked → load the account, run the same gates as a password login.
+        user = await db.get_user_by_id(internal, existing["user_id"])
+        reason = _gate_reason(user, external=True)
+        if reason is not None:
+            await db.record_login_attempt(
+                internal,
+                user["username"] if user else None,
+                ip,
+                False,
+                reason,
+                provider=provider_key,
+            )
+            return _refuse(response_mode)
+        await db.touch_identity_login(internal, provider_key, identity.subject)
+        return await _mint_external(
+            datasette,
+            request,
+            user,
+            provider_key=provider_key,
+            response_mode=response_mode,
+            state=state,
+        )
+
+    # Unmatched identity. Linking (link / step-up intents) is ticket 04.
+    intent = (state or {}).get("i") or "login"
+    if intent in ("link", "step-up"):
+        raise NotImplementedError("identity linking is implemented in ticket 04")
+
+    # intent == "login": consult the provider's signups policy.
+    signups = await db.get_provider_signups(internal, provider_key)
+    if signups == "off":
+        # Generic — identical wording whether signups are off or the identity is
+        # simply unknown, so a visitor can't probe which providers auto-link.
+        await db.record_login_attempt(
+            internal, None, ip, False, "provider_no_account", provider=provider_key
+        )
+        return _refuse_no_account(response_mode)
+
+    if signups == "approval":
+        return await _provision_pending(
+            datasette, request, identity, provider_key=provider_key,
+            response_mode=response_mode,
+        )
+
+    # signups == "auto" (auto-activate — for trusted IdPs): create active + mint.
+    user_id = await db.provision_external_user(internal, identity, ip, pending=False)
+    user = await db.get_user_by_id(internal, user_id)
+    await db.touch_identity_login(internal, provider_key, identity.subject)
+    return await _mint_external(
+        datasette,
+        request,
+        user,
+        provider_key=provider_key,
+        response_mode=response_mode,
+        state=state,
+    )
+
+
+async def _provision_pending(datasette, request, identity, *, provider_key, response_mode):
+    """Approval-mode provisioning: shared abuse caps, then create a pending
+    account (no session). Caps + the `register` login_audit reason are shared
+    with password self-registration so the per-IP/day + pending-queue budgets
+    are unified across every provider (design D5)."""
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+    over_cap = await _registration_over_cap(datasette, internal, ip)
+    audit_name = identity.username_hint or identity.subject
+    if over_cap:
+        # Refused attempts still count toward the per-IP budget (reason
+        # 'register'), exactly as a capped password signup does.
+        await db.record_login_attempt(
+            internal, audit_name, ip, False, "register", provider=provider_key
+        )
+        return _refuse_closed(response_mode)
+    await db.provision_external_user(internal, identity, ip, pending=True)
+    # Same 'register' reason as a password signup → one shared per-IP counter.
+    await db.record_login_attempt(
+        internal, audit_name, ip, True, "register", provider=provider_key
+    )
+    return _pending(response_mode)
+
+
+async def _registration_over_cap(datasette, internal, ip):
+    """True when either self-registration abuse cap is at/over limit. Shared,
+    verbatim, with the password register path (providers/password.register)."""
+    per_ip_cap = security.config(datasette, "registrations_per_ip_per_day")
+    queue_cap = security.config(datasette, "max_pending_registrations")
+    return (
+        await db.count_recent_registrations(internal, ip) >= per_ip_cap
+        or await db.count_pending_users(internal) >= queue_cap
+    )
+
+
+async def _mint_external(datasette, request, user, *, provider_key, response_mode, state):
+    """Mint for a linked/auto-provisioned external account, writing the success
+    login_audit row here (with the provider column) — external flows have no
+    verify half to write it, unlike password."""
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+    await db.record_login_attempt(
+        internal, user["username"], ip, True, "success", provider=provider_key
+    )
+    return await _mint_and_respond(
+        datasette,
+        request,
+        user,
+        provider_key=provider_key,
+        response_mode=response_mode,
+        state=state,
+    )
+
+
+async def _mint_and_respond(datasette, request, user, *, provider_key, response_mode, state):
+    """Shared success tail for every finish_login path: build the response,
+    mint the session (provenance = provider_key), run the periodic housekeeping,
+    clear the state cookie. Does NOT write the success login_audit row — that is
+    the caller's responsibility (password's verify half; _mint_external for
+    external flows) so the row is written exactly once."""
+    internal = datasette.get_internal_database()
     base_url = datasette.setting("base_url") or "/"
     # `next` from the state was validated when the state was created; re-validate
     # on consumption (belt and braces).
@@ -296,9 +466,7 @@ async def _finish_local(datasette, request, identity, *, response_mode, state):
     else:
         response = Response.redirect(redirect)
 
-    # Mint — identical to authenticate()'s success half (mint + the periodic
-    # housekeeping it runs). mint_session sets the session + stale-core cookies.
-    await mint_session(datasette, request, response, user)
+    await mint_session(datasette, request, response, user, provider=provider_key)
     await db.delete_expired_sessions(internal)
     await db.purge_expired_password_tokens(internal)
     await db.purge_login_audit(
@@ -312,11 +480,42 @@ async def _finish_local(datasette, request, identity, *, response_mode, state):
 
 
 def _refuse(response_mode):
+    return _error_page(response_mode, GENERIC_FLOW_ERROR, status=403)
+
+
+def _refuse_no_account(response_mode):
+    # Deliberately identical whether signups are off or the identity is simply
+    # unknown — never distinguishes the two (design §4).
+    return _error_page(response_mode, "No account is linked to that identity.", status=403)
+
+
+def _refuse_closed(response_mode):
+    # Mirrors the password register over-cap message; never says which cap tripped.
+    return _error_page(
+        response_mode, "Registration is currently closed — try again later.", status=429
+    )
+
+
+def _pending(response_mode):
+    """The 'awaiting approval' outcome — no session. Mirrors the register page:
+    JSON callers get {"ok": True}; redirect flows get a plain confirmation page."""
     if response_mode == "json":
-        response = Response.json({"ok": False, "error": GENERIC_FLOW_ERROR}, status=403)
+        response = Response.json({"ok": True})
     else:
         response = Response.html(
-            f"<h1>Sign-in failed</h1><p>{GENERIC_FLOW_ERROR}</p>", status=403
+            "<h1>Account created</h1>"
+            "<p>Your account is awaiting approval by an administrator.</p>"
+        )
+    clear_state_cookie(response)
+    return response
+
+
+def _error_page(response_mode, message, *, status):
+    if response_mode == "json":
+        response = Response.json({"ok": False, "error": message}, status=status)
+    else:
+        response = Response.html(
+            f"<h1>Sign-in failed</h1><p>{message}</p>", status=status
         )
     clear_state_cookie(response)
     return response

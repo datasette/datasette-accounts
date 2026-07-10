@@ -24,6 +24,14 @@
     reauth: "Re-authentication",
     pending_approval: "Awaiting approval",
     register: "Registration attempt",
+    // External sign-in providers (plans/auth-providers). Provenance (which
+    // provider) lives in the provider column; success rows keep reason
+    // "success".
+    provider_no_account: "No linked account",
+    provider_pending: "Awaiting approval",
+    provider_disabled: "Account disabled",
+    provider_expired: "Account expired",
+    provider_state_invalid: "Invalid sign-in state",
   };
   function reasonLabel(r: string | null | undefined): string {
     if (!r) return "—";

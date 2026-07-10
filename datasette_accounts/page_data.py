@@ -167,8 +167,10 @@ class LoginAttemptRow(BaseModel):
     # 1 on a successful sign-in, 0 otherwise.
     success: int
     # Why the attempt landed where it did: success / bad_password / no_such_user
-    # / disabled / expired / locked / no_password / reauth. NULL on rows written
-    # before this was tracked.
+    # / disabled / expired / locked / no_password / reauth / register, plus the
+    # external-provider reasons provider_no_account / provider_pending /
+    # provider_disabled / provider_expired / provider_state_invalid (see
+    # plans/auth-providers). NULL on rows written before this was tracked.
     reason: Optional[str] = None
 
 
