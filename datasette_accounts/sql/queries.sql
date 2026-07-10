@@ -461,18 +461,31 @@ RETURNING user_id;
 -- name: deletePasswordTokensForUser
 DELETE FROM datasette_accounts_password_tokens WHERE user_id = $user_id::text;
 
--- Housekeeping — called alongside deleteExpiredSessions.
+-- Housekeeping — called alongside deleteExpiredSessions. Only expired *reset*
+-- tokens are purged: the account still has a working password, so the dead row
+-- is pure noise. An expired *invite* token is kept — it is the only durable
+-- record that the account never got a usable password ("invite expired" on the
+-- admin page). It stays unclaimable (every claim path checks expiry) and is
+-- removed by re-mint, completion, disable, delete, and admin reset.
 -- name: purgeExpiredPasswordTokens
 DELETE FROM datasette_accounts_password_tokens
-WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+WHERE purpose = 'reset'
+  AND expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
 
--- User ids holding a live (unexpired) invite token. Merged into the admin
--- user rows as the `invited` flag — deliberately not a users column (see
--- plans/invite-links: the live token *is* the invited state).
--- name: listInvitedUserIds :list
-SELECT user_id FROM datasette_accounts_password_tokens
-WHERE purpose = 'invite'
-  AND expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+-- One-time-link metadata for the admin user rows (invited / invite-expired
+-- badges + tooltip) — deliberately not users columns (see plans/invite-links:
+-- the token *is* the state). At most one token per account (minting deletes
+-- prior ones). Never exposes token_sha256. Invite tokens are returned even
+-- after expiry ("invite expired"); expired reset tokens are hidden — dead
+-- reset links are meaningless. The creator's username resolves NULL for
+-- synthetic actors (root, cli:$USER) — callers fall back to the raw id.
+-- name: listPasswordTokenMeta :rows -> PasswordTokenMetaRow
+SELECT t.user_id, t.purpose, t.created_at, t.expires_at, t.created_by,
+       cu.username AS created_by_username
+FROM datasette_accounts_password_tokens t
+LEFT JOIN datasette_accounts_users cu ON cu.id = t.created_by
+WHERE t.purpose = 'invite'
+   OR t.expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
 
 -- Completing a token: set the password, clear must_change_password (the link
 -- itself proved control), stamp updated_at.

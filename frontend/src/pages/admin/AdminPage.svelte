@@ -59,6 +59,16 @@
       : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
   }
 
+  // Tooltip for the invited / invite-expired / reset-link badges. The URL
+  // itself is gone (only its hash is stored) — expiry + who minted it is all
+  // there is to show.
+  function linkTitle(u: User): string {
+    const when = fmtDate(u.link_expires_at);
+    const parts = [u.invite_expired ? `Link expired ${when}` : `Link expires ${when}`];
+    if (u.link_created_by) parts.push(`created by ${u.link_created_by}`);
+    return parts.join(" · ");
+  }
+
   // Create-account modal
   let createOpen = $state(false);
   let newUsername = $state("");
@@ -386,7 +396,9 @@
                 {#if u.disabled}<span class="badge badge-disabled">disabled</span>{/if}
                 {#if u.expired}<span class="badge badge-expired">expired</span>{/if}
                 {#if u.locked}<span class="badge badge-locked">locked</span>{/if}
-                {#if u.invited}<span class="badge badge-invited">invited</span>{/if}
+                {#if u.invited}<span class="badge badge-invited" title={linkTitle(u)}>invited</span>{/if}
+                {#if u.invite_expired}<span class="badge badge-invite-expired" title={linkTitle(u)}>invite expired</span>{/if}
+                {#if u.link_purpose === "reset"}<span class="badge badge-reset-link" title={linkTitle(u)}>reset link</span>{/if}
                 {#if !u.last_login_at}<span class="badge badge-pending">pending</span>{/if}
               </div>
             </td>
@@ -439,7 +451,7 @@
                     {/if}
                     <button role="menuitem" onclick={() => pick(() => openExpiry(u))}>Set expiry…</button>
                     <div class="sep"></div>
-                    {#if u.invited}
+                    {#if u.invited || u.invite_expired}
                       <button role="menuitem" onclick={() => pick(() => mintLink(u, "invite"))}>New invite link…</button>
                     {:else}
                       <button role="menuitem" onclick={() => pick(() => mintLink(u, "reset"))}>Reset link…</button>

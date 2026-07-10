@@ -315,26 +315,36 @@ async def test_purge_expired_password_tokens_via_db():
         actor_id=None,
         username="ivy",
         is_admin=False,
-        token_sha="live",
+        token_sha="live-invite",
         ttl_hours=72,
     )
+    # An expired invite survives the purge: it is the durable "invite lapsed,
+    # account has no usable password" record behind the admin UI badge.
     await db.create_invited_user(
         internal,
         actor_id=None,
         username="jack",
         is_admin=False,
-        token_sha="dead",
+        token_sha="dead-invite",
         ttl_hours=-1,
     )
+    # An expired reset link is pure noise (the password still works) — purged.
+    uid = await db.create_user(
+        internal, None, "kara", "h", is_admin=False, must_change_password=False
+    )
+    await db.mint_password_token(
+        internal, None, uid, "reset", "dead-reset", ttl_hours=-1
+    )
     await db.purge_expired_password_tokens(internal)
-    count = (
-        await internal.execute(f"SELECT COUNT(*) FROM {db.PASSWORD_TOKENS}")
-    ).single_value()
-    assert count == 1
-    remaining = (
-        await internal.execute(f"SELECT token_sha256 FROM {db.PASSWORD_TOKENS}")
-    ).single_value()
-    assert remaining == "live"
+    remaining = [
+        r[0]
+        for r in (
+            await internal.execute(
+                f"SELECT token_sha256 FROM {db.PASSWORD_TOKENS} ORDER BY 1"
+            )
+        ).rows
+    ]
+    assert remaining == ["dead-invite", "live-invite"]
 
 
 @pytest.mark.asyncio

@@ -97,6 +97,16 @@ class PasswordTokenRow:
     username: str
 
 
+@dataclass
+class PasswordTokenMetaRow:
+    user_id: str
+    purpose: str
+    created_at: str
+    expires_at: str
+    created_by: str | None
+    created_by_username: str
+
+
 def select_user_by_username(conn: sqlite3.Connection, username: str) -> UserRow | None:
     sql = """\
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
@@ -840,22 +850,26 @@ def delete_password_tokens_for_user(conn: sqlite3.Connection, user_id: str) -> N
 def purge_expired_password_tokens(conn: sqlite3.Connection) -> None:
     sql = """\
 DELETE FROM datasette_accounts_password_tokens
-WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+WHERE purpose = 'reset'
+  AND expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
 """
     params: dict[str, Any] = {}
     conn.execute(sql, params)
     return None
 
 
-def list_invited_user_ids(conn: sqlite3.Connection) -> list[str]:
+def list_password_token_meta(conn: sqlite3.Connection) -> list[PasswordTokenMetaRow]:
     sql = """\
-SELECT user_id FROM datasette_accounts_password_tokens
-WHERE purpose = 'invite'
-  AND expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
+SELECT t.user_id, t.purpose, t.created_at, t.expires_at, t.created_by,
+       cu.username AS created_by_username
+FROM datasette_accounts_password_tokens t
+LEFT JOIN datasette_accounts_users cu ON cu.id = t.created_by
+WHERE t.purpose = 'invite'
+   OR t.expires_at > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
 """
     params: dict[str, Any] = {}
     cursor = conn.execute(sql, params)
-    return [row[0] for row in cursor.fetchall()]
+    return [PasswordTokenMetaRow(*row) for row in cursor.fetchall()]
 
 
 def set_password_from_token(

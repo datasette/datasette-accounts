@@ -34,6 +34,18 @@ class UserRow(BaseModel):
     # True while the account holds a live invite link (no password chosen yet).
     # Derived from the password-tokens table, not a users column.
     invited: bool
+    # True when the invite link lapsed unused — the account still has no usable
+    # password and needs a re-mint (mutually exclusive with `invited`).
+    invite_expired: bool
+    # Metadata for the account's one-time link, at most one per account:
+    # "invite" (live or lapsed) or "reset" (live only — expired reset links are
+    # meaningless and hidden). All None when the account has no link. The URL
+    # itself is never recoverable — only its hash is stored.
+    link_purpose: Optional[str] = None
+    link_expires_at: Optional[str] = None
+    # Minting admin's username, falling back to the raw actor id for synthetic
+    # actors ("root", "cli:$USER") or a since-deleted account.
+    link_created_by: Optional[str] = None
     created_at: str
     # None until the first successful sign-in — the account is still "pending".
     last_login_at: Optional[str] = None

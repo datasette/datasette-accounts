@@ -164,18 +164,34 @@ async def list_user_rows(db):
     """UserRow presentation dicts for the admin surfaces (page + list API).
 
     The single assembly point for admin user rows, so the page shell and the
-    refresh API can't drift: ``to_user_row`` plus the ``invited`` flag — True
-    while the account holds a live (unexpired) ``purpose='invite'`` token.
-    Deliberately not a users column: the live token *is* the invited state, so
-    completion / expiry / re-mint keep the flag correct for free.
+    refresh API can't drift: ``to_user_row`` plus the one-time-link state —
+    ``invited`` (live ``purpose='invite'`` token), ``invite_expired`` (the
+    invite lapsed unused — the account still has no usable password), and the
+    ``link_*`` metadata behind the badges' tooltips. Deliberately not users
+    columns: the token *is* the state, so completion / expiry / re-mint keep
+    the flags correct for free.
     """
 
     def read(conn):
-        invited_ids = set(gen.list_invited_user_ids(conn))
-        return [
-            {**to_user_row(dataclasses.asdict(u)), "invited": u.id in invited_ids}
-            for u in gen.list_users(conn)
-        ]
+        meta = {m.user_id: m for m in gen.list_password_token_meta(conn)}
+        now = now_iso()
+        rows = []
+        for u in gen.list_users(conn):
+            m = meta.get(u.id)
+            live = bool(m and m.expires_at > now)
+            rows.append(
+                {
+                    **to_user_row(dataclasses.asdict(u)),
+                    "invited": bool(m and m.purpose == "invite" and live),
+                    "invite_expired": bool(m and m.purpose == "invite" and not live),
+                    "link_purpose": m.purpose if m else None,
+                    "link_expires_at": m.expires_at if m else None,
+                    "link_created_by": (
+                        (m.created_by_username or m.created_by) if m else None
+                    ),
+                }
+            )
+        return rows
 
     return await db.execute_fn(read)
 

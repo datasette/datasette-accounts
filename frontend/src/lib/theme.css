@@ -294,6 +294,14 @@
 #app-root .badge-invited {
   color: var(--ok);
 }
+/* invite lapsed unused — actionable (re-mint), so warn like `locked` */
+#app-root .badge-invite-expired {
+  color: var(--warn);
+}
+/* an outstanding reset link — a credential in flight, worth noticing */
+#app-root .badge-reset-link {
+  color: var(--acc);
+}
 /* expired: red — distinct from disabled (grey) and locked (peach) */
 #app-root .badge-expired {
   color: var(--danger);

@@ -36,6 +36,17 @@ _USERS = [
     ("u-dave", "dave", 0, 0, 1, None),  # must change password
 ]
 
+# Accounts mid-invite: erin holds a live invite link, frank's lapsed unused —
+# both have the unusable-password sentinel, so the admin table shows the
+# "invited" and "invite expired" badges. Plus an outstanding reset link for
+# alice ("reset link" badge).
+# token_sha256, user_id, purpose, expires_at, created_by
+_PASSWORD_TOKENS = [
+    ("b" * 64, "u-erin", "invite", _FUTURE, "u-admin"),
+    ("c" * 64, "u-frank", "invite", "2026-07-04T00:00:00+00:00", "u-admin"),
+    ("d" * 64, "u-alice", "reset", _FUTURE, "u-admin"),
+]
+
 # A demo active session for alice, so the admin's per-user session drawer shows
 # a real row instead of "No active sessions."
 _ALICE_SESSION = {
@@ -78,6 +89,32 @@ def startup(datasette):
                         "locked_until": locked,
                         "created_at": _CREATED,
                         "updated_at": _CREATED,
+                    }
+                )
+            for uid, username in [("u-erin", "erin"), ("u-frank", "frank")]:
+                db[accounts_db.USERS].insert(
+                    {
+                        "id": uid,
+                        "username": username,
+                        "password_hash": "!",  # unusable — invite not completed
+                        "is_admin": 0,
+                        "disabled": 0,
+                        "must_change_password": 0,
+                        "failed_attempts": 0,
+                        "locked_until": None,
+                        "created_at": _CREATED,
+                        "updated_at": _CREATED,
+                    }
+                )
+            for token_sha, uid, purpose, expires, creator in _PASSWORD_TOKENS:
+                db[accounts_db.PASSWORD_TOKENS].insert(
+                    {
+                        "token_sha256": token_sha,
+                        "user_id": uid,
+                        "purpose": purpose,
+                        "created_at": _CREATED,
+                        "expires_at": expires,
+                        "created_by": creator,
                     }
                 )
             db[accounts_db.SESSIONS].insert(_ALICE_SESSION)

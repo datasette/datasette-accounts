@@ -195,37 +195,81 @@ def test_expired_password_token_not_selectable_or_claimable(conn):
     assert gen.delete_password_token(conn, token_sha256="tok1") is None
 
 
-def test_purge_expired_password_tokens_removes_only_expired(conn):
-    gen.insert_user(
-        conn,
-        id="u1",
-        username="carol",
-        password_hash="!",
-        is_admin=0,
-        must_change_password=0,
-        pending_approval=0,
-    )
+def test_purge_expired_password_tokens_removes_only_expired_resets(conn):
+    for uid, name in [("u1", "carol"), ("u2", "dan"), ("u3", "eve")]:
+        gen.insert_user(
+            conn,
+            id=uid,
+            username=name,
+            password_hash="!",
+            is_admin=0,
+            must_change_password=0,
+            pending_approval=0,
+        )
+    for tok, uid, purpose, ttl in [
+        ("live-invite", "u1", "invite", 72),
+        # Kept even though expired: the lapsed invite is the only durable
+        # record that the account never got a usable password.
+        ("dead-invite", "u2", "invite", -1),
+        ("live-reset", "u3", "reset", 24),
+    ]:
+        gen.insert_password_token(
+            conn,
+            token_sha256=tok,
+            user_id=uid,
+            purpose=purpose,
+            ttl_hours=ttl,
+            created_by=None,
+        )
+    # Second token for u3 would violate one-live-link, so give the dead reset
+    # its own user id — purge doesn't care whether the account exists.
     gen.insert_password_token(
         conn,
-        token_sha256="live",
-        user_id="u1",
-        purpose="invite",
-        ttl_hours=72,
-        created_by=None,
-    )
-    gen.insert_password_token(
-        conn,
-        token_sha256="dead",
-        user_id="u1",
-        purpose="invite",
+        token_sha256="dead-reset",
+        user_id="u4",
+        purpose="reset",
         ttl_hours=-1,
         created_by=None,
     )
     gen.purge_expired_password_tokens(conn)
     remaining = conn.execute(
-        "SELECT token_sha256 FROM datasette_accounts_password_tokens"
+        "SELECT token_sha256 FROM datasette_accounts_password_tokens ORDER BY 1"
     ).fetchall()
-    assert [r[0] for r in remaining] == ["live"]
+    assert [r[0] for r in remaining] == ["dead-invite", "live-invite", "live-reset"]
+
+
+def test_list_password_token_meta_hides_dead_resets_keeps_dead_invites(conn):
+    for uid, name in [("u1", "fay"), ("u2", "gil"), ("u3", "hal")]:
+        gen.insert_user(
+            conn,
+            id=uid,
+            username=name,
+            password_hash="!",
+            is_admin=0,
+            must_change_password=0,
+            pending_approval=0,
+        )
+    for tok, uid, purpose, ttl, creator in [
+        ("t1", "u1", "invite", 72, "u3"),
+        ("t2", "u2", "invite", -1, "cli:ops"),
+        ("t3", "u3", "reset", -1, None),
+    ]:
+        gen.insert_password_token(
+            conn,
+            token_sha256=tok,
+            user_id=uid,
+            purpose=purpose,
+            ttl_hours=ttl,
+            created_by=creator,
+        )
+    meta = {m.user_id: m for m in gen.list_password_token_meta(conn)}
+    # Expired invite stays visible; the expired reset is hidden.
+    assert set(meta) == {"u1", "u2"}
+    # Creator resolves to a username when it is an account id...
+    assert meta["u1"].created_by_username == "hal"
+    # ...and stays raw for synthetic actors.
+    assert meta["u2"].created_by == "cli:ops"
+    assert meta["u2"].created_by_username is None
 
 
 def test_delete_password_tokens_for_user(conn):

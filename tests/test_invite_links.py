@@ -739,3 +739,78 @@ async def test_admin_surfaces_mark_invited_accounts():
     assert r.status_code == 200
     invited = await flags()
     assert invited["nia"] is False
+
+
+@pytest.mark.asyncio
+async def test_admin_rows_carry_link_metadata_and_survive_expiry():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    admin_cookies = await session_cookie(ds, admin_id)
+    await _invite(ds, admin_cookies, "omar")
+
+    async def row(username):
+        listed = await ds.client.post(
+            "/-/admin/api/list", content="{}", headers=JSON, cookies=admin_cookies
+        )
+        return next(u for u in listed.json()["users"] if u["username"] == username)
+
+    # Live invite: metadata present, creator resolved to the minting admin.
+    u = await row("omar")
+    assert u["invited"] is True
+    assert u["invite_expired"] is False
+    assert u["link_purpose"] == "invite"
+    assert u["link_expires_at"] > db.now_iso()
+    assert u["link_created_by"] == "admin"
+    # An account with no outstanding link carries no metadata.
+    a = await row("admin")
+    assert a["invite_expired"] is False
+    assert a["link_purpose"] is None
+
+    # Backdate the token: the invite flips to expired but stays visible —
+    # including across housekeeping, which must not purge lapsed invites
+    # (they are the only record the account has no usable password).
+    await internal.execute_write(
+        "UPDATE datasette_accounts_password_tokens SET expires_at = ?",
+        ["2000-01-01T00:00:00.000+00:00"],
+    )
+    await db.purge_expired_password_tokens(internal)
+    u = await row("omar")
+    assert u["invited"] is False
+    assert u["invite_expired"] is True
+    assert u["link_purpose"] == "invite"
+    assert u["link_expires_at"] == "2000-01-01T00:00:00.000+00:00"
+
+    # Re-minting brings the account back to a live invite.
+    r = await ds.client.post(
+        "/-/admin/api/invite-link",
+        content=json.dumps({"id": u["id"]}),
+        headers=JSON,
+        cookies=admin_cookies,
+    )
+    assert r.status_code == 200
+    u = await row("omar")
+    assert u["invited"] is True
+    assert u["invite_expired"] is False
+
+    # A live reset link surfaces on rows too (a credential in flight)...
+    kim_id = await insert_user(ds, "kim", password="kim-password-1")
+    r = await ds.client.post(
+        "/-/admin/api/reset-link",
+        content=json.dumps({"id": kim_id}),
+        headers=JSON,
+        cookies=admin_cookies,
+    )
+    assert r.status_code == 200
+    k = await row("kim")
+    assert k["link_purpose"] == "reset"
+    assert k["invited"] is False and k["invite_expired"] is False
+
+    # ...but an expired reset link disappears (with or without the purge).
+    await internal.execute_write(
+        "UPDATE datasette_accounts_password_tokens SET expires_at = ? "
+        "WHERE user_id = ?",
+        ["2000-01-01T00:00:00.000+00:00", kim_id],
+    )
+    k = await row("kim")
+    assert k["link_purpose"] is None
