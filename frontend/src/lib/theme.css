@@ -289,6 +289,9 @@
 #app-root .badge-expired {
   color: var(--danger);
 }
+#app-root .badge-current {
+  color: var(--ok);
+}
 
 /* Inline messages */
 #app-root .msg {

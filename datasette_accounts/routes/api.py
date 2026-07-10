@@ -37,20 +37,9 @@ from ..passwords import (
 )
 from ..router import require_actor, require_admin, require_csrf, router
 from ..security import COOKIE_NAME, SIGN_NAMESPACE
-from ..sessions import mint_token, token_sha256
+from ..sessions import current_token_sha, list_own_sessions, mint_token, token_sha256
 
 GENERIC_LOGIN_ERROR = "Invalid username or password"
-
-
-def _current_token_sha(datasette, request):
-    cookie = request.cookies.get(COOKIE_NAME)
-    if not cookie:
-        return None
-    try:
-        raw = datasette.unsign(cookie, SIGN_NAMESPACE)
-    except Exception:
-        return None
-    return token_sha256(raw)
 
 
 def _set_session_cookie(datasette, request, response, raw_token):
@@ -159,7 +148,7 @@ async def authenticate(
 @require_csrf
 async def logout(datasette, request):
     internal = datasette.get_internal_database()
-    token_sha = _current_token_sha(datasette, request)
+    token_sha = current_token_sha(datasette, request)
     if token_sha:
         await db.delete_session(internal, token_sha)
     response = Response.json({"ok": True, "redirect": "/"})
@@ -344,9 +333,21 @@ async def change_password(
 
     new_hash = await ahash_password(body.new_password)
     await db.change_own_password(
-        internal, user["id"], new_hash, _current_token_sha(datasette, request)
+        internal, user["id"], new_hash, current_token_sha(datasette, request)
     )
     return Response.json({"ok": True})
+
+
+@router.POST("/-/account/api/sessions$")
+@require_actor
+async def account_sessions(datasette, request):
+    internal = datasette.get_internal_database()
+    sessions = await list_own_sessions(
+        datasette, request, internal, request.actor["id"]
+    )
+    return Response.json(
+        {"ok": True, "sessions": [s.model_dump() for s in sessions]}
+    )
 
 
 # --------------------------------------------------------------------------

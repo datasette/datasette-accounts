@@ -53,11 +53,26 @@ class AdminPageData(BaseModel):
     registration_enabled: bool = False
 
 
+class OwnSessionRow(BaseModel):
+    token_sha256: str
+    created_at: str
+    expires_at: str
+    last_seen_at: str
+    user_agent: Optional[str] = None
+    ip: Optional[str] = None
+    # True for the session the viewer is currently browsing with (computed
+    # server-side by comparing token_sha256 against the request's own cookie).
+    current: bool = False
+
+
 class AccountPageData(BaseModel):
     id: str
     username: str
     is_admin: bool
     must_change_password: bool
+    # Omitted (stays []) during the forced-password-change state — the account
+    # page renders password-only until the account is in its normal state.
+    sessions: List[OwnSessionRow] = []
 
 
 # --- Capabilities (F1) ---
