@@ -11,6 +11,7 @@ from .base import accounts
 # Import each command module for its registration side effect. Order is
 # irrelevant — AccountsGroup.format_commands sorts the help into fixed sections.
 from . import (  # noqa: E402,F401
+    approve,
     audit,
     bootstrap_admin,
     create,
@@ -25,6 +26,8 @@ from . import (  # noqa: E402,F401
     login_attempts,
     logout,
     promote,
+    registration,
+    reject,
     reset_link,
     reset_password,
     unlock,

@@ -308,6 +308,8 @@ class AccountsGroup(click.Group):
             "Account lifecycle",
             (
                 "list",
+                "approve",
+                "reject",
                 "reset-password",
                 "reset-link",
                 "expire",
@@ -320,7 +322,10 @@ class AccountsGroup(click.Group):
                 "delete",
             ),
         ),
-        ("Inspection & utility", ("audit", "login-attempts", "hash-password")),
+        (
+            "Inspection & utility",
+            ("registration", "audit", "login-attempts", "hash-password"),
+        ),
     )
 
     def list_commands(self, ctx):
