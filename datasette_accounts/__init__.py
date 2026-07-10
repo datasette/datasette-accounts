@@ -367,6 +367,12 @@ def menu_links(datasette, actor):
                     "label": "Login attempts",
                 }
             )
+            links.append(
+                {
+                    "href": datasette.urls.path("/-/admin/audit"),
+                    "label": "Audit trail",
+                }
+            )
             # F2 — admins are acl admins, so link to acl's group + sharing UI
             # when acl is installed.
             if await db.acl_available(datasette.get_internal_database()):

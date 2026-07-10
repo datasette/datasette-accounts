@@ -365,6 +365,25 @@ function buildShots(browser) {
       await ctx.close();
     },
 
+    // The Audit trail admin page: every admin mutation with its actor,
+    // target, and detail chips, filterable by target username/operation
+    // (seeded demo rows, including a CLI actor and a deleted target).
+    audit: async () => {
+      const { ctx, page } = await loginContext(
+        browser,
+        "admin",
+        "/-/admin/audit",
+      );
+      await page
+        .getByRole("heading", { name: "Audit trail" })
+        .waitFor({ timeout: 15_000 });
+      // Wait for the seeded rows (the CLI actor) to render.
+      await page.getByText("cli:ops").first().waitFor();
+      await freezeVolatile(page);
+      await shotClipped(page, out("audit"));
+      await ctx.close();
+    },
+
     // A regular user's own account page (change-password form).
     account: async () => {
       const { ctx, page } = await loginContext(browser, "alice", "/-/account");

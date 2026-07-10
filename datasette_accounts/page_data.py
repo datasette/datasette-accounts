@@ -172,6 +172,32 @@ class SetPasswordPageData(BaseModel):
     # The raw token, echoed back so the completion POST can send it; "" when
     # invalid.
     token: str = ""
+# --- Admin audit trail (accountability sibling of the login-attempts view) ---
+
+
+class AdminAuditRow(BaseModel):
+    id: int
+    timestamp: str
+    operation: str
+    # The ids stay in the payload so the UI can fall back to them when a
+    # username subselect returned NULL (deleted account) or the actor is
+    # synthetic (root, cli:$USER).
+    actor_id: Optional[str] = None
+    actor_username: Optional[str] = None
+    target_id: Optional[str] = None
+    target_username: Optional[str] = None
+    # JSON detail written with the row; NULL for operations without extras.
+    detail: Optional[str] = None
+
+
+class AdminAuditPageData(BaseModel):
+    entries: List[AdminAuditRow]
+    # Distinct operation names present in the trail, for the filter dropdown.
+    operations: List[str]
+    # Initial filters (from the ?username=/?operation= query string), echoed so
+    # the page shows them pre-populated; "" means no filter.
+    filter_username: str = ""
+    filter_operation: str = ""
 
 
 __exports__ = [
@@ -183,6 +209,7 @@ __exports__ = [
     MessagesPageData,
     LoginAttemptsPageData,
     SetPasswordPageData,
+    AdminAuditPageData,
 ]
 
 
@@ -350,3 +377,9 @@ class RegisterRequest(BaseModel):
 
 class SetRegistrationRequest(BaseModel):
     enabled: bool
+class AdminAuditRequest(BaseModel):
+    # Exact-match filters; "" / omitted means unfiltered. `username` is the
+    # target's username, resolved server-side to a target id (unknown → empty
+    # result, not an error).
+    username: str = ""
+    operation: str = ""

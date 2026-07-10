@@ -996,6 +996,24 @@ async def test_set_expiry_api_requires_admin():
     await insert_user(ds, "plain")
     _, cookies = await login(ds, "plain", "password123")
     r = await _set_expiry(ds, cookies, id="whatever", in_days=30)
+# Admin audit-trail page + API
+# --------------------------------------------------------------------------
+
+
+def _page_data(html):
+    """Extract the #pageData JSON embedded in a rendered page shell."""
+    marker = '<script type="application/json" id="pageData">'
+    start = html.index(marker) + len(marker)
+    end = html.index("</script>", start)
+    return json.loads(html[start:end])
+
+
+@pytest.mark.asyncio
+async def test_admin_audit_page_requires_admin():
+    ds = await make_ds()
+    await insert_user(ds, "bob")
+    _, cookies = await login(ds, "bob", "password123")
+    r = await ds.client.get("/-/admin/audit", cookies=cookies)
     assert r.status_code == 403
 
 
@@ -1093,6 +1111,109 @@ async def test_expiry_set_via_api_blocks_login_end_to_end():
         )
     ).single_value()
     assert reason == "expired"
+async def test_admin_audit_page_prefilters_from_query_string():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    internal = ds.get_internal_database()
+    alice_id = await db.create_user(
+        internal, admin_id, "alice", hash_password("password123"), False, False
+    )
+    bob_id = await db.create_user(
+        internal, admin_id, "bob", hash_password("password123"), False, False
+    )
+    await db.disable_user(internal, admin_id, alice_id)
+
+    _, cookies = await login(ds, "admin", "password123")
+    r = await ds.client.get(
+        "/-/admin/audit?username=alice&operation=disable", cookies=cookies
+    )
+    assert r.status_code == 200
+    data = _page_data(r.text)
+    assert data["filter_username"] == "alice"
+    assert data["filter_operation"] == "disable"
+    assert [e["operation"] for e in data["entries"]] == ["disable"]
+    assert data["entries"][0]["target_id"] == alice_id
+    assert data["entries"][0]["target_username"] == "alice"
+    assert data["entries"][0]["actor_username"] == "admin"
+    # The operations dropdown reflects the data, distinct + sorted.
+    assert data["operations"] == ["create", "disable"]
+
+    # Unfiltered: every entry, newest first.
+    r = await ds.client.get("/-/admin/audit", cookies=cookies)
+    data = _page_data(r.text)
+    assert data["filter_username"] == ""
+    assert data["filter_operation"] == ""
+    assert [e["target_id"] for e in data["entries"]] == [alice_id, bob_id, alice_id]
+
+
+@pytest.mark.asyncio
+async def test_admin_audit_api_filters_and_combine():
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    internal = ds.get_internal_database()
+    alice_id = await db.create_user(
+        internal, admin_id, "alice", hash_password("password123"), False, False
+    )
+    bob_id = await db.create_user(
+        internal, admin_id, "bob", hash_password("password123"), False, False
+    )
+    await db.disable_user(internal, admin_id, alice_id)
+    await db.disable_user(internal, admin_id, bob_id)
+
+    _, cookies = await login(ds, "admin", "password123")
+
+    async def query(body):
+        r = await ds.client.post(
+            "/-/admin/api/audit",
+            content=json.dumps(body),
+            headers=JSON,
+            cookies=cookies,
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"]
+        return data["entries"]
+
+    # Username alone (resolved server-side to alice's id).
+    entries = await query({"username": "alice"})
+    assert {e["operation"] for e in entries} == {"create", "disable"}
+    assert all(e["target_id"] == alice_id for e in entries)
+
+    # Operation alone.
+    entries = await query({"operation": "disable"})
+    assert {e["target_id"] for e in entries} == {alice_id, bob_id}
+
+    # AND-combined.
+    entries = await query({"username": "alice", "operation": "disable"})
+    assert len(entries) == 1
+    assert entries[0]["target_id"] == alice_id
+    assert entries[0]["operation"] == "disable"
+
+
+@pytest.mark.asyncio
+async def test_admin_audit_api_unknown_username_yields_empty():
+    ds = await make_ds()
+    await insert_user(ds, "admin", is_admin=True)
+    _, cookies = await login(ds, "admin", "password123")
+    r = await ds.client.post(
+        "/-/admin/api/audit",
+        content=json.dumps({"username": "nobody"}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "entries": []}
+
+
+@pytest.mark.asyncio
+async def test_admin_audit_api_requires_admin():
+    ds = await make_ds()
+    await insert_user(ds, "bob")
+    _, cookies = await login(ds, "bob", "password123")
+    r = await ds.client.post(
+        "/-/admin/api/audit", content="{}", headers=JSON, cookies=cookies
+    )
+    assert r.status_code == 403
 
 
 # --------------------------------------------------------------------------

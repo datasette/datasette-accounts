@@ -86,6 +86,7 @@ def startup(datasette):
         await internal.execute_write_fn(seed_capabilities)
         await internal.execute_write_fn(seed_messages)
         await internal.execute_write_fn(seed_login_attempts)
+        await internal.execute_write_fn(seed_admin_audit)
 
     return inner
 
@@ -122,6 +123,77 @@ def seed_login_attempts(conn):
                 "timestamp": ts,
                 "success": success,
                 "reason": reason,
+            }
+        )
+
+
+# Demo admin-audit rows for the Audit trail admin page. A spread of operations
+# (create / reset-password / toggle-admin / disable / grant-capability /
+# delete) with realistic detail JSON, including a CLI actor and a deleted
+# target ("u-gone" has no users row → the page falls back to the raw id).
+# Timestamps ascend with insert order so the newest sits at the top (the page
+# orders by id DESC).
+# timestamp, operation, actor_id, target_id, detail
+_ADMIN_AUDIT = [
+    (
+        "2026-06-01T12:05:00+00:00",
+        "create",
+        "u-admin",
+        "u-alice",
+        '{"username": "alice", "is_admin": false}',
+    ),
+    (
+        "2026-06-02T09:12:00+00:00",
+        "create",
+        "cli:ops",
+        "u-gone",
+        '{"username": "mallory", "is_admin": false}',
+    ),
+    (
+        "2026-06-14T10:41:00+00:00",
+        "grant-capability",
+        "u-admin",
+        "u-alice",
+        '{"action": "paper-create", "principal_type": "account", "group_id": null}',
+    ),
+    (
+        "2026-06-20T16:03:00+00:00",
+        "reset-password",
+        "u-admin",
+        "u-dave",
+        None,
+    ),
+    (
+        "2026-07-01T08:27:00+00:00",
+        "disable",
+        "u-admin",
+        "u-bob",
+        None,
+    ),
+    (
+        "2026-07-06T18:45:00+00:00",
+        "delete",
+        "cli:ops",
+        "u-gone",
+        None,
+    ),
+]
+
+
+def seed_admin_audit(conn):
+    """Seed demo admin-audit rows (idempotent)."""
+    db = Database(conn)
+    audit = db[accounts_db.ADMIN_AUDIT]
+    if audit.exists() and audit.count > 0:
+        return  # already seeded
+    for ts, operation, actor_id, target_id, detail in _ADMIN_AUDIT:
+        db[accounts_db.ADMIN_AUDIT].insert(
+            {
+                "timestamp": ts,
+                "operation": operation,
+                "actor_id": actor_id,
+                "target_id": target_id,
+                "detail": detail,
             }
         )
 

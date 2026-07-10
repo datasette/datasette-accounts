@@ -458,6 +458,7 @@
                     <button role="menuitem" onclick={() => pick(() => openReset(u))}>Reset password…</button>
                     <button role="menuitem" onclick={() => pick(() => openSessions(u))}>Active sessions…</button>
                     <a role="menuitem" href="/-/admin/login-attempts?username={encodeURIComponent(u.username)}">Login attempts…</a>
+                    <a role="menuitem" href="/-/admin/audit?username={encodeURIComponent(u.username)}">History…</a>
                   </div>
                 {/if}
               </div>
