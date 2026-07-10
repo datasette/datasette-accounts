@@ -63,6 +63,7 @@
   let createOpen = $state(false);
   let newUsername = $state("");
   let newPassword = $state("");
+  let newPasswordConfirm = $state("");
   let newIsAdmin = $state(false);
   // How the new account gets its credentials: a one-time invite link (the
   // user picks their own password), a server-generated password, or one the
@@ -77,6 +78,7 @@
   // Reset-password modal
   let resetTarget = $state<User | null>(null);
   let resetPassword = $state("");
+  let resetPasswordConfirm = $state("");
   let resetGenerate = $state(true);
   let resetError = $state("");
   // The generated password to reveal once after a reset (null while editing).
@@ -110,6 +112,7 @@
   function openCreate() {
     newUsername = "";
     newPassword = "";
+    newPasswordConfirm = "";
     newIsAdmin = false;
     newMode = "invite";
     createError = "";
@@ -133,6 +136,10 @@
       await refresh();
       // Keep the modal open to reveal the one-time invite URL.
       createdLink = { username: newUsername, url: data.url };
+      return;
+    }
+    if (newMode === "set" && newPassword !== newPasswordConfirm) {
+      createError = "Passwords don't match";
       return;
     }
     const body: Record<string, unknown> = { username: newUsername, is_admin: newIsAdmin };
@@ -186,6 +193,10 @@
     const u = resetTarget;
     if (!u) return;
     resetError = "";
+    if (!resetGenerate && resetPassword !== resetPasswordConfirm) {
+      resetError = "Passwords don't match";
+      return;
+    }
     const body: Record<string, unknown> = { id: u.id };
     if (resetGenerate) body.generate = true;
     else body.password = resetPassword;
@@ -198,6 +209,7 @@
       return;
     }
     resetPassword = "";
+    resetPasswordConfirm = "";
     if (data.password) {
       // Keep the modal open to reveal the generated password once.
       resetCred = data.password;
@@ -229,6 +241,7 @@
   function openReset(u: User) {
     resetTarget = u;
     resetPassword = "";
+    resetPasswordConfirm = "";
     resetGenerate = true;
     resetError = "";
     resetCred = null;
@@ -497,7 +510,25 @@
       {#if newMode === "set"}
         <label class="field">
           <span>Initial password</span>
-          <input type="password" bind:value={newPassword} required />
+          <input
+            id="create-new-password"
+            name="new-password"
+            type="password"
+            bind:value={newPassword}
+            autocomplete="new-password"
+            required
+          />
+        </label>
+        <label class="field">
+          <span>Confirm password</span>
+          <input
+            id="create-confirm-password"
+            name="confirm-password"
+            type="password"
+            bind:value={newPasswordConfirm}
+            autocomplete="new-password"
+            required
+          />
         </label>
       {/if}
       <label class="check">
@@ -554,7 +585,26 @@
         <label class="field">
           <span>New password</span>
           <!-- svelte-ignore a11y_autofocus -->
-          <input type="password" bind:value={resetPassword} required autofocus />
+          <input
+            id="reset-new-password"
+            name="new-password"
+            type="password"
+            bind:value={resetPassword}
+            autocomplete="new-password"
+            required
+            autofocus
+          />
+        </label>
+        <label class="field">
+          <span>Confirm password</span>
+          <input
+            id="reset-confirm-password"
+            name="confirm-password"
+            type="password"
+            bind:value={resetPasswordConfirm}
+            autocomplete="new-password"
+            required
+          />
         </label>
       {/if}
     </form>

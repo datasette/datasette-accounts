@@ -16,6 +16,7 @@
 
   let current = $state("");
   let next = $state("");
+  let confirmNext = $state("");
   let message = $state("");
   let error = $state("");
   let busy = $state(false);
@@ -72,9 +73,13 @@
 
   async function submit(e: Event) {
     e.preventDefault();
-    busy = true;
     error = "";
     message = "";
+    if (next !== confirmNext) {
+      error = "Passwords don't match";
+      return;
+    }
+    busy = true;
     const body: Record<string, unknown> = { new_password: next };
     // First-login forced change doesn't ask for the current password again.
     if (!pageData.must_change_password) body.current_password = current;
@@ -146,6 +151,17 @@
         name="new-password"
         type="password"
         bind:value={next}
+        autocomplete="new-password"
+        required
+      />
+    </label>
+    <label class="field">
+      <span>Confirm new password</span>
+      <input
+        id="confirm-password"
+        name="confirm-password"
+        type="password"
+        bind:value={confirmNext}
         autocomplete="new-password"
         required
       />
