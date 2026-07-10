@@ -269,6 +269,12 @@ class RevokeSessionRequest(BaseModel):
     token_sha256: str
 
 
+class RevokeOwnSessionRequest(BaseModel):
+    """Self-service revocation: no user id — always scoped to the caller."""
+
+    token_sha256: str
+
+
 class SessionRow(BaseModel):
     token_sha256: str
     created_at: str

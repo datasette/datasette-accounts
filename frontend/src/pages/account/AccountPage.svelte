@@ -11,9 +11,14 @@
   let error = $state("");
   let busy = $state(false);
 
-  // Sessions are already sorted most-recent-last_seen_at-first by the server;
-  // no revoke / log-out-others here — read-only in this slice.
-  const sessions = pageData.sessions ?? [];
+  type OwnSession = NonNullable<AccountPageData["sessions"]>[number];
+
+  // Sessions arrive sorted most-recent-last_seen_at-first from the server;
+  // the refresh endpoint returns the same shape and order.
+  let sessions = $state<OwnSession[]>(pageData.sessions ?? []);
+  let sessionsError = $state("");
+  let sessionsBusy = $state(false);
+  const hasOthers = $derived(sessions.some((s) => !s.current));
 
   // Render a stored ISO timestamp in the viewer's locale; fall back to the raw
   // value if it can't be parsed.
@@ -23,6 +28,37 @@
     return isNaN(d.getTime())
       ? iso
       : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  }
+
+  async function refreshSessions() {
+    const { data } = await postJSON<{ ok: boolean; sessions?: OwnSession[] }>(
+      "/-/account/api/sessions",
+      {},
+    );
+    if (data.sessions) sessions = data.sessions;
+  }
+
+  async function sessionOp(path: string, body: Record<string, unknown>) {
+    sessionsError = "";
+    sessionsBusy = true;
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(path, body);
+    if (!ok || !data.ok) {
+      sessionsError = data.error || "Operation failed";
+    } else {
+      await refreshSessions();
+    }
+    sessionsBusy = false;
+  }
+
+  async function revoke(token: string) {
+    await sessionOp("/-/account/api/revoke-session", { token_sha256: token });
+  }
+
+  async function logoutOthers() {
+    if (!confirm("Log out all other sessions? Other devices will be signed out.")) {
+      return;
+    }
+    await sessionOp("/-/account/api/logout-others", {});
   }
 
   async function submit(e: Event) {
@@ -103,6 +139,7 @@
   {#if !pageData.must_change_password}
     <div class="card sessions-card">
       <h2>Sessions</h2>
+      {#if sessionsError}<p class="msg msg-error">{sessionsError}</p>{/if}
       {#if sessions.length === 0}
         <p class="muted">No active sessions.</p>
       {:else}
@@ -114,6 +151,7 @@
                 <th>IP</th>
                 <th>Signed in</th>
                 <th>Last seen</th>
+                <th><span class="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
@@ -132,11 +170,29 @@
                   <td>{s.ip ?? "—"}</td>
                   <td class="nowrap">{fmtDate(s.created_at)}</td>
                   <td class="nowrap">{fmtDate(s.last_seen_at)}</td>
+                  <td class="row-actions">
+                    {#if !s.current}
+                      <button
+                        class="btn-sm btn-danger"
+                        disabled={sessionsBusy}
+                        onclick={() => revoke(s.token_sha256)}
+                      >
+                        Revoke
+                      </button>
+                    {/if}
+                  </td>
                 </tr>
               {/each}
             </tbody>
           </table>
         </div>
+        {#if hasOthers}
+          <div class="sessions-foot">
+            <button class="btn-sm btn-danger" disabled={sessionsBusy} onclick={logoutOthers}>
+              Log out other sessions
+            </button>
+          </div>
+        {/if}
       {/if}
     </div>
   {/if}
@@ -213,5 +269,25 @@
   }
   .nowrap {
     white-space: nowrap;
+  }
+  .row-actions {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .sessions-foot {
+    margin-top: 0.9rem;
+    display: flex;
+    justify-content: flex-end;
+  }
+  /* Visually-hidden header text for the actions column. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
   }
 </style>

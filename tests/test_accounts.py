@@ -1072,3 +1072,155 @@ async def test_account_sessions_null_ua_ip_render_as_none():
     null_row = next(s for s in sessions if s["token_sha256"] == "deadbeef" * 8)
     assert null_row["user_agent"] is None
     assert null_row["ip"] is None
+
+
+# --------------------------------------------------------------------------
+# Session list ticket 2 — revoke own sessions + log out everywhere else
+# --------------------------------------------------------------------------
+
+
+def cookie_sha(ds, cookies):
+    """The sessions-table hash for a login cookie."""
+    return token_sha256(ds.unsign(cookies[COOKIE_NAME], SIGN_NAMESPACE))
+
+
+async def actor_resolves(ds, cookies):
+    who = await ds.client.get("/-/actor.json", cookies=cookies)
+    return who.json()["actor"] is not None
+
+
+async def last_audit_row(ds, operation):
+    internal = ds.get_internal_database()
+    rows = await internal.execute(
+        f"SELECT actor_id, target_id FROM {db.ADMIN_AUDIT} "
+        "WHERE operation = ? ORDER BY id DESC LIMIT 1",
+        [operation],
+    )
+    return rows.first()
+
+
+@pytest.mark.asyncio
+async def test_revoke_own_session_kills_it_and_audits():
+    ds = await make_ds()
+    alice_id = await insert_user(ds, "alice")
+    _, cookies1 = await login(ds, "alice", "password123")
+    _, cookies2 = await login(ds, "alice", "password123")
+    r = await ds.client.post(
+        "/-/account/api/revoke-session",
+        content=json.dumps({"token_sha256": cookie_sha(ds, cookies1)}),
+        headers=JSON,
+        cookies=cookies2,
+    )
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # The revoked cookie stops resolving; the caller's stays alive.
+    assert not await actor_resolves(ds, cookies1)
+    assert await actor_resolves(ds, cookies2)
+    audit = await last_audit_row(ds, "revoke-session")
+    assert audit is not None
+    assert (audit["actor_id"], audit["target_id"]) == (alice_id, alice_id)
+
+
+@pytest.mark.asyncio
+async def test_revoke_current_session_rejected():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    _, cookies = await login(ds, "alice", "password123")
+    r = await ds.client.post(
+        "/-/account/api/revoke-session",
+        content=json.dumps({"token_sha256": cookie_sha(ds, cookies)}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 400
+    assert "log out" in r.json()["error"].lower()
+    # The current session survives.
+    assert await actor_resolves(ds, cookies)
+
+
+@pytest.mark.asyncio
+async def test_revoke_foreign_token_is_scoped_noop():
+    ds = await make_ds()
+    alice_id = await insert_user(ds, "alice")
+    await insert_user(ds, "bob")
+    _, alice_cookies = await login(ds, "alice", "password123")
+    _, bob_cookies = await login(ds, "bob", "password123")
+    r = await ds.client.post(
+        "/-/account/api/revoke-session",
+        content=json.dumps({"token_sha256": cookie_sha(ds, alice_cookies)}),
+        headers=JSON,
+        cookies=bob_cookies,
+    )
+    # ok either way — a distinguishing response would be an existence oracle
+    # for other accounts' token hashes.
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # Alice's session survives: the DELETE is scoped to the caller's actor id.
+    assert await actor_resolves(ds, alice_cookies)
+    internal = ds.get_internal_database()
+    count = (
+        await internal.execute(
+            f"SELECT COUNT(*) FROM {db.SESSIONS} WHERE actor_id = ?", [alice_id]
+        )
+    ).single_value()
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_logout_others_keeps_current_session():
+    ds = await make_ds()
+    alice_id = await insert_user(ds, "alice")
+    _, cookies1 = await login(ds, "alice", "password123")
+    _, cookies2 = await login(ds, "alice", "password123")
+    _, cookies3 = await login(ds, "alice", "password123")
+    r = await ds.client.post(
+        "/-/account/api/logout-others", content="{}", headers=JSON, cookies=cookies3
+    )
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # The calling session stays signed in; both others are dead.
+    assert await actor_resolves(ds, cookies3)
+    assert not await actor_resolves(ds, cookies1)
+    assert not await actor_resolves(ds, cookies2)
+    audit = await last_audit_row(ds, "logout-others")
+    assert audit is not None
+    assert (audit["actor_id"], audit["target_id"]) == (alice_id, alice_id)
+
+
+@pytest.mark.asyncio
+async def test_session_mutations_require_actor_and_gates():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    _, cookies = await login(ds, "alice", "password123")
+    revoke_body = json.dumps({"token_sha256": "0" * 64})
+
+    # Anonymous -> 401 (CSRF-clean POSTs, no cookie).
+    r = await ds.client.post(
+        "/-/account/api/revoke-session", content=revoke_body, headers=JSON
+    )
+    assert r.status_code == 401
+    r = await ds.client.post("/-/account/api/logout-others", content="{}", headers=JSON)
+    assert r.status_code == 401
+
+    # GET never mutates: 405 from the POST-only gate (revoke-session needs a
+    # valid body to get past router body-parsing and reach the gate).
+    r = await ds.client.request(
+        "GET",
+        "/-/account/api/revoke-session",
+        content=revoke_body,
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 405
+    r = await ds.client.get("/-/account/api/logout-others", cookies=cookies)
+    assert r.status_code == 405
+
+    # Non-JSON content type fails the CSRF gate.
+    for path, body in [
+        ("/-/account/api/revoke-session", revoke_body),
+        ("/-/account/api/logout-others", "{}"),
+    ]:
+        r = await ds.client.post(
+            path, content=body, headers={"content-type": "text/plain"}, cookies=cookies
+        )
+        assert r.status_code == 403, path
+
+    # The signed-in session is untouched by all of the above.
+    assert await actor_resolves(ds, cookies)

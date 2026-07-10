@@ -511,6 +511,22 @@ async def logout_everywhere(db, actor_id, target_id):
     await db.execute_write_fn(write)
 
 
+async def logout_other_sessions(db, user_id, current_token_sha):
+    """Delete all of a user's sessions except the current one (self-service).
+
+    Unlike the admin-only ``logout_everywhere``, the user pressing the button
+    stays signed in. Audited with the user as both actor and target.
+    """
+
+    def write(conn):
+        gen.delete_other_sessions_for_actor(
+            conn, actor_id=user_id, token_sha256=current_token_sha
+        )
+        _audit(conn, "logout-others", user_id, user_id)
+
+    await db.execute_write_fn(write)
+
+
 async def change_own_password(db, user_id, password_hash, current_token_sha):
     """Set a new password, clear the forced-change flag, revoke OTHER sessions."""
 
