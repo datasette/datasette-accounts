@@ -172,6 +172,8 @@ class SetPasswordPageData(BaseModel):
     # The raw token, echoed back so the completion POST can send it; "" when
     # invalid.
     token: str = ""
+
+
 # --- Admin audit trail (accountability sibling of the login-attempts view) ---
 
 
@@ -377,6 +379,8 @@ class RegisterRequest(BaseModel):
 
 class SetRegistrationRequest(BaseModel):
     enabled: bool
+
+
 class AdminAuditRequest(BaseModel):
     # Exact-match filters; "" / omitted means unfiltered. `username` is the
     # target's username, resolved server-side to a target id (unknown → empty

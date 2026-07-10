@@ -996,24 +996,6 @@ async def test_set_expiry_api_requires_admin():
     await insert_user(ds, "plain")
     _, cookies = await login(ds, "plain", "password123")
     r = await _set_expiry(ds, cookies, id="whatever", in_days=30)
-# Admin audit-trail page + API
-# --------------------------------------------------------------------------
-
-
-def _page_data(html):
-    """Extract the #pageData JSON embedded in a rendered page shell."""
-    marker = '<script type="application/json" id="pageData">'
-    start = html.index(marker) + len(marker)
-    end = html.index("</script>", start)
-    return json.loads(html[start:end])
-
-
-@pytest.mark.asyncio
-async def test_admin_audit_page_requires_admin():
-    ds = await make_ds()
-    await insert_user(ds, "bob")
-    _, cookies = await login(ds, "bob", "password123")
-    r = await ds.client.get("/-/admin/audit", cookies=cookies)
     assert r.status_code == 403
 
 
@@ -1111,6 +1093,31 @@ async def test_expiry_set_via_api_blocks_login_end_to_end():
         )
     ).single_value()
     assert reason == "expired"
+
+
+# --------------------------------------------------------------------------
+# Admin audit-trail page + API
+# --------------------------------------------------------------------------
+
+
+def _page_data(html):
+    """Extract the #pageData JSON embedded in a rendered page shell."""
+    marker = '<script type="application/json" id="pageData">'
+    start = html.index(marker) + len(marker)
+    end = html.index("</script>", start)
+    return json.loads(html[start:end])
+
+
+@pytest.mark.asyncio
+async def test_admin_audit_page_requires_admin():
+    ds = await make_ds()
+    await insert_user(ds, "bob")
+    _, cookies = await login(ds, "bob", "password123")
+    r = await ds.client.get("/-/admin/audit", cookies=cookies)
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_admin_audit_page_prefilters_from_query_string():
     ds = await make_ds()
     admin_id = await insert_user(ds, "admin", is_admin=True)
