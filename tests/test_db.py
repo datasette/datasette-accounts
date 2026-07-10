@@ -380,3 +380,224 @@ async def test_list_user_rows_merges_invited_flag():
     await db.use_password_token(internal, "tok-live", "newhash")
     rows = {r["username"]: r for r in await db.list_user_rows(internal)}
     assert rows["livey"]["invited"] is False
+
+
+# --------------------------------------------------------------------------
+# Account expiry
+# --------------------------------------------------------------------------
+
+
+async def _set_expires_at(internal, user_id, value):
+    await internal.execute_write(
+        f"UPDATE {db.USERS} SET expires_at = ? WHERE id = ?", [value, user_id]
+    )
+
+
+@pytest.mark.asyncio
+async def test_to_user_row_expired_computation():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await db.create_user(
+        internal,
+        actor_id=None,
+        username="alice",
+        password_hash="h",
+        is_admin=False,
+        must_change_password=False,
+    )
+
+    # NULL = never expires.
+    user = await db.get_user_by_id(internal, uid)
+    assert user["expires_at"] is None
+    assert db.to_user_row(user)["expired"] is False
+
+    # A future deadline is not yet expired.
+    await _set_expires_at(internal, uid, "2099-01-01T00:00:00.000+00:00")
+    user = await db.get_user_by_id(internal, uid)
+    assert db.to_user_row(user)["expires_at"] == "2099-01-01T00:00:00.000+00:00"
+    assert db.to_user_row(user)["expired"] is False
+
+    # A past deadline is expired — same lexicographic now_iso() comparison as
+    # `locked`.
+    await _set_expires_at(internal, uid, "2020-01-01T00:00:00.000+00:00")
+    user = await db.get_user_by_id(internal, uid)
+    assert db.to_user_row(user)["expired"] is True
+
+
+@pytest.mark.asyncio
+async def test_last_admin_guard_treats_expired_admin_as_gone():
+    """Two admins, one expired: the expired admin no longer counts, so the
+    guard refuses to demote/disable/delete the only *non-expired* enabled
+    admin — the consequence of ENABLED_ADMIN_PREDICATE that falls out for
+    free once expires_at is part of it.
+    """
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    lapsed = await db.create_user(
+        internal,
+        actor_id=None,
+        username="lapsed",
+        password_hash="h",
+        is_admin=True,
+        must_change_password=False,
+    )
+    live = await db.create_user(
+        internal,
+        actor_id=None,
+        username="live",
+        password_hash="h",
+        is_admin=True,
+        must_change_password=False,
+    )
+    await _set_expires_at(internal, lapsed, "2020-01-01T00:00:00.000+00:00")
+
+    with pytest.raises(db.LastAdminError):
+        await db.toggle_admin(internal, actor_id=None, target_id=live)
+    with pytest.raises(db.LastAdminError):
+        await db.disable_user(internal, actor_id=None, target_id=live)
+    with pytest.raises(db.LastAdminError):
+        await db.delete_user(internal, actor_id=None, target_id=live)
+
+    # The expired admin itself is not "the last admin" from the guard's point
+    # of view (it doesn't count as enabled at all), so operating on it never
+    # raises.
+    await db.toggle_admin(internal, actor_id=None, target_id=lapsed)
+
+
+def test_predicate_matches_queries_sql():
+    """countEnabledAdmins / countOtherEnabledAdmins / selectUserIsEnabledAdmin
+    inline db.ENABLED_ADMIN_PREDICATE literally (codegen needs literal SQL) —
+    grep the checked-in queries.sql for the exact predicate text (whitespace-
+    normalized) so the Python and SQL copies can never drift silently.
+    """
+    import re
+    from pathlib import Path
+
+    queries_path = (
+        Path(__file__).resolve().parent.parent
+        / "datasette_accounts"
+        / "sql"
+        / "queries.sql"
+    )
+    text = re.sub(r"\s+", " ", queries_path.read_text())
+    predicate = re.sub(r"\s+", " ", db.ENABLED_ADMIN_PREDICATE)
+    # Three sites: countEnabledAdmins, countOtherEnabledAdmins,
+    # selectUserIsEnabledAdmin.
+    assert text.count(predicate) == 3
+
+
+async def _create_plain_user(internal, username, is_admin=False):
+    return await db.create_user(
+        internal,
+        actor_id=None,
+        username=username,
+        password_hash="h",
+        is_admin=is_admin,
+        must_change_password=False,
+    )
+
+
+async def _last_audit(internal, target_id):
+    rows = await db.list_admin_audit(internal, target_id=target_id, limit=1)
+    return rows[0]
+
+
+@pytest.mark.asyncio
+async def test_set_user_expiry_at_normalizes_in_sql_and_audits():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await _create_plain_user(internal, "alice")
+
+    # A bare date normalizes to the canonical millisecond-+00:00 form; the
+    # stored value is what set-expiry returns and what the audit row records.
+    stored = await db.set_user_expiry(internal, "admin1", uid, at="2099-01-02")
+    assert stored == "2099-01-02T00:00:00.000+00:00"
+    user = await db.get_user_by_id(internal, uid)
+    assert user["expires_at"] == stored
+
+    audit = await _last_audit(internal, uid)
+    assert audit["operation"] == "set-expiry"
+    assert '"expires_at": "2099-01-02T00:00:00.000+00:00"' in audit["detail"]
+
+
+@pytest.mark.asyncio
+async def test_set_user_expiry_rejects_garbage_and_past_and_bad_days():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await _create_plain_user(internal, "alice")
+
+    with pytest.raises(db.InvalidExpiryError):
+        await db.set_user_expiry(internal, None, uid, at="not a date")
+    with pytest.raises(db.InvalidExpiryError):
+        await db.set_user_expiry(internal, None, uid, at="2020-01-01")
+    with pytest.raises(db.InvalidExpiryError):
+        await db.set_user_expiry(internal, None, uid, in_days=0)
+    with pytest.raises(db.InvalidExpiryError):
+        await db.set_user_expiry(internal, None, uid, in_days=-3)
+    with pytest.raises(ValueError):
+        await db.set_user_expiry(internal, None, uid, at="2099-01-01", in_days=30)
+
+    # None of the failures wrote anything.
+    user = await db.get_user_by_id(internal, uid)
+    assert user["expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_set_user_expiry_in_days_lands_now_plus_n_days():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await _create_plain_user(internal, "alice")
+    stored = await db.set_user_expiry(internal, None, uid, in_days=30)
+    assert TS_RE.match(stored)
+    ahead_days = (_parse(stored) - _now()).total_seconds() / 86400
+    assert 29.99 < ahead_days < 30.01
+
+
+@pytest.mark.asyncio
+async def test_set_user_expiry_clear_and_unknown_target():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    uid = await _create_plain_user(internal, "alice")
+    await db.set_user_expiry(internal, "admin1", uid, in_days=30)
+
+    # Both None clears (returns None, not False) and audits "clear-expiry".
+    result = await db.set_user_expiry(internal, "admin1", uid)
+    assert result is None
+    user = await db.get_user_by_id(internal, uid)
+    assert user["expires_at"] is None
+    audit = await _last_audit(internal, uid)
+    assert audit["operation"] == "clear-expiry"
+
+    # Unknown target: False, no audit row.
+    assert await db.set_user_expiry(internal, None, "ghost", in_days=30) is False
+
+
+@pytest.mark.asyncio
+async def test_set_user_expiry_guards_last_admin_but_clearing_never_does():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    solo = await _create_plain_user(internal, "solo", is_admin=True)
+    plain = await _create_plain_user(internal, "plain")
+
+    # You may not put a fuse on the only enabled admin.
+    with pytest.raises(db.LastAdminError):
+        await db.set_user_expiry(internal, None, solo, in_days=30)
+    with pytest.raises(db.LastAdminError):
+        await db.set_user_expiry(internal, None, solo, at="2099-01-01")
+    user = await db.get_user_by_id(internal, solo)
+    assert user["expires_at"] is None
+
+    # A non-admin is never guarded.
+    await db.set_user_expiry(internal, None, plain, in_days=30)
+
+    # With a second enabled admin the guard passes...
+    other = await _create_plain_user(internal, "other", is_admin=True)
+    stored = await db.set_user_expiry(internal, None, solo, in_days=30)
+    assert stored is not None
+
+    # ...and clearing needs no guard even when the target IS the last admin
+    # (drop the second admin's flag directly to get back to one).
+    await db.toggle_admin(internal, None, other)
+    assert await db.set_user_expiry(internal, None, solo) is None
+    user = await db.get_user_by_id(internal, solo)
+    assert user["expires_at"] is None

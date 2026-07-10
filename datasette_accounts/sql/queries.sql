@@ -44,30 +44,39 @@
 
 -- name: selectUserByUsername :row -> UserRow
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
-       failed_attempts, locked_until, created_at, updated_at, last_login_at
+       failed_attempts, locked_until, created_at, updated_at, last_login_at,
+       expires_at
 FROM datasette_accounts_users
 WHERE username = $username::text;
 
 -- name: selectUserById :row -> UserRow
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
-       failed_attempts, locked_until, created_at, updated_at, last_login_at
+       failed_attempts, locked_until, created_at, updated_at, last_login_at,
+       expires_at
 FROM datasette_accounts_users
 WHERE id = $user_id::text;
 
 -- name: listUsers :rows -> UserRow
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
-       failed_attempts, locked_until, created_at, updated_at, last_login_at
+       failed_attempts, locked_until, created_at, updated_at, last_login_at,
+       expires_at
 FROM datasette_accounts_users
 ORDER BY username;
 
+-- Mirrors db.ENABLED_ADMIN_PREDICATE (kept byte-identical — see
+-- test_predicate_matches_queries_sql). expires_at is checked here, not just
+-- `disabled`, so an expired admin stops counting as one everywhere at once.
 -- name: countEnabledAdmins :value
 SELECT COUNT(*) FROM datasette_accounts_users
-WHERE is_admin = 1 AND disabled = 0;
+WHERE is_admin = 1 AND disabled = 0 AND (expires_at IS NULL OR expires_at >
+    strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00');
 
 -- Count of OTHER enabled admins — the last-admin guard (excludes the target).
+-- Mirrors db.ENABLED_ADMIN_PREDICATE (see test_predicate_matches_queries_sql).
 -- name: countOtherEnabledAdmins :value
 SELECT COUNT(*) FROM datasette_accounts_users
-WHERE is_admin = 1 AND disabled = 0 AND id != $exclude_id::text;
+WHERE is_admin = 1 AND disabled = 0 AND (expires_at IS NULL OR expires_at >
+    strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00') AND id != $exclude_id::text;
 
 -- Does this username already exist? (1 or None) — create/rename collision check.
 -- name: usernameExists :value
@@ -78,9 +87,11 @@ SELECT 1 FROM datasette_accounts_users WHERE username = $username::text;
 SELECT 1 FROM datasette_accounts_users WHERE id = $user_id::text;
 
 -- Is the target an enabled admin? (1/0 or None) — drives the last-admin guard
--- in disable/delete. Mirrors ENABLED_ADMIN_PREDICATE in db.py.
+-- in disable/delete. Mirrors ENABLED_ADMIN_PREDICATE in db.py (see
+-- test_predicate_matches_queries_sql).
 -- name: selectUserIsEnabledAdmin :value
-SELECT is_admin = 1 AND disabled = 0
+SELECT is_admin = 1 AND disabled = 0 AND (expires_at IS NULL OR expires_at >
+    strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00')
 FROM datasette_accounts_users WHERE id = $user_id::text;
 
 -- Current admin/disabled flags for the toggle-admin guard.
@@ -159,6 +170,41 @@ WHERE id = $user_id::text;
 
 -- name: deleteUser
 DELETE FROM datasette_accounts_users WHERE id = $user_id::text;
+
+-- ============================================================================
+-- Account expiry (see plans/account-expiry)
+--
+-- SQL is the only clock: input parsing, offset-to-UTC conversion, relative
+-- deadlines, and the must-be-in-the-future check all happen here. Python only
+-- ferries strings (db.set_user_expiry raises InvalidExpiryError on NULL).
+-- ============================================================================
+
+-- Normalize an admin-supplied timestamp to the canonical millisecond-+00:00
+-- form, or NULL when it is unparseable or not in the future. strftime accepts
+-- the ISO-8601 time-string subset (bare date, ...THH:MM[:SS], optional Z or
+-- ±HH:MM offset — converted to UTC) and returns NULL for anything else, so one
+-- query does validation + normalization in a single place.
+-- name: normalizeFutureTimestamp :value
+SELECT CASE
+    WHEN strftime('%Y-%m-%dT%H:%M:%f', $value::text) || '+00:00'
+         > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+    THEN strftime('%Y-%m-%dT%H:%M:%f', $value::text) || '+00:00'
+END;
+
+-- The relative form: a deadline `days` from now (same printf-modifier
+-- convention as setLockedUntil / insertSession). Positivity is validated in
+-- Python — the one check that isn't a datetime operation.
+-- name: expiryInDays :value
+SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d days', $days::integer))
+       || '+00:00';
+
+-- NULL clears; a non-NULL value has already been normalized by
+-- normalizeFutureTimestamp / expiryInDays inside the same transaction.
+-- name: setUserExpiry
+UPDATE datasette_accounts_users
+SET expires_at = $expires_at::text::,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
 
 -- ============================================================================
 -- Sessions

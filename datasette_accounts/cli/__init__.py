@@ -18,6 +18,7 @@ from . import (  # noqa: E402,F401
     demote,
     disable,
     enable,
+    expire,
     hash_password,
     invite,
     list_accounts,

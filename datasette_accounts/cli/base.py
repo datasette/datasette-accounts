@@ -310,6 +310,7 @@ class AccountsGroup(click.Group):
                 "list",
                 "reset-password",
                 "reset-link",
+                "expire",
                 "promote",
                 "demote",
                 "disable",

@@ -31,15 +31,25 @@ async def make_ds(config=None, **plugin_config):
     return ds
 
 
-async def insert_user(ds, username, is_admin=False, disabled=False):
+async def insert_user(ds, username, is_admin=False, disabled=False, expires_at=None):
     internal = ds.get_internal_database()
     uid = db.new_id()
     ts = db.now_iso()
     await internal.execute_write(
         f"INSERT INTO {db.USERS} (id, username, password_hash, is_admin, disabled, "
-        "must_change_password, failed_attempts, locked_until, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, ?)",
-        [uid, username, hash_password("x"), int(is_admin), int(disabled), ts, ts],
+        "must_change_password, failed_attempts, locked_until, created_at, updated_at, "
+        "expires_at) "
+        "VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, ?, ?)",
+        [
+            uid,
+            username,
+            hash_password("x"),
+            int(is_admin),
+            int(disabled),
+            ts,
+            ts,
+            expires_at,
+        ],
     )
     return uid
 
@@ -297,6 +307,29 @@ async def test_disabled_admin_loses_acl_permission():
     assert not await ds.allowed(action="datasette-acl", actor={"id": admin})
 
 
+@pytest.mark.asyncio
+async def test_expired_admin_loses_admin_permission():
+    from datasette_accounts.router import ADMIN_ACTION
+
+    ds = await make_ds()
+    admin = await insert_user(
+        ds, "admin", is_admin=True, expires_at="2020-01-01T00:00:00.000+00:00"
+    )
+    assert not await ds.allowed(action=ADMIN_ACTION, actor={"id": admin})
+    assert not await ds.allowed(action="datasette-acl", actor={"id": admin})
+
+
+@pytest.mark.asyncio
+async def test_admin_with_future_expiry_keeps_admin_permission():
+    from datasette_accounts.router import ADMIN_ACTION
+
+    ds = await make_ds()
+    admin = await insert_user(
+        ds, "admin", is_admin=True, expires_at="2099-01-01T00:00:00.000+00:00"
+    )
+    assert await ds.allowed(action=ADMIN_ACTION, actor={"id": admin})
+
+
 # --------------------------------------------------------------------------
 # F3 — valid actors exposed to acl
 # --------------------------------------------------------------------------
@@ -307,6 +340,7 @@ async def test_valid_actors_hook_returns_enabled_accounts():
     ds = await make_ds()
     await insert_user(ds, "alice")
     await insert_user(ds, "ghost", disabled=True)
+    await insert_user(ds, "lapsed", expires_at="2020-01-01T00:00:00.000+00:00")
     results = []
     for hook_result in pm.hook.datasette_acl_valid_actors(datasette=ds):
         value = await hook_result() if callable(hook_result) else hook_result
@@ -314,6 +348,7 @@ async def test_valid_actors_hook_returns_enabled_accounts():
     usernames = {r["display"] for r in results if isinstance(r, dict)}
     assert "alice" in usernames
     assert "ghost" not in usernames  # disabled accounts are excluded
+    assert "lapsed" not in usernames  # expired accounts are excluded
 
 
 # --------------------------------------------------------------------------

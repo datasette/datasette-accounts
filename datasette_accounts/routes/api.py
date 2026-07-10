@@ -19,6 +19,7 @@ from ..page_data import (
     RevokeCapabilityRequest,
     RevokeSessionRequest,
     SessionRow,
+    SetExpiryRequest,
     SetSiteMessageRequest,
     TargetRequest,
     UserRow,
@@ -86,20 +87,25 @@ async def authenticate(
 
     # 2/3. Exactly one PBKDF2 verify on every remaining path (dummy on miss).
     # The user-facing error stays generic; the specific reason lives only in the
-    # admin-only audit log. An invited account (no usable password yet) takes
-    # the same dummy-verify branch as no-such-user/disabled — it must be
-    # indistinguishable by response or timing.
+    # admin-only audit log. An invited account (no usable password yet) and an
+    # expired account both take the same dummy-verify branch as no-such-user/
+    # disabled — none of them may be distinguishable by response or timing.
+    expired = bool(user and user["expires_at"] and user["expires_at"] <= db.now_iso())
     has_password = user and user["password_hash"] != UNUSABLE_PASSWORD
-    if user and not user["disabled"] and has_password:
+    if user and not user["disabled"] and not expired and has_password:
         ok = await averify_password(body.password, user["password_hash"])
         reason = "success" if ok else "bad_password"
     else:
         await averify_dummy(body.password)
         ok = False
+        # Precedence when more than one applies (e.g. a disabled account whose
+        # expiry has also passed): disabled > expired > no_password.
         if not user:
             reason = "no_such_user"
         elif user["disabled"]:
             reason = "disabled"
+        elif expired:
+            reason = "expired"
         else:
             reason = "no_password"
 
@@ -504,6 +510,46 @@ async def admin_unlock(datasette, request, body: Annotated[TargetRequest, Body()
     internal = datasette.get_internal_database()
     await db.unlock_user(internal, request.actor["id"], body.id)
     return Response.json({"ok": True})
+
+
+@router.POST("/-/admin/api/set-expiry$")
+@require_admin
+async def admin_set_expiry(
+    datasette, request, body: Annotated[SetExpiryRequest, Body()]
+):
+    """Set, extend, or clear an account's expiry deadline.
+
+    All timestamp handling lives in db.set_user_expiry (which resolves the
+    stored value in SQL) — this route only maps errors to statuses. Clearing
+    (neither value form supplied) needs no last-admin guard.
+    """
+    if body.expires_at is not None and body.in_days is not None:
+        return Response.json(
+            {"ok": False, "error": "Provide either expires_at or in_days, not both"},
+            status=400,
+        )
+    internal = datasette.get_internal_database()
+    try:
+        result = await db.set_user_expiry(
+            internal,
+            request.actor["id"],
+            body.id,
+            at=body.expires_at,
+            in_days=body.in_days,
+        )
+    except db.InvalidExpiryError:
+        return Response.json(
+            {"ok": False, "error": "Expiry must be a valid timestamp in the future"},
+            status=400,
+        )
+    except db.LastAdminError:
+        return Response.json(
+            {"ok": False, "error": "Cannot set an expiry on the last admin"},
+            status=409,
+        )
+    if result is False:  # unknown target id (None means a successful clear)
+        return Response.json({"ok": False, "error": "Unknown account"}, status=404)
+    return Response.json({"ok": True, "expires_at": result})
 
 
 @router.POST("/-/admin/api/list-sessions$")

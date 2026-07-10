@@ -207,6 +207,48 @@
     resetCred = null;
   }
 
+  // Set-expiry modal (row-menu "Set expiry…"): quick relative presets or an
+  // exact local date-time; "Clear expiry" when a deadline is set.
+  let expiryTarget = $state<User | null>(null);
+  let expiryLocal = $state(""); // the datetime-local input's value
+  let expiryError = $state("");
+
+  function openExpiry(u: User) {
+    expiryTarget = u;
+    expiryLocal = "";
+    expiryError = "";
+  }
+
+  async function postExpiry(body: Record<string, unknown>) {
+    const u = expiryTarget;
+    if (!u) return;
+    expiryError = "";
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(
+      "/-/admin/api/set-expiry",
+      { id: u.id, ...body },
+    );
+    if (!ok || !data.ok) {
+      // Surface validation 400s and the last-admin 409 verbatim, like the
+      // reset-password modal does.
+      expiryError = data.error || "Could not update expiry";
+      return;
+    }
+    expiryTarget = null;
+    await refresh();
+  }
+
+  async function submitExpiry(e: Event) {
+    e.preventDefault();
+    if (!expiryLocal) {
+      expiryError = "Choose a date and time";
+      return;
+    }
+    // A datetime-local value ("2026-08-01T17:30") carries no offset. POSTed
+    // raw, SQLite would read it as UTC and silently shift the admin's local
+    // intent — so convert to UTC ISO here, where the browser knows the zone.
+    await postExpiry({ expires_at: new Date(expiryLocal).toISOString() });
+  }
+
   // One-time link modal (row-menu "New invite link…" / "Reset link…").
   let linkTarget = $state<User | null>(null);
   let linkKind = $state<"invite" | "reset">("invite");
@@ -261,6 +303,7 @@
           <th>Role</th>
           <th>Status</th>
           <th>Last sign-in</th>
+          <th>Expires</th>
           <th class="right">Actions</th>
         </tr>
       </thead>
@@ -274,6 +317,7 @@
             <td>
               <div class="status">
                 {#if u.disabled}<span class="badge badge-disabled">disabled</span>{/if}
+                {#if u.expired}<span class="badge badge-expired">expired</span>{/if}
                 {#if u.locked}<span class="badge badge-locked">locked</span>{/if}
                 {#if u.invited}<span class="badge badge-invited">invited</span>{/if}
                 {#if !u.last_login_at}<span class="badge badge-pending">pending</span>{/if}
@@ -284,6 +328,13 @@
                 <span class="lastseen">{fmtDate(u.last_login_at)}</span>
               {:else}
                 <span class="never" title="This account has never signed in.">Never</span>
+              {/if}
+            </td>
+            <td>
+              {#if u.expires_at}
+                <span class="lastseen">{fmtDate(u.expires_at)}</span>
+              {:else}
+                <span class="never" title="This account never expires.">—</span>
               {/if}
             </td>
             <td class="actions">
@@ -308,6 +359,7 @@
                     {#if u.locked}
                       <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/unlock"))}>Unlock</button>
                     {/if}
+                    <button role="menuitem" onclick={() => pick(() => openExpiry(u))}>Set expiry…</button>
                     <div class="sep"></div>
                     {#if u.invited}
                       <button role="menuitem" onclick={() => pick(() => mintLink(u, "invite"))}>New invite link…</button>
@@ -329,7 +381,7 @@
           </tr>
         {/each}
         {#if filtered.length === 0}
-          <tr><td colspan="5" class="empty">No accounts match “{search}”.</td></tr>
+          <tr><td colspan="6" class="empty">No accounts match “{search}”.</td></tr>
         {/if}
       </tbody>
     </table>
@@ -448,6 +500,39 @@
       <button class="btn-sm" onclick={() => (resetTarget = null)}>Cancel</button>
       <button class="btn-primary btn-sm" type="submit" form="reset-form">Reset password</button>
     {/if}
+  {/snippet}
+</Modal>
+
+<!-- Set expiry -->
+<Modal open={expiryTarget !== null} onclose={() => (expiryTarget = null)} title="Set expiry">
+  <form id="expiry-form" onsubmit={submitExpiry}>
+    <p class="lead">
+      Set a deadline for <strong>{expiryTarget?.username}</strong> — past it the account behaves
+      like a disabled one until the expiry is extended or cleared.
+    </p>
+    {#if expiryTarget?.expires_at}
+      <p class="muted current">Currently expires {fmtDate(expiryTarget.expires_at)}.</p>
+    {/if}
+    {#if expiryError}<p class="msg msg-error">{expiryError}</p>{/if}
+    <div class="presets">
+      <button type="button" class="btn-sm" onclick={() => postExpiry({ in_days: 30 })}>
+        In 30 days
+      </button>
+      <button type="button" class="btn-sm" onclick={() => postExpiry({ in_days: 90 })}>
+        In 90 days
+      </button>
+    </div>
+    <label class="field">
+      <span>Or an exact date and time (your local time)</span>
+      <input type="datetime-local" bind:value={expiryLocal} />
+    </label>
+  </form>
+  {#snippet footer()}
+    {#if expiryTarget?.expires_at}
+      <button class="btn-sm btn-danger" onclick={() => postExpiry({})}>Clear expiry</button>
+    {/if}
+    <button class="btn-sm" onclick={() => (expiryTarget = null)}>Cancel</button>
+    <button class="btn-primary btn-sm" type="submit" form="expiry-form">Set expiry</button>
   {/snippet}
 </Modal>
 
@@ -588,6 +673,16 @@
   }
   .check input {
     width: auto;
+  }
+
+  .presets {
+    display: flex;
+    gap: 0.5rem;
+    margin: 0 0 1rem;
+  }
+  .current {
+    margin: -0.5rem 0 1rem;
+    font-size: 0.85rem;
   }
 
   .modes {

@@ -45,8 +45,15 @@ PUBLIC_PRINCIPALS = ("everyone", "authenticated", "anonymous")
 PRINCIPAL_TYPES = ("actor", "group", *PUBLIC_PRINCIPALS)
 
 # Single source of truth for "is an admin": used by both the permission grant
-# SQL and the last-admin guard so the two definitions can never drift.
-ENABLED_ADMIN_PREDICATE = "is_admin = 1 AND disabled = 0"
+# SQL and the last-admin guard so the two definitions can never drift. The
+# same literal text is duplicated (codegen needs literal SQL) inside
+# countEnabledAdmins / countOtherEnabledAdmins / selectUserIsEnabledAdmin in
+# sql/queries.sql — see test_predicate_matches_queries_sql, which greps for
+# this exact string so the two copies can't drift silently.
+ENABLED_ADMIN_PREDICATE = (
+    "is_admin = 1 AND disabled = 0 AND (expires_at IS NULL OR expires_at > "
+    "strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00')"
+)
 
 # Only refresh sessions.last_seen_at when the stored value is older than this,
 # to avoid a write on the internal DB's single write connection every request.
@@ -64,6 +71,11 @@ class UsernameTakenError(Exception):
 class InvalidGrantError(Exception):
     """Raised when a capability grant references an unknown actor/group or a
     principal kind that isn't available (e.g. a group while acl is absent)."""
+
+
+class InvalidExpiryError(Exception):
+    """Raised when a requested account expiry is unparseable, not in the
+    future, or a non-positive day count."""
 
 
 def now_iso() -> str:
@@ -130,6 +142,9 @@ def to_user_row(r):
         "created_at": r["created_at"],
         # NULL until the account's first successful sign-in ("pending").
         "last_login_at": r["last_login_at"],
+        # NULL = never expires. Same lexicographic now_iso() comparison as `locked`.
+        "expires_at": r["expires_at"],
+        "expired": bool(r["expires_at"] and r["expires_at"] <= now_iso()),
     }
 
 
@@ -417,6 +432,54 @@ async def unlock_user(db, actor_id, target_id):
         _audit(conn, "unlock", actor_id, target_id)
 
     await db.execute_write_fn(write)
+
+
+async def set_user_expiry(db, actor_id, target_id, *, at=None, in_days=None):
+    """Set, extend, or clear an account's expiry deadline.
+
+    At most one of ``at`` (an ISO-ish timestamp string) and ``in_days`` may be
+    given; both ``None`` clears the deadline. The stored value is resolved
+    entirely in SQL inside the write transaction — ``at`` is parsed, shifted
+    to UTC, and checked to be in the future by ``normalizeFutureTimestamp``
+    (``InvalidExpiryError`` on NULL), ``in_days`` by ``expiryInDays`` (the
+    ``in_days > 0`` check is the one non-datetime validation, done here).
+
+    Setting (not clearing) a deadline on the last enabled admin raises
+    ``LastAdminError`` — you may not put a fuse on the only admin (an expired
+    last admin is an admin-UI lockout short of the CLI). Returns ``False``
+    when the target id doesn't exist (like ``mint_password_token``), else the
+    stored value (``None`` for a clear).
+    """
+    if at is not None and in_days is not None:
+        raise ValueError("at most one of at / in_days may be given")
+    if in_days is not None and in_days <= 0:
+        raise InvalidExpiryError("in_days must be a positive number of days")
+
+    def write(conn):
+        if not gen.user_id_exists(conn, user_id=target_id):
+            return False
+        if at is not None:
+            value = gen.normalize_future_timestamp(conn, value=at)
+            if value is None:
+                raise InvalidExpiryError(
+                    "expiry must be a valid timestamp in the future"
+                )
+        elif in_days is not None:
+            value = gen.expiry_in_days(conn, days=in_days)
+        else:
+            value = None
+        if value is not None and gen.select_user_is_enabled_admin(
+            conn, user_id=target_id
+        ):
+            _guard_last_admin(conn, exclude_id=target_id)
+        gen.set_user_expiry(conn, expires_at=value, user_id=target_id)
+        if value is not None:
+            _audit(conn, "set-expiry", actor_id, target_id, {"expires_at": value})
+        else:
+            _audit(conn, "clear-expiry", actor_id, target_id)
+        return value
+
+    return await db.execute_write_fn(write)
 
 
 async def revoke_session(db, actor_id, target_id, token_sha):

@@ -285,6 +285,10 @@
 #app-root .badge-invited {
   color: var(--ok);
 }
+/* expired: red — distinct from disabled (grey) and locked (peach) */
+#app-root .badge-expired {
+  color: var(--danger);
+}
 
 /* Inline messages */
 #app-root .msg {

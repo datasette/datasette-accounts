@@ -339,3 +339,66 @@ def test_purge_login_audit_respects_retention(conn):
     gen.purge_login_audit(conn, retention_days=30)
     remaining = gen.list_login_attempts(conn, username=None, ip=None, limit=10)
     assert [r.username for r in remaining] == ["new"]
+
+
+# ==========================================================================
+# Account expiry — SQL-side timestamp normalization (see plans/account-expiry)
+# ==========================================================================
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        # Bare date → midnight UTC, canonical millisecond form.
+        ("2099-01-02", "2099-01-02T00:00:00.000+00:00"),
+        # Seconds-precision, no offset (read as UTC).
+        ("2099-01-02T03:04:05", "2099-01-02T03:04:05.000+00:00"),
+        # Z suffix.
+        ("2099-01-02T03:04:05Z", "2099-01-02T03:04:05.000+00:00"),
+        # A +HH:MM offset is shifted to UTC.
+        ("2099-01-02T03:04:05+02:00", "2099-01-02T01:04:05.000+00:00"),
+        # A -HH:MM offset too.
+        ("2099-01-02T03:04:05-05:30", "2099-01-02T08:34:05.000+00:00"),
+    ],
+)
+def test_normalize_future_timestamp_canonicalizes(conn, value, expected):
+    assert gen.normalize_future_timestamp(conn, value=value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not a date",
+        "2099-13-45",  # parseable-looking garbage
+        "",
+        "2020-01-01",  # in the past
+        "2020-01-01T00:00:00Z",  # in the past, with offset
+    ],
+)
+def test_normalize_future_timestamp_rejects_garbage_and_past(conn, value):
+    assert gen.normalize_future_timestamp(conn, value=value) is None
+
+
+def test_expiry_in_days_is_now_plus_days(conn):
+    value = gen.expiry_in_days(conn, days=30)
+    assert TS_RE.match(value)
+    ahead_days = (_parse(value) - _now()).total_seconds() / 86400
+    assert 29.99 < ahead_days < 30.01
+
+
+def test_set_user_expiry_writes_and_clears(conn):
+    gen.insert_user(
+        conn,
+        id="u1",
+        username="alice",
+        password_hash="h",
+        is_admin=0,
+        must_change_password=0,
+    )
+    gen.set_user_expiry(conn, expires_at="2099-01-02T00:00:00.000+00:00", user_id="u1")
+    row = gen.select_user_by_id(conn, user_id="u1")
+    assert row.expires_at == "2099-01-02T00:00:00.000+00:00"
+    assert TS_RE.match(row.updated_at)
+    # NULL clears.
+    gen.set_user_expiry(conn, expires_at=None, user_id="u1")
+    assert gen.select_user_by_id(conn, user_id="u1").expires_at is None

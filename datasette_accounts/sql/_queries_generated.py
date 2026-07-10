@@ -24,6 +24,7 @@ class UserRow:
     created_at: str
     updated_at: str
     last_login_at: str | None
+    expires_at: str | None
 
 
 @dataclass
@@ -81,7 +82,8 @@ class PasswordTokenRow:
 def select_user_by_username(conn: sqlite3.Connection, username: str) -> UserRow | None:
     sql = """\
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
-       failed_attempts, locked_until, created_at, updated_at, last_login_at
+       failed_attempts, locked_until, created_at, updated_at, last_login_at,
+       expires_at
 FROM datasette_accounts_users
 WHERE username = $username::text;
 """
@@ -94,7 +96,8 @@ WHERE username = $username::text;
 def select_user_by_id(conn: sqlite3.Connection, user_id: str) -> UserRow | None:
     sql = """\
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
-       failed_attempts, locked_until, created_at, updated_at, last_login_at
+       failed_attempts, locked_until, created_at, updated_at, last_login_at,
+       expires_at
 FROM datasette_accounts_users
 WHERE id = $user_id::text;
 """
@@ -107,7 +110,8 @@ WHERE id = $user_id::text;
 def list_users(conn: sqlite3.Connection) -> list[UserRow]:
     sql = """\
 SELECT id, username, password_hash, is_admin, disabled, must_change_password,
-       failed_attempts, locked_until, created_at, updated_at, last_login_at
+       failed_attempts, locked_until, created_at, updated_at, last_login_at,
+       expires_at
 FROM datasette_accounts_users
 ORDER BY username;
 """
@@ -119,7 +123,8 @@ ORDER BY username;
 def count_enabled_admins(conn: sqlite3.Connection) -> Any | None:
     sql = """\
 SELECT COUNT(*) FROM datasette_accounts_users
-WHERE is_admin = 1 AND disabled = 0;
+WHERE is_admin = 1 AND disabled = 0 AND (expires_at IS NULL OR expires_at >
+    strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00');
 """
     params: dict[str, Any] = {}
     cursor = conn.execute(sql, params)
@@ -130,7 +135,8 @@ WHERE is_admin = 1 AND disabled = 0;
 def count_other_enabled_admins(conn: sqlite3.Connection, exclude_id: str) -> Any | None:
     sql = """\
 SELECT COUNT(*) FROM datasette_accounts_users
-WHERE is_admin = 1 AND disabled = 0 AND id != $exclude_id::text;
+WHERE is_admin = 1 AND disabled = 0 AND (expires_at IS NULL OR expires_at >
+    strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00') AND id != $exclude_id::text;
 """
     params = {"exclude_id::text": exclude_id}
     cursor = conn.execute(sql, params)
@@ -156,7 +162,8 @@ def user_id_exists(conn: sqlite3.Connection, user_id: str) -> Any | None:
 
 def select_user_is_enabled_admin(conn: sqlite3.Connection, user_id: str) -> Any | None:
     sql = """\
-SELECT is_admin = 1 AND disabled = 0
+SELECT is_admin = 1 AND disabled = 0 AND (expires_at IS NULL OR expires_at >
+    strftime('%Y-%m-%dT%H:%M:%f','now') || '+00:00')
 FROM datasette_accounts_users WHERE id = $user_id::text;
 """
     params = {"user_id::text": user_id}
@@ -318,6 +325,45 @@ WHERE id = $user_id::text;
 def delete_user(conn: sqlite3.Connection, user_id: str) -> None:
     sql = "DELETE FROM datasette_accounts_users WHERE id = $user_id::text;"
     params = {"user_id::text": user_id}
+    conn.execute(sql, params)
+    return None
+
+
+def normalize_future_timestamp(conn: sqlite3.Connection, value: str) -> Any | None:
+    sql = """\
+SELECT CASE
+    WHEN strftime('%Y-%m-%dT%H:%M:%f', $value::text) || '+00:00'
+         > strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+    THEN strftime('%Y-%m-%dT%H:%M:%f', $value::text) || '+00:00'
+END;
+"""
+    params = {"value::text": value}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def expiry_in_days(conn: sqlite3.Connection, days: int) -> Any | None:
+    sql = """\
+SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d days', $days::integer))
+       || '+00:00';
+"""
+    params = {"days::integer": days}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def set_user_expiry(
+    conn: sqlite3.Connection, expires_at: str | None, user_id: str
+) -> None:
+    sql = """\
+UPDATE datasette_accounts_users
+SET expires_at = $expires_at::text::,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
+"""
+    params = {"expires_at::text::": expires_at, "user_id::text": user_id}
     conn.execute(sql, params)
     return None
 
