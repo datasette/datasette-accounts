@@ -333,6 +333,26 @@ def delete_user(conn: sqlite3.Connection, user_id: str) -> None:
     return None
 
 
+def set_user_approved(conn: sqlite3.Connection, user_id: str) -> None:
+    sql = """\
+UPDATE datasette_accounts_users
+SET pending_approval = 0,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
+"""
+    params = {"user_id::text": user_id}
+    conn.execute(sql, params)
+    return None
+
+
+def count_pending_users(conn: sqlite3.Connection) -> Any | None:
+    sql = "SELECT COUNT(*) FROM datasette_accounts_users WHERE pending_approval = 1;"
+    params: dict[str, Any] = {}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
 def normalize_future_timestamp(conn: sqlite3.Connection, value: str) -> Any | None:
     sql = """\
 SELECT CASE

@@ -274,10 +274,12 @@ def _banner(body, *, tone="info"):
 def top_homepage(datasette, request):
     """Homepage notices:
 
-    1. Bootstrap prompt — while signed in as ``root`` and no enabled admin
+    1. Approval-queue banner — while self-registered accounts are awaiting a
+       verdict, prompt admins to review them. See plans/self-registration.
+    2. Bootstrap prompt — while signed in as ``root`` and no enabled admin
        account exists yet, prompt root to create the first admin (after which
        root is no longer needed). See plans/site-messages.
-    2. The admin-authored ``homepage_signed_out`` message, shown only to
+    3. The admin-authored ``homepage_signed_out`` message, shown only to
        visitors who are not signed in.
     """
 
@@ -285,6 +287,22 @@ def top_homepage(datasette, request):
         actor = getattr(request, "actor", None)
         internal = datasette.get_internal_database()
         bits = []
+
+        if actor and await datasette.allowed(action=ADMIN_ACTION, actor=actor):
+            pending = await db.count_pending_users(internal)
+            if pending:
+                users_url = datasette.urls.path("/-/admin/users")
+                noun = "request is" if pending == 1 else "requests are"
+                bits.append(
+                    _banner(
+                        markupsafe.Markup(
+                            f"<strong>{pending}</strong> account {noun} awaiting "
+                            f'approval. <a href="{markupsafe.escape(users_url)}">'
+                            "Review →</a>"
+                        ),
+                        tone="warn",
+                    )
+                )
 
         if actor and actor.get("id") == "root":
             if await db.count_enabled_admins(internal) == 0:

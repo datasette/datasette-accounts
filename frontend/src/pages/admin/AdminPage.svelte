@@ -37,8 +37,16 @@
     fn();
   }
 
+  // Self-registered accounts awaiting a verdict — rendered in their own
+  // pinned section and excluded from the main table (and its search) so the
+  // two states stay unmistakable.
+  const pending = $derived(users.filter((u) => u.pending_approval));
   const filtered = $derived(
-    users.filter((u) => u.username.toLowerCase().includes(search.trim().toLowerCase())),
+    users.filter(
+      (u) =>
+        !u.pending_approval &&
+        u.username.toLowerCase().includes(search.trim().toLowerCase()),
+    ),
   );
 
   // Render a stored ISO timestamp in the viewer's locale; fall back to the raw
@@ -76,6 +84,9 @@
 
   // Delete-confirm modal
   let deleteTarget = $state<User | null>(null);
+
+  // Reject-confirm modal (approval queue — see plans/self-registration)
+  let rejectTarget = $state<User | null>(null);
 
   // Sessions modal
   let sessionsTarget = $state<User | null>(null);
@@ -153,6 +164,17 @@
     if (!u) return;
     deleteTarget = null;
     if (await op("/-/admin/api/delete", { id: u.id })) await refresh();
+  }
+
+  async function approve(u: User) {
+    if (await op("/-/admin/api/approve", { id: u.id })) await refresh();
+  }
+
+  async function confirmReject() {
+    const u = rejectTarget;
+    if (!u) return;
+    rejectTarget = null;
+    if (await op("/-/admin/api/reject", { id: u.id })) await refresh();
   }
 
   async function submitReset(e: Event) {
@@ -289,6 +311,29 @@
   <AdminNav current="accounts" />
 
   {#if error}<p class="msg msg-error">{error}</p>{/if}
+
+  {#if pending.length > 0}
+    <section class="card pending-queue" aria-label="Awaiting approval">
+      <h2>Awaiting approval</h2>
+      <p class="queue-note">
+        Self-registered account requests — they can't sign in until approved.
+      </p>
+      <ul>
+        {#each pending as u (u.id)}
+          <li>
+            <div class="req">
+              <span class="uname">{u.username}</span>
+              <span class="requested">Requested {fmtDate(u.created_at)}</span>
+            </div>
+            <div class="verdict">
+              <button class="btn-primary btn-sm" onclick={() => approve(u)}>Approve</button>
+              <button class="btn-sm btn-danger" onclick={() => (rejectTarget = u)}>Reject</button>
+            </div>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
 
   <div class="search">
     <span class="ico" aria-hidden="true">⌕</span>
@@ -548,6 +593,18 @@
   {/snippet}
 </Modal>
 
+<!-- Reject confirm (approval queue) -->
+<Modal open={rejectTarget !== null} onclose={() => (rejectTarget = null)} title="Reject request">
+  <p class="lead">
+    Reject the account request from <strong>{rejectTarget?.username}</strong>? This deletes the
+    request. They can submit a new one while signups are open.
+  </p>
+  {#snippet footer()}
+    <button class="btn-sm" onclick={() => (rejectTarget = null)}>Cancel</button>
+    <button class="btn-danger-solid btn-sm" onclick={confirmReject}>Reject request</button>
+  {/snippet}
+</Modal>
+
 <!-- Sessions -->
 <Modal
   open={sessionsTarget !== null}
@@ -582,6 +639,52 @@
   }
   .bar h1 {
     margin: 0;
+  }
+
+  /* Awaiting-approval queue — pinned above the main table with a warn accent
+     so pending verdicts can't be mistaken for regular accounts. */
+  .pending-queue {
+    margin-bottom: 1.25rem;
+    border-left: 4px solid #b45309;
+  }
+  .pending-queue h2 {
+    margin: 0 0 0.25rem;
+    font-size: 1rem;
+  }
+  .queue-note {
+    margin: 0 0 0.75rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .pending-queue ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .pending-queue li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .req {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .requested {
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+  .verdict {
+    display: flex;
+    gap: 0.5rem;
   }
 
   .search {

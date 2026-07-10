@@ -564,6 +564,36 @@ async def admin_unlock(datasette, request, body: Annotated[TargetRequest, Body()
     return Response.json({"ok": True})
 
 
+@router.POST("/-/admin/api/approve$")
+@require_admin
+async def admin_approve(datasette, request, body: Annotated[TargetRequest, Body()]):
+    """Approve a pending self-registered account (see plans/self-registration)."""
+    internal = datasette.get_internal_database()
+    if not await db.approve_user(internal, request.actor["id"], body.id):
+        return Response.json({"ok": False, "error": "Unknown account"}, status=404)
+    return Response.json({"ok": True})
+
+
+@router.POST("/-/admin/api/reject$")
+@require_admin
+async def admin_reject(datasette, request, body: Annotated[TargetRequest, Body()]):
+    """Reject (delete) a pending self-registered account.
+
+    Refusing non-pending targets with a 400 means a mis-aimed reject can
+    never delete an active user — deleting those is admin_delete's job.
+    """
+    internal = datasette.get_internal_database()
+    try:
+        rejected = await db.reject_user(internal, request.actor["id"], body.id)
+    except db.NotPendingError:
+        return Response.json(
+            {"ok": False, "error": "Account is not awaiting approval"}, status=400
+        )
+    if not rejected:
+        return Response.json({"ok": False, "error": "Unknown account"}, status=404)
+    return Response.json({"ok": True})
+
+
 @router.POST("/-/admin/api/set-expiry$")
 @require_admin
 async def admin_set_expiry(

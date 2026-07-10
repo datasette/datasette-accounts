@@ -82,6 +82,11 @@ class InvalidExpiryError(Exception):
     future, or a non-positive day count."""
 
 
+class NotPendingError(Exception):
+    """Raised when rejecting an account that is not awaiting approval — a
+    mis-aimed reject must never delete an active user."""
+
+
 def now_iso() -> str:
     """Current UTC time as millisecond ISO-8601 with a +00:00 offset.
 
@@ -922,5 +927,62 @@ async def register_user(db, username, password_hash, ip):
         )
         _audit(conn, "register", None, user_id, {"username": username, "ip": ip})
         return user_id
+
+    return await db.execute_write_fn(write)
+
+
+async def count_pending_users(db):
+    """How many self-registered accounts are awaiting a verdict.
+
+    Drives the admin homepage banner (and, in a later ticket, the queue cap).
+    """
+    return await db.execute_fn(gen.count_pending_users)
+
+
+async def approve_user(db, actor_id, target_id):
+    """Approve a pending account: flip ``pending_approval`` off + audit.
+
+    Returns ``False`` when the target id doesn't exist (the
+    ``mint_password_token`` pattern), else ``True``. Approving an account
+    that isn't pending is an idempotent no-op — the flag is already the
+    requested value, so no audit noise (matching ``set_registration_enabled``).
+    The existence check runs inside the write transaction, so it can't race
+    a concurrent reject.
+    """
+
+    def write(conn):
+        user = gen.select_user_by_id(conn, user_id=target_id)
+        if user is None:
+            return False
+        if user.pending_approval:
+            gen.set_user_approved(conn, user_id=target_id)
+            _audit(conn, "approve", actor_id, target_id, {"username": user.username})
+        return True
+
+    return await db.execute_write_fn(write)
+
+
+async def reject_user(db, actor_id, target_id):
+    """Reject a pending account: delete the row + audit, keeping the username.
+
+    Returns ``False`` when the target id doesn't exist; raises
+    ``NotPendingError`` when the account exists but isn't awaiting approval —
+    a mis-aimed reject must never delete an active user (the route maps this
+    to a 400). A pending account has no sessions or password tokens, but
+    delete them defensively like ``delete_user`` does. The audit detail
+    carries the username because the row is gone — keep the name findable.
+    """
+
+    def write(conn):
+        user = gen.select_user_by_id(conn, user_id=target_id)
+        if user is None:
+            return False
+        if not user.pending_approval:
+            raise NotPendingError(target_id)
+        gen.delete_sessions_for_actor(conn, actor_id=target_id)
+        gen.delete_password_tokens_for_user(conn, user_id=target_id)
+        gen.delete_user(conn, user_id=target_id)
+        _audit(conn, "reject", actor_id, target_id, {"username": user.username})
+        return True
 
     return await db.execute_write_fn(write)

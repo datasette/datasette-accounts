@@ -426,3 +426,190 @@ async def test_pending_account_rejected_as_grant_target():
             principal_type="actor",
             target_actor_id=user["id"],
         )
+
+
+# --------------------------------------------------------------------------
+# Approval queue (ticket 2): approve / reject + admin UI data + banner
+# --------------------------------------------------------------------------
+
+
+async def register_pending(ds, username="newperson", password="password123"):
+    """Toggle on (if needed), register, return the pending user row."""
+    internal = ds.get_internal_database()
+    await db.set_registration_enabled(internal, "root", True)
+    r = await ds.client.post(
+        "/-/register/api/submit",
+        content=json.dumps({"username": username, "password": password}),
+        headers=JSON,
+    )
+    assert r.status_code == 200
+    return await db.get_user_by_username(internal, username)
+
+
+@pytest.mark.asyncio
+async def test_approve_flips_pending_and_account_can_log_in():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    await insert_user(ds, "boss", is_admin=True)
+    _, cookies = await login(ds, "boss", "password123")
+    user = await register_pending(ds)
+
+    # Pending: login refuses.
+    refused, _ = await login(ds, "newperson", "password123")
+    assert refused.status_code == 401
+
+    r = await ds.client.post(
+        "/-/admin/api/approve",
+        content=json.dumps({"id": user["id"]}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+    approved = await db.get_user_by_username(internal, "newperson")
+    assert approved["pending_approval"] == 0
+
+    audit = (
+        await internal.execute(
+            f"SELECT actor_id, target_id, detail FROM {db.ADMIN_AUDIT} "
+            "WHERE operation = 'approve'"
+        )
+    ).rows
+    assert len(audit) == 1
+    assert audit[0][1] == user["id"]
+
+    # End to end: the account can now sign in with the password it chose.
+    signed_in, session = await login(ds, "newperson", "password123")
+    assert signed_in.status_code == 200
+    assert session
+
+
+@pytest.mark.asyncio
+async def test_reject_deletes_and_audits_username():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    await insert_user(ds, "boss", is_admin=True)
+    _, cookies = await login(ds, "boss", "password123")
+    user = await register_pending(ds)
+
+    r = await ds.client.post(
+        "/-/admin/api/reject",
+        content=json.dumps({"id": user["id"]}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    assert await db.get_user_by_username(internal, "newperson") is None
+
+    # The row is gone, so the audit detail must keep the name findable.
+    audit = (
+        await internal.execute(
+            f"SELECT target_id, detail FROM {db.ADMIN_AUDIT} WHERE operation = 'reject'"
+        )
+    ).rows
+    assert len(audit) == 1
+    assert audit[0][0] == user["id"]
+    assert json.loads(audit[0][1])["username"] == "newperson"
+
+
+@pytest.mark.asyncio
+async def test_reject_non_pending_is_400_and_deletes_nothing():
+    ds = await make_ds()
+    internal = ds.get_internal_database()
+    await insert_user(ds, "boss", is_admin=True)
+    alice_id = await insert_user(ds, "alice")
+    _, cookies = await login(ds, "boss", "password123")
+
+    r = await ds.client.post(
+        "/-/admin/api/reject",
+        content=json.dumps({"id": alice_id}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 400
+    assert r.json() == {"ok": False, "error": "Account is not awaiting approval"}
+    # The mis-aimed reject deleted nothing.
+    assert await db.get_user_by_username(internal, "alice") is not None
+
+
+@pytest.mark.asyncio
+async def test_approve_and_reject_unknown_account_404():
+    ds = await make_ds()
+    await insert_user(ds, "boss", is_admin=True)
+    _, cookies = await login(ds, "boss", "password123")
+    for path in ("/-/admin/api/approve", "/-/admin/api/reject"):
+        r = await ds.client.post(
+            path, content=json.dumps({"id": "ghost"}), headers=JSON, cookies=cookies
+        )
+        assert r.status_code == 404, path
+        assert r.json() == {"ok": False, "error": "Unknown account"}
+
+
+@pytest.mark.asyncio
+async def test_approve_and_reject_require_admin():
+    ds = await make_ds()
+    await insert_user(ds, "alice")  # not an admin
+    _, cookies = await login(ds, "alice", "password123")
+    user = await register_pending(ds)
+    for path in ("/-/admin/api/approve", "/-/admin/api/reject"):
+        r = await ds.client.post(
+            path,
+            content=json.dumps({"id": user["id"]}),
+            headers=JSON,
+            cookies=cookies,
+        )
+        assert r.status_code == 403, path
+
+
+@pytest.mark.asyncio
+async def test_homepage_banner_shown_to_admin_while_queue_non_empty():
+    ds = await make_ds()
+    await insert_user(ds, "boss", is_admin=True)
+    _, cookies = await login(ds, "boss", "password123")
+
+    # Empty queue: no banner.
+    r = await ds.client.get("/", cookies=cookies)
+    assert "awaiting approval" not in r.text
+
+    await register_pending(ds)
+    r = await ds.client.get("/", cookies=cookies)
+    assert "account request is awaiting approval" in r.text
+    assert "/-/admin/users" in r.text
+
+    # Pluralizes with more than one request.
+    await register_pending(ds, username="another")
+    r = await ds.client.get("/", cookies=cookies)
+    assert "account requests are awaiting approval" in r.text
+
+
+@pytest.mark.asyncio
+async def test_homepage_banner_hidden_from_non_admins_and_anonymous():
+    ds = await make_ds()
+    await insert_user(ds, "alice")  # not an admin
+    _, cookies = await login(ds, "alice", "password123")
+    await register_pending(ds)
+
+    signed_in = await ds.client.get("/", cookies=cookies)
+    assert "awaiting approval" not in signed_in.text
+
+    anonymous = await ds.client.get("/")
+    assert "awaiting approval" not in anonymous.text
+
+
+@pytest.mark.asyncio
+async def test_admin_list_includes_pending_rows_with_flag():
+    # The admin page/API must NOT hide pending accounts server-side — the UI
+    # splits them into the "Awaiting approval" section using the flag.
+    ds = await make_ds()
+    await insert_user(ds, "boss", is_admin=True)
+    _, cookies = await login(ds, "boss", "password123")
+    await register_pending(ds)
+
+    listed = await ds.client.post(
+        "/-/admin/api/list", content="{}", headers=JSON, cookies=cookies
+    )
+    users = {u["username"]: u for u in listed.json()["users"]}
+    assert users["newperson"]["pending_approval"] is True
+    assert users["boss"]["pending_approval"] is False

@@ -175,6 +175,18 @@ WHERE id = $user_id::text;
 -- name: deleteUser
 DELETE FROM datasette_accounts_users WHERE id = $user_id::text;
 
+-- Admin approves a self-registered account (see plans/self-registration):
+-- the one-bit verdict flip. Rejection is deleteUser — no tombstones.
+-- name: setUserApproved
+UPDATE datasette_accounts_users
+SET pending_approval = 0,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE id = $user_id::text;
+
+-- Queue size — drives the admin homepage banner (and, later, the queue cap).
+-- name: countPendingUsers :value
+SELECT COUNT(*) FROM datasette_accounts_users WHERE pending_approval = 1;
+
 -- ============================================================================
 -- Account expiry (see plans/account-expiry)
 --
