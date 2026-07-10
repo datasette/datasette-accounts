@@ -1,6 +1,6 @@
 [project]
 name = "datasette-accounts"
-version = "0.0.1a1"
+version = "0.0.1a2"
 description = "Username/password authentication for Datasette with database-backed accounts"
 readme = "README.md"
 license = { text = "Apache-2.0" }
