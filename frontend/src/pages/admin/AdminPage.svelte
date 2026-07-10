@@ -26,6 +26,27 @@
   let search = $state("");
   let openMenu = $state<string | null>(null);
 
+  // Self-registration switch (see plans/self-registration): optimistic flip
+  // with rollback on error, so the header state always chases the server's.
+  let regEnabled = $state(Boolean(pageData.registration_enabled));
+  let regBusy = $state(false);
+
+  async function toggleRegistration() {
+    const next = !regEnabled;
+    regEnabled = next; // optimistic
+    regBusy = true;
+    error = "";
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(
+      "/-/admin/api/set-registration",
+      { enabled: next },
+    );
+    regBusy = false;
+    if (!ok || !data.ok) {
+      regEnabled = !next; // rollback
+      error = data.error || "Could not update self-registration";
+    }
+  }
+
   function toggleMenu(e: Event, id: string) {
     e.stopPropagation();
     openMenu = openMenu === id ? null : id;
@@ -37,8 +58,16 @@
     fn();
   }
 
+  // Self-registered accounts awaiting a verdict — rendered in their own
+  // pinned section and excluded from the main table (and its search) so the
+  // two states stay unmistakable.
+  const pending = $derived(users.filter((u) => u.pending_approval));
   const filtered = $derived(
-    users.filter((u) => u.username.toLowerCase().includes(search.trim().toLowerCase())),
+    users.filter(
+      (u) =>
+        !u.pending_approval &&
+        u.username.toLowerCase().includes(search.trim().toLowerCase()),
+    ),
   );
 
   // Render a stored ISO timestamp in the viewer's locale; fall back to the raw
@@ -76,6 +105,9 @@
 
   // Delete-confirm modal
   let deleteTarget = $state<User | null>(null);
+
+  // Reject-confirm modal (approval queue — see plans/self-registration)
+  let rejectTarget = $state<User | null>(null);
 
   // Sessions modal
   let sessionsTarget = $state<User | null>(null);
@@ -153,6 +185,17 @@
     if (!u) return;
     deleteTarget = null;
     if (await op("/-/admin/api/delete", { id: u.id })) await refresh();
+  }
+
+  async function approve(u: User) {
+    if (await op("/-/admin/api/approve", { id: u.id })) await refresh();
+  }
+
+  async function confirmReject() {
+    const u = rejectTarget;
+    if (!u) return;
+    rejectTarget = null;
+    if (await op("/-/admin/api/reject", { id: u.id })) await refresh();
   }
 
   async function submitReset(e: Event) {
@@ -282,13 +325,59 @@
 <div class="page">
   <header class="bar">
     <h1>Accounts</h1>
-    <button class="btn-primary" onclick={openCreate}>
-      + New account
-    </button>
+    <div class="bar-actions">
+      <div class="reg-toggle">
+        <span class="reg-label" id="reg-label">Self-registration</span>
+        <button
+          class="switch"
+          class:on={regEnabled}
+          role="switch"
+          aria-checked={regEnabled}
+          aria-labelledby="reg-label"
+          disabled={regBusy}
+          onclick={toggleRegistration}
+        >
+          <span class="knob" aria-hidden="true"></span>
+          <span class="state">{regEnabled ? "On" : "Off"}</span>
+        </button>
+      </div>
+      <button class="btn-primary" onclick={openCreate}>
+        + New account
+      </button>
+    </div>
   </header>
+  {#if regEnabled}
+    <p class="reg-note">
+      Self-registration is on — anyone can request an account at
+      <code>/-/register</code>. New requests wait below for your approval.
+    </p>
+  {/if}
   <AdminNav current="accounts" />
 
   {#if error}<p class="msg msg-error">{error}</p>{/if}
+
+  {#if pending.length > 0}
+    <section class="card pending-queue" aria-label="Awaiting approval">
+      <h2>Awaiting approval</h2>
+      <p class="queue-note">
+        Self-registered account requests — they can't sign in until approved.
+      </p>
+      <ul>
+        {#each pending as u (u.id)}
+          <li>
+            <div class="req">
+              <span class="uname">{u.username}</span>
+              <span class="requested">Requested {fmtDate(u.created_at)}</span>
+            </div>
+            <div class="verdict">
+              <button class="btn-primary btn-sm" onclick={() => approve(u)}>Approve</button>
+              <button class="btn-sm btn-danger" onclick={() => (rejectTarget = u)}>Reject</button>
+            </div>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
 
   <div class="search">
     <span class="ico" aria-hidden="true">⌕</span>
@@ -548,6 +637,18 @@
   {/snippet}
 </Modal>
 
+<!-- Reject confirm (approval queue) -->
+<Modal open={rejectTarget !== null} onclose={() => (rejectTarget = null)} title="Reject request">
+  <p class="lead">
+    Reject the account request from <strong>{rejectTarget?.username}</strong>? This deletes the
+    request. They can submit a new one while signups are open.
+  </p>
+  {#snippet footer()}
+    <button class="btn-sm" onclick={() => (rejectTarget = null)}>Cancel</button>
+    <button class="btn-danger-solid btn-sm" onclick={confirmReject}>Reject request</button>
+  {/snippet}
+</Modal>
+
 <!-- Sessions -->
 <Modal
   open={sessionsTarget !== null}
@@ -582,6 +683,122 @@
   }
   .bar h1 {
     margin: 0;
+  }
+  .bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  /* Self-registration switch — an explicit On/Off control with the state
+     spelled out, so it can't be mistaken for a table filter. */
+  .reg-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .reg-label {
+    font-size: 0.85rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.25rem 0.7rem 0.25rem 0.3rem;
+    background: transparent;
+    cursor: pointer;
+  }
+  .switch:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .switch .knob {
+    position: relative;
+    width: 1.7rem;
+    height: 0.95rem;
+    border-radius: 999px;
+    background: var(--border);
+    transition: background 0.15s ease;
+  }
+  .switch .knob::after {
+    content: "";
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: calc(0.95rem - 2px);
+    height: calc(0.95rem - 2px);
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    transition: transform 0.15s ease;
+  }
+  .switch.on .knob {
+    background: var(--ok, #16a34a);
+  }
+  .switch.on .knob::after {
+    transform: translateX(0.75rem);
+  }
+  .switch .state {
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+  .reg-note {
+    margin: -0.5rem 0 1rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .reg-note code {
+    font-size: 0.8rem;
+  }
+
+  /* Awaiting-approval queue — pinned above the main table with a warn accent
+     so pending verdicts can't be mistaken for regular accounts. */
+  .pending-queue {
+    margin-bottom: 1.25rem;
+    border-left: 4px solid #b45309;
+  }
+  .pending-queue h2 {
+    margin: 0 0 0.25rem;
+    font-size: 1rem;
+  }
+  .queue-note {
+    margin: 0 0 0.75rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .pending-queue ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .pending-queue li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .req {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .requested {
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+  .verdict {
+    display: flex;
+    gap: 0.5rem;
   }
 
   .search {

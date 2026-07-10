@@ -14,6 +14,14 @@ class LoginPageData(BaseModel):
     next: str = "/"
     # Optional admin-authored help/contact note (plain text), "" when unset.
     help: str = ""
+    # True while self-registration is open (the runtime DB toggle) — shows the
+    # "Request an account" link under the form. See plans/self-registration.
+    allow_register: bool = False
+
+
+class RegisterPageData(BaseModel):
+    # Optional admin-authored help/contact note, rendered like login_help.
+    help: str = ""
 
 
 class UserRow(BaseModel):
@@ -33,10 +41,16 @@ class UserRow(BaseModel):
     # + enforces it (like `locked`, computed lexicographically against "now").
     expires_at: Optional[str] = None
     expired: bool
+    # True for a self-registered account awaiting an admin's approve/reject
+    # (see plans/self-registration). Distinct from `disabled` — no verdict yet.
+    pending_approval: bool
 
 
 class AdminPageData(BaseModel):
     users: List[UserRow]
+    # Current state of the runtime self-registration toggle, so the header
+    # switch renders with the live value. See plans/self-registration.
+    registration_enabled: bool = False
 
 
 class AccountPageData(BaseModel):
@@ -147,6 +161,7 @@ class SetPasswordPageData(BaseModel):
 
 __exports__ = [
     LoginPageData,
+    RegisterPageData,
     AdminPageData,
     AccountPageData,
     CapabilitiesPageData,
@@ -302,3 +317,15 @@ class ResetLinkResponse(BaseModel):
     # The absolute one-time set-password URL, shown once.
     url: Optional[str] = None
     error: Optional[str] = None
+
+
+# --- Self-registration (see plans/self-registration) ---
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+
+
+class SetRegistrationRequest(BaseModel):
+    enabled: bool

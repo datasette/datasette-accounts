@@ -108,7 +108,9 @@ apply identically. Every mutating command requires `-i/--internal PATH`
 datasette accounts create USERNAME       # --admin, --generate, --password-stdin, --must-change
 datasette accounts invite USERNAME        # create + one-time invite link (--admin, --ttl-hours, --base-url)
 datasette accounts bootstrap-admin NAME   # idempotent first-admin creation
-datasette accounts list                   # --admins / --pending / --locked / --disabled / --expired
+datasette accounts list                   # --admins / --pending / --locked / --disabled / --expired / --awaiting-approval
+datasette accounts approve USERNAME       # approve a self-registered account request
+datasette accounts reject USERNAME        # reject (delete) a pending account request
 datasette accounts reset-password USERNAME
 datasette accounts reset-link USERNAME    # one-time password-reset link (--ttl-hours, --base-url)
 datasette accounts expire USERNAME        # set/clear an expiry deadline (--at, --in-days, --clear)
@@ -117,6 +119,7 @@ datasette accounts disable / enable USERNAME
 datasette accounts unlock USERNAME        # clear lockout counters
 datasette accounts logout USERNAME        # revoke all of a user's sessions
 datasette accounts delete USERNAME --yes
+datasette accounts registration on|off|status  # open/close self-registration (runtime toggle)
 datasette accounts audit                  # the admin-audit trail
 datasette accounts login-attempts         # the login-attempt audit
 datasette accounts hash-password [PASSWORD]
@@ -149,6 +152,8 @@ defaults (a zero-config install works — it just warns about persistence):
 | `audit_retention_days` | int | `90` | delete `login_audit` rows older than this; `0` = keep forever |
 | `invite_ttl_hours` | int | `72` | invite-link lifetime |
 | `reset_link_ttl_hours` | int | `24` | reset-link lifetime |
+| `max_pending_registrations` | int | `20` | refuse new self-registrations while the pending-approval queue is at this size |
+| `registrations_per_ip_per_day` | int | `5` | per-IP daily self-registration cap (uses the client IP, so `trust_proxy_headers` applies) |
 
 ```yaml
 plugins:

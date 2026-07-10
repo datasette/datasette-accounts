@@ -33,6 +33,10 @@ ADMIN_AUDIT = "datasette_accounts_admin_audit"
 CAPABILITY_GRANTS = "datasette_accounts_capability_grants"
 SITE_MESSAGES = "datasette_accounts_site_messages"
 PASSWORD_TOKENS = "datasette_accounts_password_tokens"
+SETTINGS = "datasette_accounts_settings"
+
+# The one settings key this ticket uses — see plans/self-registration.
+REGISTRATION_ENABLED_KEY = "registration_enabled"
 
 # datasette-acl tables we reference (softly) for the "group" principal. We never
 # write them — acl owns them — but we join them to resolve group membership +
@@ -76,6 +80,11 @@ class InvalidGrantError(Exception):
 class InvalidExpiryError(Exception):
     """Raised when a requested account expiry is unparseable, not in the
     future, or a non-positive day count."""
+
+
+class NotPendingError(Exception):
+    """Raised when rejecting an account that is not awaiting approval — a
+    mis-aimed reject must never delete an active user."""
 
 
 def now_iso() -> str:
@@ -145,6 +154,9 @@ def to_user_row(r):
         # NULL = never expires. Same lexicographic now_iso() comparison as `locked`.
         "expires_at": r["expires_at"],
         "expired": bool(r["expires_at"] and r["expires_at"] <= now_iso()),
+        # True for a self-registered account awaiting an admin's verdict — see
+        # plans/self-registration. Admin-created accounts are never pending.
+        "pending_approval": bool(r["pending_approval"]),
     }
 
 
@@ -354,6 +366,7 @@ async def create_user(
             password_hash=password_hash,
             is_admin=1 if is_admin else 0,
             must_change_password=1 if must_change_password else 0,
+            pending_approval=0,
         )
         _audit(
             conn,
@@ -544,6 +557,7 @@ async def create_invited_user(db, actor_id, username, is_admin, token_sha, ttl_h
             password_hash=UNUSABLE_PASSWORD,
             is_admin=1 if is_admin else 0,
             must_change_password=0,
+            pending_approval=0,
         )
         gen.insert_password_token(
             conn,
@@ -723,8 +737,15 @@ async def grant_capability(
 
     def write(conn):
         if principal_type == "actor":
-            if not gen.user_id_exists(conn, user_id=actor_val):
+            # select_user_by_id (not user_id_exists) so a pending account —
+            # invisible to acl and unable to log in — can also be excluded as
+            # a grant target (plans/self-registration). One-bit stricter than
+            # a plain existence check, so no separate query is needed.
+            target_user = gen.select_user_by_id(conn, user_id=actor_val)
+            if target_user is None:
                 raise InvalidGrantError("unknown account")
+            if target_user.pending_approval:
+                raise InvalidGrantError("account is awaiting approval")
         elif principal_type == "group":
             # acl tables are hand-checked: they're not in our schema and may be
             # absent, so we can't codegen these lookups.
@@ -829,5 +850,151 @@ async def set_site_message(db, actor_id, key, body):
             if gen.delete_site_message(conn, key=key) is not None:
                 _audit(conn, "clear-message", actor_id, None, {"key": key})
         return body
+
+    return await db.execute_write_fn(write)
+
+
+# --------------------------------------------------------------------------
+# Self-registration (see plans/self-registration)
+# --------------------------------------------------------------------------
+
+
+async def get_registration_enabled(db):
+    """Whether ``/-/register`` is currently open.
+
+    Mirrors the site_messages absence-is-default convention: a missing row
+    means signups are closed, so a fresh install needs no seed row. Read
+    per-request by the register page, the submit endpoint, and (later) the
+    login page — a single-row PK lookup, same cost as ``login_help``.
+    """
+    value = await db.execute_fn(
+        lambda conn: gen.select_setting(conn, key=REGISTRATION_ENABLED_KEY)
+    )
+    return value == "1"
+
+
+async def set_registration_enabled(db, actor_id, enabled):
+    """Flip the self-registration toggle. Returns the new (bool) state.
+
+    One write tx: upsert ``'1'`` to turn on, delete the row to turn off
+    (absence = off, matching the blank-clears convention used by site
+    messages). No-op — no audit row — when the setting is already in the
+    requested state, so repeat flips from the UI don't spam the audit trail.
+    """
+
+    def write(conn):
+        current = gen.select_setting(conn, key=REGISTRATION_ENABLED_KEY) == "1"
+        if bool(enabled) == current:
+            return current
+        if enabled:
+            gen.upsert_setting(
+                conn, key=REGISTRATION_ENABLED_KEY, value="1", updated_by=actor_id
+            )
+            _audit(conn, "enable-registration", actor_id, None)
+        else:
+            gen.delete_setting(conn, key=REGISTRATION_ENABLED_KEY)
+            _audit(conn, "disable-registration", actor_id, None)
+        return bool(enabled)
+
+    return await db.execute_write_fn(write)
+
+
+async def register_user(db, username, password_hash, ip):
+    """Self-service registration: insert a pending account + audit row.
+
+    One write tx: the same ``UsernameTakenError`` check as ``create_user``,
+    then insert with ``pending_approval = 1`` and ``must_change_password = 0``
+    (the visitor chose their own password, so there is nothing to force a
+    change on). Audited as ``"register"`` with ``actor_id = None`` — no admin
+    acted — and the target is the new account; detail carries the username
+    and originating IP (the per-IP throttle in a later ticket reuses this
+    same row via ``login_audit`` instead, but the admin-audit detail is kept
+    for the audit-trail read).
+    """
+    user_id = new_id()
+
+    def write(conn):
+        if gen.username_exists(conn, username=username):
+            raise UsernameTakenError(username)
+        gen.insert_user(
+            conn,
+            id=user_id,
+            username=username,
+            password_hash=password_hash,
+            is_admin=0,
+            must_change_password=0,
+            pending_approval=1,
+        )
+        _audit(conn, "register", None, user_id, {"username": username, "ip": ip})
+        return user_id
+
+    return await db.execute_write_fn(write)
+
+
+async def count_pending_users(db):
+    """How many self-registered accounts are awaiting a verdict.
+
+    Drives the admin homepage banner and the registration queue cap.
+    """
+    return await db.execute_fn(gen.count_pending_users)
+
+
+async def count_recent_registrations(db, ip):
+    """Registration attempts (successful or refused) from `ip` in the last day.
+
+    Backs the per-IP signup throttle. ``None`` (no resolvable client IP)
+    counts as 0 — the queue cap still applies, and NULL would never equal a
+    stored ip anyway.
+    """
+    if ip is None:
+        return 0
+    return await db.execute_fn(lambda conn: gen.count_recent_registrations(conn, ip=ip))
+
+
+async def approve_user(db, actor_id, target_id):
+    """Approve a pending account: flip ``pending_approval`` off + audit.
+
+    Returns ``False`` when the target id doesn't exist (the
+    ``mint_password_token`` pattern), else ``True``. Approving an account
+    that isn't pending is an idempotent no-op — the flag is already the
+    requested value, so no audit noise (matching ``set_registration_enabled``).
+    The existence check runs inside the write transaction, so it can't race
+    a concurrent reject.
+    """
+
+    def write(conn):
+        user = gen.select_user_by_id(conn, user_id=target_id)
+        if user is None:
+            return False
+        if user.pending_approval:
+            gen.set_user_approved(conn, user_id=target_id)
+            _audit(conn, "approve", actor_id, target_id, {"username": user.username})
+        return True
+
+    return await db.execute_write_fn(write)
+
+
+async def reject_user(db, actor_id, target_id):
+    """Reject a pending account: delete the row + audit, keeping the username.
+
+    Returns ``False`` when the target id doesn't exist; raises
+    ``NotPendingError`` when the account exists but isn't awaiting approval —
+    a mis-aimed reject must never delete an active user (the route maps this
+    to a 400). A pending account has no sessions or password tokens, but
+    delete them defensively like ``delete_user`` does. The audit detail
+    carries the username because the row is gone — keep the name findable.
+    """
+
+    def write(conn):
+        user = gen.select_user_by_id(conn, user_id=target_id)
+        if user is None:
+            return False
+        if not user.pending_approval:
+            raise NotPendingError(target_id)
+        gen.delete_sessions_for_actor(conn, actor_id=target_id)
+        gen.delete_password_tokens_for_user(conn, user_id=target_id)
+        gen.delete_user(conn, user_id=target_id)
+        _audit(conn, "reject", actor_id, target_id, {"username": user.username})
+        return True
 
     return await db.execute_write_fn(write)

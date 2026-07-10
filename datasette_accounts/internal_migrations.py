@@ -185,3 +185,28 @@ def m007_account_expiry(db: Database):
     # canonical millisecond-ISO "now" (same convention as locked_until /
     # sessions.expires_at); enforcement is read-side, no background job.
     db.execute("ALTER TABLE datasette_accounts_users ADD COLUMN expires_at TEXT")
+
+
+@internal_migrations()
+def m008_self_registration(db: Database):
+    # pending_approval: 1 = self-registered, awaiting an admin's
+    # approve/reject. Distinct from disabled (an admin verdict) — pending is
+    # "no verdict yet". Admin-created accounts are never pending.
+    db.execute(
+        "ALTER TABLE datasette_accounts_users"
+        " ADD COLUMN pending_approval INTEGER NOT NULL DEFAULT 0"
+    )
+    # Admin-toggleable runtime settings — the site_messages shape: one row per
+    # known key, absence = the key's safe default, so a fresh install needs no
+    # seed row. First key: 'registration_enabled' ('1' when on). Values are
+    # opaque text; the valid keys live in code, not the schema.
+    db.executescript(
+        """
+        CREATE TABLE datasette_accounts_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT
+        );
+        """
+    )

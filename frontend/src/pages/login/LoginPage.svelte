@@ -65,6 +65,12 @@
       {busy ? "Signing in…" : "Log in"}
     </button>
   </form>
+  {#if pageData.allow_register}
+    <!-- Only while the admin-controlled self-registration toggle is on. -->
+    <p class="register-link">
+      No account? <a href="/-/register">Request an account</a>
+    </p>
+  {/if}
   {#if pageData.help?.trim()}
     <!-- Admin-authored HTML (trusted; only admins can set it). -->
     <p class="help">{@html pageData.help}</p>
@@ -77,6 +83,12 @@
     justify-content: center;
     padding-top: 0.6rem;
     padding-bottom: 0.6rem;
+  }
+  .register-link {
+    margin: 0.9rem 0 0;
+    text-align: center;
+    font-size: 0.88rem;
+    color: var(--muted);
   }
   .help {
     margin: 1rem 0 0;

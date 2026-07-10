@@ -9,13 +9,30 @@ from .base import _db_options, _emit, _open_internal, _run, _table, accounts
 @accounts.command(name="list")
 @click.option("--admins", is_flag=True, help="Only admins.")
 @click.option("--pending", is_flag=True, help="Only never-signed-in accounts.")
+@click.option(
+    "--awaiting-approval",
+    "awaiting_approval",
+    is_flag=True,
+    help="Only self-registered accounts awaiting an admin verdict (distinct "
+    "from --pending, which means never signed in — an approved account that "
+    "hasn't signed in yet is --pending but not --awaiting-approval).",
+)
 @click.option("--locked", is_flag=True, help="Only currently locked-out accounts.")
 @click.option("--disabled", is_flag=True, help="Only disabled accounts.")
 @click.option("--expired", is_flag=True, help="Only expired accounts.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 @_db_options
 def list_users(
-    admins, pending, locked, disabled, expired, as_json, internal, metadata, actor
+    admins,
+    pending,
+    awaiting_approval,
+    locked,
+    disabled,
+    expired,
+    as_json,
+    internal,
+    metadata,
+    actor,
 ):
     """List accounts."""
 
@@ -26,6 +43,8 @@ def list_users(
             rows = [r for r in rows if r["is_admin"]]
         if pending:
             rows = [r for r in rows if r["last_login_at"] is None]
+        if awaiting_approval:
+            rows = [r for r in rows if r["pending_approval"]]
         if locked:
             rows = [r for r in rows if r["locked"]]
         if disabled:
@@ -41,6 +60,7 @@ def list_users(
                     "disabled": "yes" if r["disabled"] else "",
                     "locked": "yes" if r["locked"] else "",
                     "pending": "yes" if r["last_login_at"] is None else "",
+                    "awaiting": "yes" if r["pending_approval"] else "",
                     "last_login": r["last_login_at"] or "",
                     "expires": r["expires_at"] or "",
                 }
@@ -55,6 +75,7 @@ def list_users(
                         "disabled",
                         "locked",
                         "pending",
+                        "awaiting",
                         "last_login",
                         "expires",
                     ],

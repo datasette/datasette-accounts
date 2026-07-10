@@ -22,6 +22,12 @@ DEFAULTS = {
     # --- Invite / reset links (see plans/invite-links) ---
     "invite_ttl_hours": 72,  # invite-link lifetime
     "reset_link_ttl_hours": 24,  # reset-link lifetime
+    # --- Self-registration abuse caps (see plans/self-registration) ---
+    # Both refuse with one generic message that never says which cap tripped.
+    # These are config (deployment policy); the signups on/off switch itself
+    # is runtime DB state, deliberately NOT config.
+    "max_pending_registrations": 20,  # refuse signups while the queue is at cap
+    "registrations_per_ip_per_day": 5,  # per-IP daily cap (client_ip; proxy trust applies)
     # --- Capability grants (F1) / acl bridge (F2) ---
     # Explicit allowlist of grantable global actions; None = auto-discover all
     # global (resource_class=None) actions minus the built-in denylist.
@@ -38,6 +44,48 @@ DEFAULTS = {
 }
 
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+# --------------------------------------------------------------------------
+# Username validation — public registration only
+#
+# Admin-created accounts (create_user, invite) go through no such check:
+# admins are trusted, and existing deployments may already have usernames
+# this rule would reject. The public self-registration surface (see
+# plans/self-registration) needs a rule precisely because anyone can submit
+# it. Loosening this later is easy; tightening it after accounts exist isn't.
+# --------------------------------------------------------------------------
+
+USERNAME_MIN_LENGTH = 3
+USERNAME_MAX_LENGTH = 64
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Case-insensitive: "Root"/"ROOT" would still collide with the bootstrap
+# actor in anything that compares usernames loosely, and blocking the
+# lookalikes closes an obvious impersonation trick.
+_RESERVED_USERNAMES = frozenset({"root"})
+
+
+def validate_username(username):
+    """Return a human-readable rule violation, or None when `username` is valid.
+
+    Same shape as `csrf_error`: a string means reject, None means proceed.
+    Rules: 3-64 characters, `^[A-Za-z0-9][A-Za-z0-9._-]*$` (must start with a
+    letter or digit), and the reserved name `root` (case-insensitively) is
+    rejected.
+    """
+    if not username or not (
+        USERNAME_MIN_LENGTH <= len(username) <= USERNAME_MAX_LENGTH
+    ):
+        return (
+            f"Username must be {USERNAME_MIN_LENGTH}-{USERNAME_MAX_LENGTH} characters"
+        )
+    if not _USERNAME_RE.match(username):
+        return (
+            "Username may only contain letters, numbers, '.', '_', and '-', "
+            "and must start with a letter or number"
+        )
+    if username.lower() in _RESERVED_USERNAMES:
+        return "That username is reserved"
+    return None
 
 
 def config(datasette, key):

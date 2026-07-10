@@ -205,6 +205,11 @@ async def resolve_actor(datasette, request):
         return None
     if user["expires_at"] and user["expires_at"] <= db.now_iso():
         return None
+    # Defense in depth: a pending (self-registered, unapproved) account should
+    # never hold a live session in the first place — see
+    # plans/self-registration — but treat it like `disabled` here too.
+    if user["pending_approval"]:
+        return None
     await db.touch_last_seen(internal, session["token_sha256"], session["last_seen_at"])
     return {
         "id": user["id"],
@@ -239,7 +244,12 @@ def datasette_acl_valid_actors(datasette):
         return [
             {"id": r["id"], "display": r["username"]}
             for r in rows
-            if not r["disabled"] and not (r["expires_at"] and r["expires_at"] <= now)
+            if not r["disabled"]
+            and not (r["expires_at"] and r["expires_at"] <= now)
+            # Pending (self-registered, unapproved) accounts are invisible to
+            # acl's picker/autocomplete until an admin approves them — see
+            # plans/self-registration.
+            and not r["pending_approval"]
         ]
 
     return inner
@@ -264,10 +274,12 @@ def _banner(body, *, tone="info"):
 def top_homepage(datasette, request):
     """Homepage notices:
 
-    1. Bootstrap prompt — while signed in as ``root`` and no enabled admin
+    1. Approval-queue banner — while self-registered accounts are awaiting a
+       verdict, prompt admins to review them. See plans/self-registration.
+    2. Bootstrap prompt — while signed in as ``root`` and no enabled admin
        account exists yet, prompt root to create the first admin (after which
        root is no longer needed). See plans/site-messages.
-    2. The admin-authored ``homepage_signed_out`` message, shown only to
+    3. The admin-authored ``homepage_signed_out`` message, shown only to
        visitors who are not signed in.
     """
 
@@ -275,6 +287,22 @@ def top_homepage(datasette, request):
         actor = getattr(request, "actor", None)
         internal = datasette.get_internal_database()
         bits = []
+
+        if actor and await datasette.allowed(action=ADMIN_ACTION, actor=actor):
+            pending = await db.count_pending_users(internal)
+            if pending:
+                users_url = datasette.urls.path("/-/admin/users")
+                noun = "request is" if pending == 1 else "requests are"
+                bits.append(
+                    _banner(
+                        markupsafe.Markup(
+                            f"<strong>{pending}</strong> account {noun} awaiting "
+                            f'approval. <a href="{markupsafe.escape(users_url)}">'
+                            "Review →</a>"
+                        ),
+                        tone="warn",
+                    )
+                )
 
         if actor and actor.get("id") == "root":
             if await db.count_enabled_admins(internal) == 0:
