@@ -418,6 +418,56 @@ async def test_complete_against_disabled_account_sets_password_but_no_session():
     assert count == 0
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("expires_at", "2000-01-01T00:00:00.000+00:00"),
+        ("pending_approval", 1),
+    ],
+)
+async def test_complete_against_expired_or_pending_account_no_session(column, value):
+    # Completion mirrors authenticate(): an expired or still-pending account
+    # gets its password set (the link proved control) but is never signed in —
+    # otherwise the minted session would outlive the blocked state (e.g. come
+    # back to life when an admin later clears the expiry).
+    ds = await make_ds()
+    admin_id = await insert_user(ds, "admin", is_admin=True)
+    admin_cookies = await session_cookie(ds, admin_id)
+    user_id, token = await _invite(ds, admin_cookies, "iris")
+
+    # Flip the state directly to simulate it changing while the link is
+    # still outstanding (same pattern as the disabled test above).
+    internal = ds.get_internal_database()
+    await internal.execute_write(
+        f"UPDATE {db.USERS} SET {column} = ? WHERE id = ?", [value, user_id]
+    )
+
+    r = await ds.client.post(
+        "/-/set-password/api/complete",
+        content=json.dumps({"token": token, "new_password": "new-password-1"}),
+        headers=JSON,
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "redirect": "/-/login"}
+    assert not r.cookies.get(COOKIE_NAME)
+
+    user = await db.get_user_by_id(internal, user_id)
+    from datasette_accounts.passwords import verify_password
+
+    assert verify_password("new-password-1", user["password_hash"])
+
+    # No session was created, and the account still cannot log in.
+    count = (
+        await internal.execute(
+            f"SELECT COUNT(*) FROM {db.SESSIONS} WHERE actor_id = ?", [user_id]
+        )
+    ).single_value()
+    assert count == 0
+    login_r, _ = await login(ds, "iris", "new-password-1")
+    assert login_r.status_code == 401
+
+
 # --------------------------------------------------------------------------
 # Re-minting (admin/api/invite-link)
 # --------------------------------------------------------------------------

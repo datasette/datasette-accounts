@@ -260,9 +260,14 @@ async def set_password_complete(
         )
 
     user = await db.get_user_by_id(internal, user_id)
-    if not user or user["disabled"]:
-        # The password is set (and every session revoked) but a disabled
-        # account never gets signed in.
+    # Mirror authenticate(): disabled, expired, and pending accounts never get
+    # signed in (and never reach record_login_success, which would clear the
+    # lockout counters). The password is still set and every session revoked —
+    # the link proved control of the account — but a session minted here would
+    # outlive the blocked state (e.g. spring back to life when an admin later
+    # clears the expiry).
+    expired = bool(user and user["expires_at"] and user["expires_at"] <= db.now_iso())
+    if not user or user["disabled"] or expired or user["pending_approval"]:
         return Response.json({"ok": True, "redirect": datasette.urls.path("/-/login")})
 
     # Otherwise: the link just proved control of the account — sign them in
@@ -551,18 +556,11 @@ async def admin_reset_password(
     )
     if error:
         return error
-    # A manually-supplied reset must differ from the target's current password.
-    # (A generated one is random — skip the extra KDF verify.)
-    if not generated:
-        target = await db.get_user_by_id(internal, body.id)
-        if target and await averify_password(plaintext, target["password_hash"]):
-            return Response.json(
-                {
-                    "ok": False,
-                    "error": "New password must be different from the current one",
-                },
-                status=400,
-            )
+    # Deliberately NO differs-from-current check here (unlike change_password):
+    # verifying an admin-supplied plaintext against the target's stored hash
+    # would hand admins an oracle for testing guesses against a user's real
+    # password. Resetting to the same value is harmless anyway — sessions and
+    # outstanding links are still revoked.
     password_hash = await ahash_password(plaintext)
     await db.reset_password(internal, request.actor["id"], body.id, password_hash)
     result = {"ok": True}

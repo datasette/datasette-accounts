@@ -607,10 +607,14 @@ async def test_change_password_rejects_reuse():
 
 
 @pytest.mark.asyncio
-async def test_admin_reset_rejects_same_password():
+async def test_admin_reset_same_password_no_oracle():
+    # Deliberately NO differs-from-current check on the admin path: a 400 for
+    # "same password" would let an admin test guesses against a user's real
+    # password. Resetting to the same value succeeds and still revokes sessions.
     ds = await make_ds()
     await insert_user(ds, "admin", is_admin=True)
     bob_id = await insert_user(ds, "bob")
+    _, bob_cookies = await login(ds, "bob", "password123")
     _, cookies = await login(ds, "admin", "password123")
     r = await ds.client.post(
         "/-/admin/api/reset-password",
@@ -618,8 +622,15 @@ async def test_admin_reset_rejects_same_password():
         headers=JSON,
         cookies=cookies,
     )
-    assert r.status_code == 400
-    assert "different" in r.json()["error"].lower()
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+    internal = ds.get_internal_database()
+    count = (
+        await internal.execute(
+            f"SELECT COUNT(*) FROM {db.SESSIONS} WHERE actor_id=?", [bob_id]
+        )
+    ).single_value()
+    assert count == 0
 
 
 @pytest.mark.asyncio
