@@ -6,6 +6,8 @@ then enabled by writing its settings row directly (the write helpers arrive in
 ticket 05).
 """
 
+import json
+import re
 import types
 
 import pytest
@@ -24,8 +26,13 @@ from datasette_accounts.providers import (
     read_state,
 )
 from datasette_accounts.security import COOKIE_NAME
+from datasette_accounts.sessions import mint_token, token_sha256
 
 JSON = {"content-type": "application/json"}
+
+PAGE_DATA_RE = re.compile(
+    r'<script type="application/json" id="pageData">(.*?)</script>', re.S
+)
 
 
 async def make_ds(**plugin_config):
@@ -107,9 +114,7 @@ class EchoProvider(AuthProvider):
                 provider_key="echo",
                 response_mode=request.args.get("mode") or "json",
             )
-        return Response.json(
-            {"ok": True, "subpath": subpath, "method": request.method}
-        )
+        return Response.json({"ok": True, "subpath": subpath, "method": request.method})
 
 
 class _KeyProvider(AuthProvider):
@@ -244,9 +249,7 @@ async def test_post_with_csrf_reaches_handle(register_provider):
     provider = register_provider(EchoProvider())
     ds = await make_ds()
     await _enable_provider(ds, "echo")
-    r = await ds.client.post(
-        "/-/login/provider/echo/boom", content="{}", headers=JSON
-    )
+    r = await ds.client.post("/-/login/provider/echo/boom", content="{}", headers=JSON)
     assert r.status_code == 200
     assert provider.calls == [("POST", "boom")]
 
@@ -390,7 +393,9 @@ async def test_finish_login_local_redirect_mode(register_provider):
         ({}, True, "pending_approval"),
     ],
 )
-async def test_finish_login_local_gates_refuse(register_provider, kwargs, pending, reason):
+async def test_finish_login_local_gates_refuse(
+    register_provider, kwargs, pending, reason
+):
     register_provider(EchoProvider())
     ds = await make_ds()
     await _enable_provider(ds, "echo")
@@ -405,3 +410,218 @@ async def test_finish_login_local_gates_refuse(register_provider, kwargs, pendin
     assert r.json()["ok"] is False
     assert await _session_count(ds) == 0
     assert await _last_audit_reason(ds) == reason
+
+
+# --------------------------------------------------------------------------
+# Password provider — the built-in provider (ticket 02)
+# --------------------------------------------------------------------------
+
+
+async def _disable_provider(ds, key):
+    internal = ds.get_internal_database()
+    await internal.execute_write(
+        f"INSERT OR REPLACE INTO {db.SETTINGS} (key, value, updated_at) "
+        "VALUES (?, '0', ?)",
+        [f"provider:{key}:enabled", db.now_iso()],
+    )
+
+
+def _page_data(resp):
+    m = PAGE_DATA_RE.search(resp.text)
+    assert m, "no #pageData script tag found"
+    return json.loads(m.group(1))
+
+
+@pytest.mark.asyncio
+async def test_password_disabled_takes_login_surface_offline():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    internal = ds.get_internal_database()
+    await db.set_registration_enabled(internal, "root", True)
+    await _disable_provider(ds, "password")
+
+    # The login page reports the disabled state (frontend drops the form — 06).
+    page = await ds.client.get("/-/login")
+    assert _page_data(page)["password_enabled"] is False
+
+    # The canonical authenticate endpoint 404s before any KDF work.
+    r = await ds.client.post(
+        "/-/login/api/authenticate",
+        content=json.dumps({"username": "alice", "password": "password123"}),
+        headers=JSON,
+    )
+    assert r.status_code == 404
+    assert not r.cookies.get(COOKIE_NAME)
+
+    # The uniformity mount for password is dead too (same 404 as any disabled).
+    mount = await ds.client.get("/-/login/provider/password/start")
+    assert mount.status_code == 404
+
+    # Registration is closed even though the signups toggle is on: a disabled
+    # password provider means no password signups at all.
+    assert (await ds.client.get("/-/register")).status_code == 404
+    sub = await ds.client.post(
+        "/-/register/api/submit",
+        content=json.dumps({"username": "newperson", "password": "password123"}),
+        headers=JSON,
+    )
+    assert sub.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_invite_completion_works_while_password_disabled():
+    # An invite/reset link is an admin act; completing one stays available even
+    # when password login is disabled (design §8 / M2).
+    ds = await make_ds()
+    await _disable_provider(ds, "password")
+    internal = ds.get_internal_database()
+    raw = mint_token()
+    await db.create_invited_user(
+        internal, "root", "invitee", False, token_sha256(raw), 72
+    )
+
+    r = await ds.client.post(
+        "/-/set-password/api/complete",
+        content=json.dumps({"token": raw, "new_password": "brand-new-pass1"}),
+        headers=JSON,
+    )
+    assert r.status_code == 200
+    # Response shape is unchanged (no must_change_password key added).
+    assert r.json() == {"ok": True, "redirect": "/"}
+    # A real session was minted despite password login being off.
+    assert r.cookies.get(COOKIE_NAME)
+    assert await _session_count(ds) == 1
+
+
+@pytest.mark.asyncio
+async def test_password_reenable_takes_effect_without_restart():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    await _disable_provider(ds, "password")
+    off = await ds.client.post(
+        "/-/login/api/authenticate",
+        content=json.dumps({"username": "alice", "password": "password123"}),
+        headers=JSON,
+    )
+    assert off.status_code == 404
+
+    # Flip the runtime row back to '1' — no restart, same ds instance.
+    await _enable_provider(ds, "password")
+    on = await ds.client.post(
+        "/-/login/api/authenticate",
+        content=json.dumps({"username": "alice", "password": "password123"}),
+        headers=JSON,
+    )
+    assert on.status_code == 200
+    assert on.json()["ok"] is True
+    assert on.cookies.get(COOKIE_NAME)
+
+
+# --------------------------------------------------------------------------
+# finish_login / mount — hardening (security review of ticket 01)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_state_cookie_flags():
+    ds = await make_ds()
+    resp = _FakeResponse()
+    make_state(ds, _FakeRequest(scheme="https"), resp, provider="echo", next="/x")
+    _value, kw = resp.cookies[STATE_COOKIE]
+    assert kw["httponly"] is True
+    assert kw["samesite"] == "lax"
+    # scheme https + secure_cookie "auto" → Secure set.
+    assert kw["secure"] is True
+    # provider_state_ttl_minutes default 10 → 600s.
+    assert kw["max_age"] == 600
+    assert kw["path"] == "/"
+
+
+@pytest.mark.asyncio
+async def test_finish_login_nonexistent_user_refuses(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    await _enable_provider(ds, "echo")
+    r = await ds.client.get(
+        "/-/login/provider/echo/finish?uid=does-not-exist&mode=json"
+    )
+    assert r.status_code == 403
+    assert r.json()["ok"] is False
+    assert await _session_count(ds) == 0
+    assert await _last_audit_reason(ds) == "no_such_user"
+
+
+@pytest.mark.asyncio
+async def test_finish_login_revalidates_malicious_next_on_consumption():
+    # The state's `next` is validated at creation AND re-validated here — an
+    # off-origin target collapses to "/" even if it slipped into the state.
+    ds = await make_ds()
+    uid = await insert_user(ds, "alice")
+    resp = await finish_login(
+        ds,
+        _FakeRequest(),
+        LocalIdentity(uid),
+        provider_key="echo",
+        response_mode="redirect",
+        state={"n": "https://evil.example/pwn"},
+    )
+    assert resp.status == 302
+    assert resp.headers["Location"] == "/"
+    assert await _session_count(ds) == 1
+
+
+def _cookie_set(resp, name):
+    """A live (non-clearing) Set-Cookie for `name`?"""
+    return any(
+        h.startswith(name + "=") and "Max-Age=0" not in h
+        for h in resp._set_cookie_headers
+    )
+
+
+def _cookie_cleared(resp, name):
+    return any(
+        h.startswith(name + "=") and "Max-Age=0" in h for h in resp._set_cookie_headers
+    )
+
+
+@pytest.mark.asyncio
+async def test_finish_login_clears_state_and_sets_session_on_success():
+    ds = await make_ds()
+    uid = await insert_user(ds, "alice")
+    resp = await finish_login(
+        ds,
+        _FakeRequest(),
+        LocalIdentity(uid),
+        provider_key="echo",
+        response_mode="json",
+    )
+    assert _cookie_cleared(resp, STATE_COOKIE)
+    assert _cookie_set(resp, COOKIE_NAME)
+
+
+@pytest.mark.asyncio
+async def test_refuse_clears_state_but_not_session():
+    ds = await make_ds()
+    uid = await insert_user(ds, "blocked", disabled=True)
+    resp = await finish_login(
+        ds,
+        _FakeRequest(),
+        LocalIdentity(uid),
+        provider_key="echo",
+        response_mode="json",
+    )
+    assert resp.status == 403
+    # State cookie is cleared on refusal...
+    assert _cookie_cleared(resp, STATE_COOKIE)
+    # ...but the session cookie is neither set nor cleared (no session touched).
+    assert not any(h.startswith(COOKIE_NAME + "=") for h in resp._set_cookie_headers)
+
+
+@pytest.mark.asyncio
+async def test_head_request_dispatches_to_provider(register_provider):
+    provider = register_provider(EchoProvider())
+    ds = await make_ds()
+    await _enable_provider(ds, "echo")
+    r = await ds.client.head("/-/login/provider/echo/ping")
+    assert r.status_code == 200
+    assert provider.calls == [("HEAD", "ping")]

@@ -51,6 +51,7 @@ async def login_page(datasette, request):
         next=next_value,
         help=help_text,
         allow_register=await db.get_registration_enabled(internal),
+        password_enabled=await db.get_provider_enabled(internal, "password"),
     ).model_dump()
     return await _render(
         datasette, request, "src/pages/login/index.ts", "Log in", page_data
@@ -62,9 +63,12 @@ async def register_page(datasette, request):
     # 404 (not e.g. a signed-out redirect) while signups are closed — the
     # page's existence isn't advertised any differently than a route that
     # was never registered. Re-checked on submit too, since the toggle can
-    # flip between page load and submit.
+    # flip between page load and submit. A disabled password provider also
+    # closes signups (design §8), regardless of the registration toggle.
     internal = datasette.get_internal_database()
-    if not await db.get_registration_enabled(internal):
+    if not await db.get_provider_enabled(
+        internal, "password"
+    ) or not await db.get_registration_enabled(internal):
         raise NotFound("Not found")
     if request.actor:
         return Response.redirect(datasette.urls.path("/"))
@@ -149,9 +153,7 @@ async def admin_page(datasette, request):
     internal = datasette.get_internal_database()
     rows = await db.list_user_rows(internal)
     users = [UserRow(**r) for r in rows]
-    page_data = AdminPageData(
-        users=users, viewer_id=request.actor["id"]
-    ).model_dump()
+    page_data = AdminPageData(users=users, viewer_id=request.actor["id"]).model_dump()
     return await _render(
         datasette, request, "src/pages/admin/index.ts", "Accounts", page_data
     )

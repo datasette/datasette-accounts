@@ -191,6 +191,7 @@ def startup(datasette):
         # invalid keys fail startup loudly — a misconfigured auth surface must
         # not boot half-working (design §3).
         from . import providers as providers_mod
+        from .providers.password import PasswordProvider
 
         collected = []
         for result in pm.hook.datasette_accounts_auth_providers(datasette=datasette):
@@ -198,10 +199,10 @@ def startup(datasette):
                 result = await result
             collected.extend(result or [])
         registry = {}
-        for provider in [providers_mod.PasswordProvider(), *collected]:
-            if provider.key != "password" and not providers_mod.KEY_RE.match(
-                provider.key
-            ):
+        for provider in [PasswordProvider(), *collected]:
+            # "password" matches KEY_RE like any other key, so it is validated
+            # the same way; the duplicate check below still protects the built-in.
+            if not providers_mod.KEY_RE.match(provider.key):
                 raise RuntimeError(f"Invalid auth provider key: {provider.key!r}")
             if provider.key in registry:
                 raise RuntimeError(f"Duplicate auth provider key: {provider.key!r}")

@@ -17,6 +17,10 @@ class LoginPageData(BaseModel):
     # True while self-registration is open (the runtime DB toggle) — shows the
     # "Request an account" link under the form. See plans/self-registration.
     allow_register: bool = False
+    # True while the built-in password provider is enabled (the runtime DB
+    # toggle). When false, the page renders no username/password form — see
+    # plans/auth-providers. Enabled by default (absent settings row).
+    password_enabled: bool = True
 
 
 class RegisterPageData(BaseModel):

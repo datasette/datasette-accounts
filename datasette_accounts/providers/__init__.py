@@ -13,16 +13,15 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-import itsdangerous
 from datasette import Response
 
-from . import db, security
-from .security import COOKIE_NAME, SIGN_NAMESPACE
-from .sessions import mint_token, token_sha256
+from .. import db, security
+from ..security import COOKIE_NAME, SIGN_NAMESPACE
+from ..sessions import mint_token, token_sha256
 
 # Provider keys: lowercase slug, must start with an alphanumeric. "password" is
-# reserved for the built-in provider (it bypasses the charset check so the label
-# stays stable, but the registry still rejects a duplicate).
+# reserved for the built-in provider; it matches KEY_RE like any other key, so
+# the registry validates it the same way and simply rejects a *duplicate*.
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 # Signed-state cookie + namespace, and the attribute the registry lives on.
@@ -71,19 +70,9 @@ class ExternalIdentity:
     display_name: str | None = None  # audit detail only; we store no profile
 
 
-class PasswordProvider(AuthProvider):
-    """Built-in username/password provider — always first in the registry.
-
-    This ticket ships only the stub: the mounted surface points back at the
-    canonical `/-/login` page. Ticket 02 moves the real login/register/
-    set-password flow in here and makes it delegate to finish_login.
-    """
-
-    key = "password"
-    label = "Username & password"
-
-    async def handle(self, datasette, request, subpath: str):
-        return Response.redirect(datasette.urls.path("/-/login"))
+# The built-in username/password provider lives in providers/password.py so the
+# login/register/set-password code it owns can move there without a circular
+# import against this module's finish_login.
 
 
 # --------------------------------------------------------------------------
@@ -145,7 +134,10 @@ def read_state(datasette, request, *, provider):
         return None
     try:
         payload = datasette.unsign(cookie, STATE_NAMESPACE)
-    except itsdangerous.BadData:
+    except Exception:
+        # Any unsign failure (bad signature, malformed value, wrong type) is
+        # treated as "no valid state" — never a 500. Mirrors resolve_actor's
+        # broad guard around unsign in __init__.py.
         return None
     if not isinstance(payload, dict):
         return None
@@ -188,6 +180,42 @@ def set_session_cookie(datasette, request, response, raw_token):
         samesite="lax",
         secure=security.should_secure_cookie(datasette, request),
     )
+
+
+def clear_stale_core_actor_cookie(request, response):
+    # This plugin owns auth via its own session cookie, but a leftover core
+    # `ds_actor` cookie (e.g. an old root login) makes Datasette's base
+    # template render its own Log out button next to ours. Signing in or out
+    # through our flows asserts accounts-based identity, so drop the stale
+    # core cookie whenever it is present. (Moved here from routes/api.py so
+    # every mint path — including finish_login — evicts it uniformly.)
+    if "ds_actor" in request.cookies:
+        response.set_cookie("ds_actor", "", max_age=0, path="/", expires=0)
+
+
+async def mint_session(datasette, request, response, user):
+    """The single session mint: stamp login success, create the session row,
+    and set the session + stale-core cookies on ``response``.
+
+    This is exactly authenticate()'s historical success half minus the periodic
+    housekeeping, so callers that want housekeeping (finish_login) run it around
+    this and callers that never did (set-password completion) don't. The one
+    ``db.create_session`` call in the plugin lives here.
+    """
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+    await db.record_login_success(internal, user["id"])
+    raw_token = mint_token()
+    await db.create_session(
+        internal,
+        user["id"],
+        token_sha256(raw_token),
+        security.config(datasette, "session_ttl_days"),
+        request.headers.get("user-agent"),
+        ip,
+    )
+    set_session_cookie(datasette, request, response, raw_token)
+    clear_stale_core_actor_cookie(request, response)
 
 
 # --------------------------------------------------------------------------
@@ -251,26 +279,6 @@ async def _finish_local(datasette, request, identity, *, response_mode, state):
         )
         return _refuse(response_mode)
 
-    # Mint — identical to authenticate()'s success half.
-    await db.record_login_success(internal, user["id"])
-    raw_token = mint_token()
-    await db.create_session(
-        internal,
-        user["id"],
-        token_sha256(raw_token),
-        security.config(datasette, "session_ttl_days"),
-        request.headers.get("user-agent"),
-        ip,
-    )
-    await db.delete_expired_sessions(internal)
-    await db.purge_expired_password_tokens(internal)
-    await db.purge_login_audit(
-        internal, security.config(datasette, "audit_retention_days")
-    )
-    await db.purge_admin_audit(
-        internal, security.config(datasette, "admin_audit_retention_days")
-    )
-
     base_url = datasette.setting("base_url") or "/"
     # `next` from the state was validated when the state was created; re-validate
     # on consumption (belt and braces).
@@ -287,7 +295,18 @@ async def _finish_local(datasette, request, identity, *, response_mode, state):
         )
     else:
         response = Response.redirect(redirect)
-    set_session_cookie(datasette, request, response, raw_token)
+
+    # Mint — identical to authenticate()'s success half (mint + the periodic
+    # housekeeping it runs). mint_session sets the session + stale-core cookies.
+    await mint_session(datasette, request, response, user)
+    await db.delete_expired_sessions(internal)
+    await db.purge_expired_password_tokens(internal)
+    await db.purge_login_audit(
+        internal, security.config(datasette, "audit_retention_days")
+    )
+    await db.purge_admin_audit(
+        internal, security.config(datasette, "admin_audit_retention_days")
+    )
     clear_state_cookie(response)
     return response
 

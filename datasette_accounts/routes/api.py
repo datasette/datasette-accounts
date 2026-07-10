@@ -30,20 +30,27 @@ from ..page_data import (
     UserRow,
 )
 from ..passwords import (
-    UNUSABLE_PASSWORD,
     PasswordLengthError,
     ahash_password,
-    averify_dummy,
     averify_password,
     check_password_length,
     generate_password,
 )
-from ..providers import set_session_cookie
+
+# Re-exported so providers.password.verify_credentials can reach the KDF through
+# this module (the timing-discipline tests monkeypatch api.averify_dummy, so the
+# verify half must call it via the api module rather than its own binding).
+from ..passwords import averify_dummy  # noqa: F401
+from ..providers import (
+    LocalIdentity,
+    clear_stale_core_actor_cookie,
+    finish_login,
+    mint_session,
+)
+from ..providers import password
 from ..router import require_actor, require_admin, require_csrf, router
 from ..security import COOKIE_NAME
 from ..sessions import current_token_sha, list_own_sessions, mint_token, token_sha256
-
-GENERIC_LOGIN_ERROR = "Invalid username or password"
 
 
 # --------------------------------------------------------------------------
@@ -56,98 +63,29 @@ GENERIC_LOGIN_ERROR = "Invalid username or password"
 async def authenticate(
     datasette, request, body: Annotated[AuthenticateRequest, Body()]
 ):
+    # Thin wrapper (design §8): the password provider owns the verify half; the
+    # single mint chokepoint (finish_login) owns the success half. Path unchanged.
     internal = datasette.get_internal_database()
-    ip = security.client_ip(datasette, request)
-    threshold = security.config(datasette, "lockout_threshold")
-    minutes = security.config(datasette, "lockout_minutes")
-
-    user = await db.get_user_by_username(internal, body.username)
-
-    # 1. Locked account: refuse before hashing (the only hash-skipping path).
-    if user and user["locked_until"] and user["locked_until"] > db.now_iso():
-        await db.record_login_attempt(internal, body.username, ip, False, "locked")
-        return Response.json({"ok": False, "error": GENERIC_LOGIN_ERROR}, status=429)
-
-    # 2/3. Exactly one PBKDF2 verify on every remaining path (dummy on miss).
-    # The user-facing error stays generic; the specific reason lives only in the
-    # admin-only audit log. An invited account (no usable password yet), an
-    # expired account, and a self-registered account still awaiting approval
-    # all take the same dummy-verify branch as no-such-user/disabled — none of
-    # them may be distinguishable by response or timing. Telling the *visitor*
-    # their account is pending is the register page's job, not the login form's
-    # — the login form must not confirm account state to a third party.
-    expired = bool(user and user["expires_at"] and user["expires_at"] <= db.now_iso())
-    pending = bool(user and user["pending_approval"])
-    has_password = user and user["password_hash"] != UNUSABLE_PASSWORD
-    if user and not user["disabled"] and not expired and not pending and has_password:
-        ok = await averify_password(body.password, user["password_hash"])
-        reason = "success" if ok else "bad_password"
-    else:
-        await averify_dummy(body.password)
-        ok = False
-        # Precedence when more than one applies (e.g. a disabled account whose
-        # expiry has also passed): disabled > expired > pending_approval >
-        # no_password.
-        if not user:
-            reason = "no_such_user"
-        elif user["disabled"]:
-            reason = "disabled"
-        elif expired:
-            reason = "expired"
-        elif pending:
-            reason = "pending_approval"
-        else:
-            reason = "no_password"
-
-    await db.record_login_attempt(internal, body.username, ip, ok, reason)
-
-    if not ok:
-        if user:
-            await db.register_failed_attempt(internal, user["id"], threshold, minutes)
-        return Response.json({"ok": False, "error": GENERIC_LOGIN_ERROR}, status=401)
-
-    # Success.
-    await db.record_login_success(internal, user["id"])
-    raw_token = mint_token()
-    await db.create_session(
-        internal,
-        user["id"],
-        token_sha256(raw_token),
-        security.config(datasette, "session_ttl_days"),
-        request.headers.get("user-agent"),
-        ip,
+    # A disabled password provider takes the whole canonical login surface
+    # offline (404, same as the mount) before any DB/KDF work runs.
+    if not await db.get_provider_enabled(internal, "password"):
+        raise NotFound("Not found")
+    result = await password.verify_credentials(
+        datasette, request, body.username, body.password
     )
-    await db.delete_expired_sessions(internal)
-    await db.purge_expired_password_tokens(internal)
-    await db.purge_login_audit(
-        internal, security.config(datasette, "audit_retention_days")
+    if isinstance(result, Response):
+        # A 429/401 error response to send verbatim (verify already audited it).
+        return result
+    # Verify passed → mint through finish_login. `next` is threaded via the
+    # state dict so finish_login re-validates it server-side, exactly as before.
+    return await finish_login(
+        datasette,
+        request,
+        LocalIdentity(result["id"]),
+        provider_key="password",
+        response_mode="json",
+        state={"n": body.next},
     )
-    await db.purge_admin_audit(
-        internal, security.config(datasette, "admin_audit_retention_days")
-    )
-
-    base_url = datasette.setting("base_url") or "/"
-    redirect = security.validate_next(body.next, base_url)
-    response = Response.json(
-        {
-            "ok": True,
-            "redirect": redirect,
-            "must_change_password": bool(user["must_change_password"]),
-        }
-    )
-    set_session_cookie(datasette, request, response, raw_token)
-    _clear_stale_core_actor_cookie(request, response)
-    return response
-
-
-def _clear_stale_core_actor_cookie(request, response):
-    # This plugin owns auth via its own session cookie, but a leftover core
-    # `ds_actor` cookie (e.g. an old root login) makes Datasette's base
-    # template render its own Log out button next to ours. Signing in or out
-    # through our flows asserts accounts-based identity, so drop the stale
-    # core cookie whenever it is present.
-    if "ds_actor" in request.cookies:
-        response.set_cookie("ds_actor", "", max_age=0, path="/", expires=0)
 
 
 @router.POST("/-/logout/perform$")
@@ -159,7 +97,7 @@ async def logout(datasette, request):
         await db.delete_session(internal, token_sha)
     response = Response.json({"ok": True, "redirect": "/"})
     response.set_cookie(COOKIE_NAME, "", max_age=0, path="/", expires=0)
-    _clear_stale_core_actor_cookie(request, response)
+    clear_stale_core_actor_cookie(request, response)
     return response
 
 
@@ -171,63 +109,9 @@ async def logout(datasette, request):
 @router.POST("/-/register/api/submit$")
 @require_csrf
 async def register_submit(datasette, request, body: Annotated[RegisterRequest, Body()]):
-    internal = datasette.get_internal_database()
-    # Re-checked here, not just on the GET page — the toggle can flip between
-    # page load and submit. No audit row for this refusal: an unauthenticated
-    # probe against a closed endpoint isn't a registration attempt.
-    if not await db.get_registration_enabled(internal):
-        raise NotFound("Not found")
-
-    ip = security.client_ip(datasette, request)
-
-    # Abuse caps (fail generic and closed), checked before validation/hashing
-    # so a capped client can't spend our KDF time: a per-IP daily cap counted
-    # from the 'register' rows already in login_audit, and a global
-    # pending-queue cap. One message for both — which limit tripped is an
-    # abuse signal we don't reveal. 429 (not 400): the request itself is
-    # well-formed; the refusal is about volume/state, the same semantics as
-    # the lockout path's 429.
-    per_ip_cap = security.config(datasette, "registrations_per_ip_per_day")
-    queue_cap = security.config(datasette, "max_pending_registrations")
-    if (
-        await db.count_recent_registrations(internal, ip) >= per_ip_cap
-        or await db.count_pending_users(internal) >= queue_cap
-    ):
-        # Refused attempts are recorded too — repeat abuse counts toward the
-        # per-IP cap rather than probing it for free.
-        await db.record_login_attempt(internal, body.username, ip, False, "register")
-        return Response.json(
-            {
-                "ok": False,
-                "error": "Registration is currently closed — try again later.",
-            },
-            status=429,
-        )
-
-    error = security.validate_username(body.username)
-    if error:
-        return Response.json({"ok": False, "error": error}, status=400)
-    try:
-        check_password_length(
-            body.password, security.config(datasette, "password_min_length")
-        )
-    except PasswordLengthError as e:
-        return Response.json({"ok": False, "error": str(e)}, status=400)
-
-    password_hash = await ahash_password(body.password)
-    try:
-        await db.register_user(internal, body.username, password_hash, ip)
-    except db.UsernameTakenError:
-        # Yes, this confirms the username is taken — a signup form cannot
-        # avoid that. It's exactly why accounts stay pending and invisible
-        # until a human approves them.
-        await db.record_login_attempt(internal, body.username, ip, False, "register")
-        return Response.json(
-            {"ok": False, "error": "Username already taken"}, status=409
-        )
-    await db.record_login_attempt(internal, body.username, ip, True, "register")
-    # No session: the account is pending, so nothing to sign in to yet.
-    return Response.json({"ok": True})
+    # Thin wrapper (design §8): the register logic lives with the password
+    # provider. Path unchanged.
+    return await password.register(datasette, request, body)
 
 
 # --------------------------------------------------------------------------
@@ -240,6 +124,10 @@ async def register_submit(datasette, request, body: Annotated[RegisterRequest, B
 async def set_password_complete(
     datasette, request, body: Annotated[CompleteSetPasswordRequest, Body()]
 ):
+    # No provider-enabled gate here on purpose: an invite/reset link is an admin
+    # act, so completing one keeps working even while password login is disabled
+    # (design §8 / M2). The mounted login surface being off never strands an
+    # admin-issued link.
     internal = datasette.get_internal_database()
     ip = security.client_ip(datasette, request)
 
@@ -272,20 +160,12 @@ async def set_password_complete(
         return Response.json({"ok": True, "redirect": datasette.urls.path("/-/login")})
 
     # Otherwise: the link just proved control of the account — sign them in
-    # exactly like a successful authenticate() call.
-    await db.record_login_success(internal, user["id"])
-    raw_token = mint_token()
-    await db.create_session(
-        internal,
-        user["id"],
-        token_sha256(raw_token),
-        security.config(datasette, "session_ttl_days"),
-        request.headers.get("user-agent"),
-        ip,
-    )
+    # exactly like a successful authenticate() call. We build the historical
+    # response and mint through the shared chokepoint (providers.mint_session),
+    # NOT finish_login: finish_login's JSON body adds a must_change_password key,
+    # which would change this endpoint's long-standing {"ok", "redirect"} shape.
     response = Response.json({"ok": True, "redirect": "/"})
-    set_session_cookie(datasette, request, response, raw_token)
-    _clear_stale_core_actor_cookie(request, response)
+    await mint_session(datasette, request, response, user)
     return response
 
 
