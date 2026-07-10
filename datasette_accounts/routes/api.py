@@ -7,6 +7,8 @@ from datasette_plugin_router import Body
 
 from .. import db, grantable, messages, security
 from ..page_data import (
+    AdminAuditRequest,
+    AdminAuditRow,
     AuthenticateRequest,
     ChangePasswordRequest,
     CompleteSetPasswordRequest,
@@ -130,6 +132,9 @@ async def authenticate(
     await db.purge_expired_password_tokens(internal)
     await db.purge_login_audit(
         internal, security.config(datasette, "audit_retention_days")
+    )
+    await db.purge_admin_audit(
+        internal, security.config(datasette, "admin_audit_retention_days")
     )
 
     base_url = datasette.setting("base_url") or "/"
@@ -740,6 +745,35 @@ async def admin_login_attempts(
         for r in rows
     ]
     return Response.json({"ok": True, "attempts": [a.model_dump() for a in attempts]})
+
+
+async def audit_entries(internal, username, operation):
+    """Filtered admin-audit rows as AdminAuditRow models.
+
+    Shared by the audit page and its API endpoint so the two can't drift.
+    Filtering by username resolves to a target id here in the route layer; an
+    unknown username yields an empty result rather than an error (the account
+    may have been deleted — its history is then reachable via operation
+    filters and detail text).
+    """
+    target_id = None
+    if username:
+        user = await db.get_user_by_username(internal, username)
+        if user is None:
+            return []
+        target_id = user["id"]
+    rows = await db.list_admin_audit(internal, target_id, operation or None)
+    return [
+        AdminAuditRow(**{k: r.get(k) for k in AdminAuditRow.model_fields}) for r in rows
+    ]
+
+
+@router.POST("/-/admin/api/audit$")
+@require_admin
+async def admin_audit(datasette, request, body: Annotated[AdminAuditRequest, Body()]):
+    internal = datasette.get_internal_database()
+    entries = await audit_entries(internal, body.username, body.operation)
+    return Response.json({"ok": True, "entries": [e.model_dump() for e in entries]})
 
 
 # --------------------------------------------------------------------------

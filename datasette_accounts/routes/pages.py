@@ -10,6 +10,7 @@ from datasette import NotFound, Response
 from .. import db, grantable, messages, security
 from ..page_data import (
     AccountPageData,
+    AdminAuditPageData,
     AdminPageData,
     CapabilitiesPageData,
     LoginAttemptRow,
@@ -22,6 +23,7 @@ from ..page_data import (
 )
 from ..router import require_admin_page, router
 from ..sessions import list_own_sessions, token_sha256
+from .api import audit_entries
 
 
 async def _render(datasette, request, entrypoint, page_title, page_data):
@@ -202,5 +204,30 @@ async def login_attempts_page(datasette, request):
         request,
         "src/pages/login-attempts/index.ts",
         "Login attempts",
+        page_data,
+    )
+
+
+@router.GET("/-/admin/audit$")
+@require_admin_page
+async def admin_audit_page(datasette, request):
+    internal = datasette.get_internal_database()
+    # The Accounts row menu links here with ?username=…; ?operation= is also
+    # honoured.
+    username = request.args.get("username") or ""
+    operation = request.args.get("operation") or ""
+    entries = await audit_entries(internal, username, operation)
+    operations = await db.list_admin_audit_operations(internal)
+    page_data = AdminAuditPageData(
+        entries=entries,
+        operations=operations,
+        filter_username=username,
+        filter_operation=operation,
+    ).model_dump()
+    return await _render(
+        datasette,
+        request,
+        "src/pages/audit/index.ts",
+        "Audit trail",
         page_data,
     )

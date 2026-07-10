@@ -176,6 +176,9 @@ def startup(datasette):
         await db.purge_login_audit(
             internal, security.config(datasette, "audit_retention_days")
         )
+        await db.purge_admin_audit(
+            internal, security.config(datasette, "admin_audit_retention_days")
+        )
 
     return inner
 
@@ -362,6 +365,12 @@ def menu_links(datasette, actor):
                 {
                     "href": datasette.urls.path("/-/admin/login-attempts"),
                     "label": "Login attempts",
+                }
+            )
+            links.append(
+                {
+                    "href": datasette.urls.path("/-/admin/audit"),
+                    "label": "Audit trail",
                 }
             )
             # F2 — admins are acl admins, so link to acl's group + sharing UI

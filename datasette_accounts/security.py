@@ -18,6 +18,10 @@ DEFAULTS = {
     "lockout_minutes": 15,
     "secure_cookie": "auto",  # "auto" | True | False
     "audit_retention_days": 90,
+    # Admin-audit trail retention; 0 = keep forever (the accountability
+    # record is low-volume, unlike login attempts, so the safe default is the
+    # opposite of audit_retention_days).
+    "admin_audit_retention_days": 0,
     "trust_proxy_headers": False,  # trust X-Forwarded-* (proto + client IP)
     # --- Invite / reset links (see plans/invite-links) ---
     "invite_ttl_hours": 72,  # invite-link lifetime

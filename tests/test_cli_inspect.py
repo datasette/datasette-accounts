@@ -19,3 +19,27 @@ def test_audit_records_cli_actor(tmp_path):
     data = json.loads(run("audit", "--json", "-i", db).output)
     assert data["audit"][0]["actor_id"] == "cli:opsbot"
     assert data["audit"][0]["operation"] == "create"
+
+
+def test_audit_operation_filter(tmp_path):
+    db = str(tmp_path / "a.db")
+    run("create", "alice", "-y", "-i", db)
+    run("disable", "alice", "-y", "-i", db)
+
+    data = json.loads(run("audit", "--operation", "disable", "--json", "-i", db).output)
+    ops = {row["operation"] for row in data["audit"]}
+    assert ops == {"disable"}
+
+    data = json.loads(
+        run(
+            "audit",
+            "--user",
+            "alice",
+            "--operation",
+            "create",
+            "--json",
+            "-i",
+            db,
+        ).output
+    )
+    assert [row["operation"] for row in data["audit"]] == ["create"]

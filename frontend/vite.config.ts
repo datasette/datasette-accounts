@@ -45,6 +45,7 @@ export default defineConfig({
         messages: "src/pages/messages/index.ts",
         "login-attempts": "src/pages/login-attempts/index.ts",
         "set-password": "src/pages/set-password/index.ts",
+        audit: "src/pages/audit/index.ts",
       },
     },
   },

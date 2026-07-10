@@ -16,10 +16,11 @@ from .base import (
 
 @accounts.command(name="audit")
 @click.option("--user", "username", help="Filter to one target username.")
+@click.option("--operation", "operation", help="Filter to one operation name.")
 @click.option("--limit", type=int, default=200, help="Max rows (clamped).")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 @_db_options
-def audit(username, limit, as_json, internal, metadata, actor):
+def audit(username, operation, limit, as_json, internal, metadata, actor):
     """Show the admin-audit trail (newest first)."""
 
     async def go():
@@ -27,7 +28,7 @@ def audit(username, limit, as_json, internal, metadata, actor):
         target_id = None
         if username:
             target_id = (await _require_user(db_, username))["id"]
-        rows = await db.list_admin_audit(db_, target_id, limit)
+        rows = await db.list_admin_audit(db_, target_id, operation, limit)
 
         def human():
             view = [

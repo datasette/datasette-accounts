@@ -1,7 +1,7 @@
 <script lang="ts">
   // Shared tab strip across the admin pages.
   let { current }: {
-    current: "accounts" | "capabilities" | "messages" | "login-attempts";
+    current: "accounts" | "capabilities" | "messages" | "login-attempts" | "audit";
   } = $props();
 </script>
 
@@ -10,6 +10,7 @@
   <a href="/-/admin/capabilities" class:active={current === "capabilities"} aria-current={current === "capabilities" ? "page" : undefined}>Capabilities</a>
   <a href="/-/admin/messages" class:active={current === "messages"} aria-current={current === "messages" ? "page" : undefined}>Messages</a>
   <a href="/-/admin/login-attempts" class:active={current === "login-attempts"} aria-current={current === "login-attempts" ? "page" : undefined}>Login attempts</a>
+  <a href="/-/admin/audit" class:active={current === "audit"} aria-current={current === "audit" ? "page" : undefined}>Audit trail</a>
 </nav>
 
 <style>

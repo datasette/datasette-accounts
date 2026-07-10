@@ -239,10 +239,13 @@ function buildShots(browser) {
 
     // The admin table with a row's overflow (kebab) menu open.
     "admin-menu": async () => {
+      // Taller viewport: the open menu (now ~9 items) extends past the footer
+      // and would otherwise be clipped at the standard height.
       const { ctx, page } = await loginContext(
         browser,
         "admin",
         "/-/admin/users",
+        { width: 1000, height: 1040 },
       );
       await page.getByRole("cell", { name: "alice", exact: true }).waitFor({
         timeout: 15_000,
@@ -252,10 +255,10 @@ function buildShots(browser) {
         .getByRole("button", { name: "Actions for alice" })
         .click();
       await page
-        .getByRole("menuitem", { name: "Active sessions" })
+        .getByRole("menuitem", { name: "History" })
         .waitFor({ timeout: 15_000 });
       await freezeVolatile(page);
-      await shotClipped(page, out("admin-menu"));
+      await shotClipped(page, out("admin-menu"), 90);
       await ctx.close();
     },
 
@@ -362,6 +365,25 @@ function buildShots(browser) {
       await page.getByText("45.148.10.62").first().waitFor();
       await freezeVolatile(page);
       await shotClipped(page, out("login-attempts"));
+      await ctx.close();
+    },
+
+    // The Audit trail admin page: every admin mutation with its actor,
+    // target, and detail chips, filterable by target username/operation
+    // (seeded demo rows, including a CLI actor and a deleted target).
+    audit: async () => {
+      const { ctx, page } = await loginContext(
+        browser,
+        "admin",
+        "/-/admin/audit",
+      );
+      await page
+        .getByRole("heading", { name: "Audit trail" })
+        .waitFor({ timeout: 15_000 });
+      // Wait for the seeded rows (the CLI actor) to render.
+      await page.getByText("cli:ops").first().waitFor();
+      await freezeVolatile(page);
+      await shotClipped(page, out("audit"));
       await ctx.close();
     },
 

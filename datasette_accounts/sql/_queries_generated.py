@@ -56,6 +56,23 @@ class LoginAttemptRow:
 
 
 @dataclass
+class AdminAuditRow:
+    id: int | None
+    timestamp: str
+    operation: str
+    actor_id: str | None
+    target_id: str | None
+    detail: str | None
+    actor_username: str
+    target_username: str
+
+
+@dataclass
+class ListAdminAuditOperationsRow:
+    operation: str
+
+
+@dataclass
 class CapabilityGrantRow:
     action: str
     principal_type: str
@@ -586,6 +603,51 @@ VALUES (strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
         "target_id::text::": target_id,
         "detail::text::": detail,
     }
+    conn.execute(sql, params)
+    return None
+
+
+def list_admin_audit(
+    conn: sqlite3.Connection, target_id: str | None, operation: str | None, limit: int
+) -> list[AdminAuditRow]:
+    sql = """\
+SELECT a.id, a.timestamp, a.operation, a.actor_id, a.target_id, a.detail,
+       (SELECT username FROM datasette_accounts_users WHERE id = a.actor_id)
+           AS actor_username,
+       (SELECT username FROM datasette_accounts_users WHERE id = a.target_id)
+           AS target_username
+FROM datasette_accounts_admin_audit a
+WHERE ($target_id::text:: IS NULL OR a.target_id = $target_id::text::)
+  AND ($operation::text:: IS NULL OR a.operation = $operation::text::)
+ORDER BY a.id DESC
+LIMIT $limit::integer;
+"""
+    params = {
+        "target_id::text::": target_id,
+        "operation::text::": operation,
+        "limit::integer": limit,
+    }
+    cursor = conn.execute(sql, params)
+    return [AdminAuditRow(*row) for row in cursor.fetchall()]
+
+
+def list_admin_audit_operations(
+    conn: sqlite3.Connection,
+) -> list[ListAdminAuditOperationsRow]:
+    sql = "SELECT DISTINCT operation FROM datasette_accounts_admin_audit ORDER BY 1;"
+    params: dict[str, Any] = {}
+    cursor = conn.execute(sql, params)
+    return [ListAdminAuditOperationsRow(*row) for row in cursor.fetchall()]
+
+
+def purge_admin_audit(conn: sqlite3.Connection, retention_days: int) -> None:
+    sql = """\
+DELETE FROM datasette_accounts_admin_audit
+WHERE timestamp <
+    strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('-%d days', $retention_days::integer))
+    || '+00:00';
+"""
+    params = {"retention_days::integer": retention_days}
     conn.execute(sql, params)
     return None
 
