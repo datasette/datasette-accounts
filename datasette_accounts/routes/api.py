@@ -18,6 +18,7 @@ from ..page_data import (
     RegisterRequest,
     ResetPasswordRequest,
     RevokeCapabilityRequest,
+    RevokeOwnSessionRequest,
     RevokeSessionRequest,
     SessionRow,
     SetExpiryRequest,
@@ -37,20 +38,9 @@ from ..passwords import (
 )
 from ..router import require_actor, require_admin, require_csrf, router
 from ..security import COOKIE_NAME, SIGN_NAMESPACE
-from ..sessions import mint_token, token_sha256
+from ..sessions import current_token_sha, list_own_sessions, mint_token, token_sha256
 
 GENERIC_LOGIN_ERROR = "Invalid username or password"
-
-
-def _current_token_sha(datasette, request):
-    cookie = request.cookies.get(COOKIE_NAME)
-    if not cookie:
-        return None
-    try:
-        raw = datasette.unsign(cookie, SIGN_NAMESPACE)
-    except Exception:
-        return None
-    return token_sha256(raw)
 
 
 def _set_session_cookie(datasette, request, response, raw_token):
@@ -159,7 +149,7 @@ async def authenticate(
 @require_csrf
 async def logout(datasette, request):
     internal = datasette.get_internal_database()
-    token_sha = _current_token_sha(datasette, request)
+    token_sha = current_token_sha(datasette, request)
     if token_sha:
         await db.delete_session(internal, token_sha)
     response = Response.json({"ok": True, "redirect": "/"})
@@ -344,8 +334,53 @@ async def change_password(
 
     new_hash = await ahash_password(body.new_password)
     await db.change_own_password(
-        internal, user["id"], new_hash, _current_token_sha(datasette, request)
+        internal, user["id"], new_hash, current_token_sha(datasette, request)
     )
+    return Response.json({"ok": True})
+
+
+@router.POST("/-/account/api/sessions$")
+@require_actor
+async def account_sessions(datasette, request):
+    internal = datasette.get_internal_database()
+    sessions = await list_own_sessions(
+        datasette, request, internal, request.actor["id"]
+    )
+    return Response.json({"ok": True, "sessions": [s.model_dump() for s in sessions]})
+
+
+@router.POST("/-/account/api/revoke-session$")
+@require_actor
+async def account_revoke_session(
+    datasette, request, body: Annotated[RevokeOwnSessionRequest, Body()]
+):
+    internal = datasette.get_internal_database()
+    # The current session ends via the normal logout path (which also clears
+    # the cookie) — revoking the session you're browsing with is a footgun.
+    if body.token_sha256 == current_token_sha(datasette, request):
+        return Response.json(
+            {"ok": False, "error": "Use log out for this device"}, status=400
+        )
+    actor_id = request.actor["id"]
+    # Scoped to self: the actor-scoped DELETE no-ops on tokens belonging to
+    # anyone else. We report ok either way — distinguishing would hand callers
+    # an oracle for whether an arbitrary token hash exists on another account.
+    await db.revoke_session(internal, actor_id, actor_id, body.token_sha256)
+    return Response.json({"ok": True})
+
+
+@router.POST("/-/account/api/logout-others$")
+@require_actor
+async def account_logout_others(datasette, request):
+    token_sha = current_token_sha(datasette, request)
+    if not token_sha:
+        # Shouldn't happen for an actor-holding request, but never let a
+        # missing "current" turn keep-my-session into delete-everything.
+        return Response.json(
+            {"ok": False, "error": "Authentication required"}, status=401
+        )
+    internal = datasette.get_internal_database()
+    await db.logout_other_sessions(internal, request.actor["id"], token_sha)
     return Response.json({"ok": True})
 
 

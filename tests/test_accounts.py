@@ -1,13 +1,23 @@
 import json
+import re
 
 import pytest
 from datasette.app import Datasette
 
 from datasette_accounts import db
 from datasette_accounts.passwords import hash_password
-from datasette_accounts.security import COOKIE_NAME
+from datasette_accounts.security import COOKIE_NAME, SIGN_NAMESPACE
+from datasette_accounts.sessions import token_sha256
 
 JSON = {"content-type": "application/json"}
+
+PAGE_DATA_RE = re.compile(
+    r'<script type="application/json" id="pageData">(.*?)</script>', re.S
+)
+
+
+def extract_page_data(html):
+    return json.loads(PAGE_DATA_RE.search(html).group(1))
 
 
 async def make_ds(**plugin_config):
@@ -959,3 +969,258 @@ async def test_user_profiles_seeding():
     internal = ds.get_internal_database()
     rows = (await internal.execute("SELECT actor_id FROM datasette_user_profiles")).rows
     assert uid in [r[0] for r in rows]
+
+
+# --------------------------------------------------------------------------
+# Session list ticket 1 — "Your sessions" on the account page (read-only)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_account_page_lists_own_sessions_with_one_current():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    _, cookies1 = await login(ds, "alice", "password123")
+    _, cookies2 = await login(ds, "alice", "password123")
+    r = await ds.client.get("/-/account", cookies=cookies2)
+    assert r.status_code == 200
+    page_data = extract_page_data(r.text)
+    sessions = page_data["sessions"]
+    assert len(sessions) == 2
+    current_rows = [s for s in sessions if s["current"]]
+    assert len(current_rows) == 1
+    expected_sha = token_sha256(ds.unsign(cookies2[COOKIE_NAME], SIGN_NAMESPACE))
+    assert current_rows[0]["token_sha256"] == expected_sha
+    # Most-recent last_seen_at first.
+    assert sessions[0]["last_seen_at"] >= sessions[1]["last_seen_at"]
+    # cookies1 never gets referenced beyond minting a second session for alice.
+    assert cookies1 != cookies2
+
+
+@pytest.mark.asyncio
+async def test_account_page_omits_sessions_during_forced_change():
+    ds = await make_ds()
+    await insert_user(ds, "alice", must_change_password=True)
+    _, cookies = await login(ds, "alice", "password123")
+    r = await ds.client.get("/-/account", cookies=cookies)
+    assert r.status_code == 200
+    page_data = extract_page_data(r.text)
+    assert page_data["must_change_password"] is True
+    assert page_data["sessions"] == []
+
+
+@pytest.mark.asyncio
+async def test_account_sessions_api_requires_actor():
+    ds = await make_ds()
+    r = await ds.client.post("/-/account/api/sessions", content="{}", headers=JSON)
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_account_sessions_api_enforces_csrf_and_post_only():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    _, cookies = await login(ds, "alice", "password123")
+    # GET is rejected outright (method-not-allowed).
+    r = await ds.client.get("/-/account/api/sessions", cookies=cookies)
+    assert r.status_code == 405
+    # A non-JSON content type fails the CSRF gate.
+    r = await ds.client.post(
+        "/-/account/api/sessions",
+        content="{}",
+        headers={"content-type": "text/plain"},
+        cookies=cookies,
+    )
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_account_sessions_api_scopes_to_caller():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    await insert_user(ds, "bob")
+    await login(ds, "alice", "password123")
+    _, bob_cookies = await login(ds, "bob", "password123")
+    r = await ds.client.post(
+        "/-/account/api/sessions", content="{}", headers=JSON, cookies=bob_cookies
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    # bob only ever sees his own session, never alice's.
+    assert len(data["sessions"]) == 1
+    expected_sha = token_sha256(ds.unsign(bob_cookies[COOKIE_NAME], SIGN_NAMESPACE))
+    assert data["sessions"][0]["token_sha256"] == expected_sha
+    assert data["sessions"][0]["current"] is True
+
+
+@pytest.mark.asyncio
+async def test_account_sessions_null_ua_ip_render_as_none():
+    ds = await make_ds()
+    user_id = await insert_user(ds, "alice")
+    internal = ds.get_internal_database()
+    # A session recorded with no user-agent/IP (e.g. a non-browser client)
+    # must not break row assembly.
+    await db.create_session(internal, user_id, "deadbeef" * 8, 14, None, None)
+    _, cookies = await login(ds, "alice", "password123")
+    r = await ds.client.post(
+        "/-/account/api/sessions", content="{}", headers=JSON, cookies=cookies
+    )
+    assert r.status_code == 200
+    sessions = r.json()["sessions"]
+    assert len(sessions) == 2
+    null_row = next(s for s in sessions if s["token_sha256"] == "deadbeef" * 8)
+    assert null_row["user_agent"] is None
+    assert null_row["ip"] is None
+
+
+# --------------------------------------------------------------------------
+# Session list ticket 2 — revoke own sessions + log out everywhere else
+# --------------------------------------------------------------------------
+
+
+def cookie_sha(ds, cookies):
+    """The sessions-table hash for a login cookie."""
+    return token_sha256(ds.unsign(cookies[COOKIE_NAME], SIGN_NAMESPACE))
+
+
+async def actor_resolves(ds, cookies):
+    who = await ds.client.get("/-/actor.json", cookies=cookies)
+    return who.json()["actor"] is not None
+
+
+async def last_audit_row(ds, operation):
+    internal = ds.get_internal_database()
+    rows = await internal.execute(
+        f"SELECT actor_id, target_id FROM {db.ADMIN_AUDIT} "
+        "WHERE operation = ? ORDER BY id DESC LIMIT 1",
+        [operation],
+    )
+    return rows.first()
+
+
+@pytest.mark.asyncio
+async def test_revoke_own_session_kills_it_and_audits():
+    ds = await make_ds()
+    alice_id = await insert_user(ds, "alice")
+    _, cookies1 = await login(ds, "alice", "password123")
+    _, cookies2 = await login(ds, "alice", "password123")
+    r = await ds.client.post(
+        "/-/account/api/revoke-session",
+        content=json.dumps({"token_sha256": cookie_sha(ds, cookies1)}),
+        headers=JSON,
+        cookies=cookies2,
+    )
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # The revoked cookie stops resolving; the caller's stays alive.
+    assert not await actor_resolves(ds, cookies1)
+    assert await actor_resolves(ds, cookies2)
+    audit = await last_audit_row(ds, "revoke-session")
+    assert audit is not None
+    assert (audit["actor_id"], audit["target_id"]) == (alice_id, alice_id)
+
+
+@pytest.mark.asyncio
+async def test_revoke_current_session_rejected():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    _, cookies = await login(ds, "alice", "password123")
+    r = await ds.client.post(
+        "/-/account/api/revoke-session",
+        content=json.dumps({"token_sha256": cookie_sha(ds, cookies)}),
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 400
+    assert "log out" in r.json()["error"].lower()
+    # The current session survives.
+    assert await actor_resolves(ds, cookies)
+
+
+@pytest.mark.asyncio
+async def test_revoke_foreign_token_is_scoped_noop():
+    ds = await make_ds()
+    alice_id = await insert_user(ds, "alice")
+    await insert_user(ds, "bob")
+    _, alice_cookies = await login(ds, "alice", "password123")
+    _, bob_cookies = await login(ds, "bob", "password123")
+    r = await ds.client.post(
+        "/-/account/api/revoke-session",
+        content=json.dumps({"token_sha256": cookie_sha(ds, alice_cookies)}),
+        headers=JSON,
+        cookies=bob_cookies,
+    )
+    # ok either way — a distinguishing response would be an existence oracle
+    # for other accounts' token hashes.
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # Alice's session survives: the DELETE is scoped to the caller's actor id.
+    assert await actor_resolves(ds, alice_cookies)
+    internal = ds.get_internal_database()
+    count = (
+        await internal.execute(
+            f"SELECT COUNT(*) FROM {db.SESSIONS} WHERE actor_id = ?", [alice_id]
+        )
+    ).single_value()
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_logout_others_keeps_current_session():
+    ds = await make_ds()
+    alice_id = await insert_user(ds, "alice")
+    _, cookies1 = await login(ds, "alice", "password123")
+    _, cookies2 = await login(ds, "alice", "password123")
+    _, cookies3 = await login(ds, "alice", "password123")
+    r = await ds.client.post(
+        "/-/account/api/logout-others", content="{}", headers=JSON, cookies=cookies3
+    )
+    assert r.status_code == 200 and r.json()["ok"] is True
+    # The calling session stays signed in; both others are dead.
+    assert await actor_resolves(ds, cookies3)
+    assert not await actor_resolves(ds, cookies1)
+    assert not await actor_resolves(ds, cookies2)
+    audit = await last_audit_row(ds, "logout-others")
+    assert audit is not None
+    assert (audit["actor_id"], audit["target_id"]) == (alice_id, alice_id)
+
+
+@pytest.mark.asyncio
+async def test_session_mutations_require_actor_and_gates():
+    ds = await make_ds()
+    await insert_user(ds, "alice")
+    _, cookies = await login(ds, "alice", "password123")
+    revoke_body = json.dumps({"token_sha256": "0" * 64})
+
+    # Anonymous -> 401 (CSRF-clean POSTs, no cookie).
+    r = await ds.client.post(
+        "/-/account/api/revoke-session", content=revoke_body, headers=JSON
+    )
+    assert r.status_code == 401
+    r = await ds.client.post("/-/account/api/logout-others", content="{}", headers=JSON)
+    assert r.status_code == 401
+
+    # GET never mutates: 405 from the POST-only gate (revoke-session needs a
+    # valid body to get past router body-parsing and reach the gate).
+    r = await ds.client.request(
+        "GET",
+        "/-/account/api/revoke-session",
+        content=revoke_body,
+        headers=JSON,
+        cookies=cookies,
+    )
+    assert r.status_code == 405
+    r = await ds.client.get("/-/account/api/logout-others", cookies=cookies)
+    assert r.status_code == 405
+
+    # Non-JSON content type fails the CSRF gate.
+    for path, body in [
+        ("/-/account/api/revoke-session", revoke_body),
+        ("/-/account/api/logout-others", "{}"),
+    ]:
+        r = await ds.client.post(
+            path, content=body, headers={"content-type": "text/plain"}, cookies=cookies
+        )
+        assert r.status_code == 403, path
+
+    # The signed-in session is untouched by all of the above.
+    assert await actor_resolves(ds, cookies)

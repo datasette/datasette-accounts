@@ -21,7 +21,7 @@ from ..page_data import (
     UserRow,
 )
 from ..router import require_admin_page, router
-from ..sessions import token_sha256
+from ..sessions import list_own_sessions, token_sha256
 
 
 async def _render(datasette, request, entrypoint, page_title, page_data):
@@ -122,11 +122,19 @@ async def account_page(datasette, request):
     if not request.actor:
         return Response.redirect(datasette.urls.path("/-/login?next=/-/account"))
     actor = request.actor
+    must_change_password = bool(actor.get("must_change_password"))
+    # During the forced-change state the page renders password-only, so skip
+    # the sessions read entirely rather than assembling data nobody sees.
+    sessions = []
+    if not must_change_password:
+        internal = datasette.get_internal_database()
+        sessions = await list_own_sessions(datasette, request, internal, actor["id"])
     page_data = AccountPageData(
         id=actor["id"],
         username=actor.get("username", ""),
         is_admin=bool(actor.get("is_admin")),
-        must_change_password=bool(actor.get("must_change_password")),
+        must_change_password=must_change_password,
+        sessions=sessions,
     ).model_dump()
     return await _render(
         datasette, request, "src/pages/account/index.ts", "Your account", page_data

@@ -11,6 +11,56 @@
   let error = $state("");
   let busy = $state(false);
 
+  type OwnSession = NonNullable<AccountPageData["sessions"]>[number];
+
+  // Sessions arrive sorted most-recent-last_seen_at-first from the server;
+  // the refresh endpoint returns the same shape and order.
+  let sessions = $state<OwnSession[]>(pageData.sessions ?? []);
+  let sessionsError = $state("");
+  let sessionsBusy = $state(false);
+  const hasOthers = $derived(sessions.some((s) => !s.current));
+
+  // Render a stored ISO timestamp in the viewer's locale; fall back to the raw
+  // value if it can't be parsed.
+  function fmtDate(iso: string | null | undefined): string {
+    if (!iso) return "";
+    const d = new Date(iso);
+    return isNaN(d.getTime())
+      ? iso
+      : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  }
+
+  async function refreshSessions() {
+    const { data } = await postJSON<{ ok: boolean; sessions?: OwnSession[] }>(
+      "/-/account/api/sessions",
+      {},
+    );
+    if (data.sessions) sessions = data.sessions;
+  }
+
+  async function sessionOp(path: string, body: Record<string, unknown>) {
+    sessionsError = "";
+    sessionsBusy = true;
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(path, body);
+    if (!ok || !data.ok) {
+      sessionsError = data.error || "Operation failed";
+    } else {
+      await refreshSessions();
+    }
+    sessionsBusy = false;
+  }
+
+  async function revoke(token: string) {
+    await sessionOp("/-/account/api/revoke-session", { token_sha256: token });
+  }
+
+  async function logoutOthers() {
+    if (!confirm("Log out all other sessions? Other devices will be signed out.")) {
+      return;
+    }
+    await sessionOp("/-/account/api/logout-others", {});
+  }
+
   async function submit(e: Event) {
     e.preventDefault();
     busy = true;
@@ -85,6 +135,67 @@
       {busy ? "Saving…" : "Change password"}
     </button>
   </form>
+
+  {#if !pageData.must_change_password}
+    <div class="card sessions-card">
+      <h2>Sessions</h2>
+      {#if sessionsError}<p class="msg msg-error">{sessionsError}</p>{/if}
+      {#if sessions.length === 0}
+        <p class="muted">No active sessions.</p>
+      {:else}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Device</th>
+                <th>IP</th>
+                <th>Signed in</th>
+                <th>Last seen</th>
+                <th><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each sessions as s (s.token_sha256)}
+                <tr>
+                  <td class="device">
+                    {#if s.user_agent}
+                      <span class="ua" title={s.user_agent}>{s.user_agent}</span>
+                    {:else}
+                      <span class="muted">—</span>
+                    {/if}
+                    {#if s.current}
+                      <span class="badge badge-current">This device</span>
+                    {/if}
+                  </td>
+                  <td>{s.ip ?? "—"}</td>
+                  <td class="nowrap">{fmtDate(s.created_at)}</td>
+                  <td class="nowrap">{fmtDate(s.last_seen_at)}</td>
+                  <td class="row-actions">
+                    {#if !s.current}
+                      <button
+                        class="btn-sm btn-danger"
+                        disabled={sessionsBusy}
+                        onclick={() => revoke(s.token_sha256)}
+                      >
+                        Revoke
+                      </button>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        {#if hasOthers}
+          <div class="sessions-foot">
+            <button class="btn-sm btn-danger" disabled={sessionsBusy} onclick={logoutOthers}>
+              Log out other sessions
+            </button>
+          </div>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -102,6 +213,74 @@
   /* Present in the DOM for password managers, but not shown or focusable.
      `display:none` is avoided because some managers skip such fields. */
   .pw-username {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
+  }
+
+  .sessions-card {
+    margin-top: 1.5rem;
+  }
+  .muted {
+    color: var(--muted);
+  }
+  .table-wrap {
+    overflow-x: auto;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  th,
+  td {
+    text-align: left;
+    padding: 0.55rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  th {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td {
+    border-bottom: none;
+  }
+  .device {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+  }
+  .ua {
+    display: inline-block;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .nowrap {
+    white-space: nowrap;
+  }
+  .row-actions {
+    text-align: right;
+    white-space: nowrap;
+  }
+  .sessions-foot {
+    margin-top: 0.9rem;
+    display: flex;
+    justify-content: flex-end;
+  }
+  /* Visually-hidden header text for the actions column. */
+  .sr-only {
     position: absolute;
     width: 1px;
     height: 1px;
