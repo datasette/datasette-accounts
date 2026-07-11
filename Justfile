@@ -24,7 +24,8 @@ frontend-dev *flags:
 # ({"id": "*"} matches any actor with an id), so accounts can view/edit profiles.
 dev *flags:
     DATASETTE_SECRET=abc123 uv run datasette --root -p 8006 --internal accounts.db \
-      -s permissions.profile_access.id '*' {{flags}}
+      -s permissions.profile_access.id '*' \
+      --plugins-dir samples/discord-auth {{flags}}
 
 # Datasette + Vite HMR (auto-restart on .py/.html changes)
 dev-with-hmr *flags:

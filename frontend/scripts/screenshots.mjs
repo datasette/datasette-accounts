@@ -33,6 +33,12 @@ const SECRET = "screenshots-secret-not-for-prod";
 const INTERNAL_DB = "/tmp/datasette-accounts-shots-internal.db";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+// The seed plugin lives here; it also carries a loose shim
+// (load_discord_sample.py) that loads the real Discord sample from
+// samples/discord-auth, so the login shot shows the "Continue with Discord"
+// button and the Configuration shot shows a real external-provider row. Datasette
+// takes a single --plugins-dir (a second flag would override the first), hence
+// the shim rather than a second directory.
 const PLUGINS_DIR = resolve(HERE, "shot-plugins");
 const OUT = resolve(HERE, "../../docs/screenshots");
 const out = (n) => resolve(OUT, `${n}.png`);
@@ -74,7 +80,8 @@ async function startServer() {
       INTERNAL_DB,
       "--secret",
       SECRET,
-      // Throwaway plugin: seeds deterministic demo accounts + one session.
+      // Throwaway plugin: seeds deterministic demo accounts + one session, and
+      // shims in the Discord sample provider (see shot-plugins/README-less note).
       "--plugins-dir",
       PLUGINS_DIR,
       "-p",
@@ -330,9 +337,10 @@ function buildShots(browser) {
 
     // The Configuration admin page: the Sign-in providers section (enable +
     // signups per provider) + the admin-editable site messages (homepage
-    // sign-in prompt + login help/contact), seeded with demo copy. Only the
-    // built-in password provider is installed in the shots harness — external
-    // provider rows land with ticket 08's real sample provider.
+    // sign-in prompt + login help/contact), seeded with demo copy. The harness
+    // loads the built-in password provider, the enabled Discord sample
+    // (samples/discord-auth, via load_discord_sample.py), and the installed
+    // demo provider (left disabled) — one row each.
     config: async () => {
       const { ctx, page } = await loginContext(
         browser,

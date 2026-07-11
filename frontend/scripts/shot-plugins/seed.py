@@ -124,8 +124,35 @@ def startup(datasette):
         await internal.execute_write_fn(seed_messages)
         await internal.execute_write_fn(seed_login_attempts)
         await internal.execute_write_fn(seed_admin_audit)
+        await internal.execute_write_fn(seed_providers)
 
     return inner
+
+
+# Enable the Discord sample provider (samples/discord-auth, loaded into this
+# harness by the sibling load_discord_sample.py shim) so the login page shows a
+# "Continue with Discord" button and the Configuration page shows an enabled
+# external-provider row. The demo provider stays at its default (disabled), so
+# the login shot shows Discord alone rather than developer-only noise. Mirrors
+# db.set_provider_enabled's row shape (explicit '1', absence = disabled).
+def seed_providers(conn):
+    """Seed the Discord provider's enabled + signups settings (idempotent)."""
+    db = Database(conn)
+    settings = db[accounts_db.SETTINGS]
+    if settings.exists() and settings.count > 0:
+        return  # already seeded
+    for key, value in (
+        ("provider:discord:enabled", "1"),
+        ("provider:discord:signups", "auto"),
+    ):
+        settings.insert(
+            {
+                "key": key,
+                "value": value,
+                "updated_at": _CREATED,
+                "updated_by": "u-admin",
+            }
+        )
 
 
 # Demo login-audit rows for the Login attempts admin page. A spread of outcomes
@@ -240,7 +267,7 @@ def seed_admin_audit(conn):
 # banner, and the login page shows the help/contact note.
 _MESSAGES = {
     "homepage_signed_out": (
-        'Sign in to browse the internal datasets. Need access? '
+        "Sign in to browse the internal datasets. Need access? "
         '<a href="mailto:data-team@example.com">Email the data team</a>.'
     ),
     "login_help": (
@@ -303,7 +330,9 @@ def seed_capabilities(conn):
     # Ensure datasette-acl's tables exist regardless of plugin startup order
     # (so the seeded group grant is deterministic), when acl is installed.
     try:
-        from datasette_acl.internal_migrations import internal_migrations as acl_migrations
+        from datasette_acl.internal_migrations import (
+            internal_migrations as acl_migrations,
+        )
 
         acl_migrations.apply(db)
     except ImportError:
