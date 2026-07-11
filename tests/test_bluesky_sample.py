@@ -9,12 +9,16 @@ The module is loaded exactly as ``just dev`` loads it: via Datasette's
 ``plugins_dir`` (a loose ``.py`` file), NOT an installed distribution.
 """
 
+import base64
+import hashlib
+import importlib.util
 import json
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
+from authlib.jose import JsonWebKey, jwt
 from datasette.app import Datasette
 
 from datasette_accounts import db
@@ -30,6 +34,22 @@ def _extract_page_data(html):
 
 
 SAMPLE_DIR = str(Path(__file__).resolve().parent.parent / "samples" / "bluesky-auth")
+
+
+def _load_bluesky_module():
+    """Load the sample as a plain module (ticket 02's protocol helpers are
+    pure — no Datasette instance needed). This is exactly how
+    ``samples/dev-plugins/load_samples.py`` imports it, and registers nothing
+    with pluggy, so the autouse unregister fixture is unaffected."""
+    spec = importlib.util.spec_from_file_location(
+        "bluesky_auth", str(Path(SAMPLE_DIR) / "bluesky_auth.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+bluesky_auth = _load_bluesky_module()
 
 
 @pytest.fixture(autouse=True)
@@ -275,3 +295,225 @@ async def test_callback_stub_returns_501(monkeypatch):
     await _enable(ds, signups="auto")
     r = await ds.client.get("/-/bluesky-auth/callback")
     assert r.status_code == 501
+
+
+# ==========================================================================
+# 7. Protocol helpers (ticket 02): DPoP + PKCE + identity resolution
+#
+# Pure-helper coverage — the module is imported directly (bluesky_auth above),
+# no Datasette instance. httpx-using helpers take the client as a parameter,
+# so these fakes stand in for it.
+# ==========================================================================
+
+
+class _FakeResp:
+    def __init__(self, status_code=200, json_data=None, headers=None):
+        self.status_code = status_code
+        self._json = json_data
+        self.headers = headers or {}
+
+    def json(self):
+        if self._json is None:
+            raise ValueError("no JSON body")
+        return self._json
+
+
+class _FakeGetClient:
+    """Routes GET by exact URL (params ignored — they don't change the route
+    the helpers hit). Any unrouted URL is a test bug, not a 404 path."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.get_calls = []
+
+    async def get(self, url, params=None):
+        self.get_calls.append((url, params))
+        if url not in self.routes:
+            raise AssertionError(f"unexpected GET {url!r}")
+        return self.routes[url]
+
+
+class _FakePostClient:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.posts = []
+
+    async def post(self, url, data=None, headers=None):
+        self.posts.append({"url": url, "data": data, "headers": headers})
+        return self._responses.pop(0)
+
+
+def test_dpop_proof_shape_and_no_private_scalar():
+    jwk = bluesky_auth._gen_dpop_jwk()
+    key = JsonWebKey.import_key(jwk)
+
+    proof = bluesky_auth._dpop_proof(jwk, "POST", "https://pds.example/par?foo=bar")
+    # Verifies against the (public) key embedded in the header.
+    claims = jwt.decode(proof, key)
+    header = claims.header
+
+    assert header["typ"] == "dpop+jwt"
+    assert header["alg"] == "ES256"
+    # CRITICAL invariant: the header jwk is the public half only — the private
+    # scalar `d` must never ride along.
+    assert "d" not in header["jwk"]
+
+    assert claims["htm"] == "POST"
+    assert claims["htu"] == "https://pds.example/par"  # query stripped
+    assert claims["jti"]
+    assert isinstance(claims["iat"], int)
+    assert "nonce" not in claims
+
+    # nonce present iff passed.
+    with_nonce = jwt.decode(
+        bluesky_auth._dpop_proof(jwk, "POST", "https://x/y", nonce="n-9"), key
+    )
+    assert with_nonce["nonce"] == "n-9"
+
+    # Fresh jti per proof.
+    a = jwt.decode(bluesky_auth._dpop_proof(jwk, "POST", "https://x/y"), key)
+    b = jwt.decode(bluesky_auth._dpop_proof(jwk, "POST", "https://x/y"), key)
+    assert a["jti"] != b["jti"]
+
+
+def test_pkce_pair():
+    verifier, challenge = bluesky_auth._pkce_pair()
+    expected = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    assert challenge == expected
+    assert 43 <= len(verifier) <= 128  # RFC 7636
+
+
+@pytest.mark.asyncio
+async def test_post_with_dpop_retries_on_use_dpop_nonce():
+    jwk = bluesky_auth._gen_dpop_jwk()
+    key = JsonWebKey.import_key(jwk)
+    resp1 = _FakeResp(400, {"error": "use_dpop_nonce"}, {"DPoP-Nonce": "n-1"})
+    resp2 = _FakeResp(200, {"request_uri": "urn:x"}, {"DPoP-Nonce": "n-2"})
+    client = _FakePostClient([resp1, resp2])
+
+    resp, latest = await bluesky_auth._post_with_dpop(
+        client, jwk, "https://as.example/par", {"a": "b"}
+    )
+
+    assert len(client.posts) == 2  # retried exactly once
+    assert resp is resp2
+    assert latest == "n-2"  # freshest DPoP-Nonce, read off the 200 too
+    # The retry folded the server nonce into the second proof; the first had none.
+    first = jwt.decode(client.posts[0]["headers"]["DPoP"], key)
+    second = jwt.decode(client.posts[1]["headers"]["DPoP"], key)
+    assert "nonce" not in first
+    assert second["nonce"] == "n-1"
+
+
+@pytest.mark.asyncio
+async def test_post_with_dpop_other_4xx_does_not_retry():
+    jwk = bluesky_auth._gen_dpop_jwk()
+    resp1 = _FakeResp(400, {"error": "invalid_request"}, {"DPoP-Nonce": "n-1"})
+    client = _FakePostClient([resp1])  # only one — a retry would IndexError
+
+    resp, latest = await bluesky_auth._post_with_dpop(
+        client, jwk, "https://as.example/par", {}
+    )
+
+    assert len(client.posts) == 1
+    assert resp is resp1
+    assert latest == "n-1"
+
+
+@pytest.mark.asyncio
+async def test_resolve_handle():
+    client = _FakeGetClient(
+        {bluesky_auth.RESOLVE_HANDLE_URL: _FakeResp(200, {"did": "did:plc:abc"})}
+    )
+    assert await bluesky_auth._resolve_handle(client, "alice.test") == "did:plc:abc"
+
+
+@pytest.mark.asyncio
+async def test_did_plc_doc_pds_and_handle():
+    did = "did:plc:abc123"
+    plc_url = f"https://plc.directory/{quote(did, safe='')}"
+    doc = {
+        "alsoKnownAs": ["at://alice.test"],
+        "service": [
+            {
+                "id": "#atproto_pds",
+                "type": "AtprotoPersonalDataServer",
+                "serviceEndpoint": "https://pds.example",
+            }
+        ],
+    }
+    client = _FakeGetClient({plc_url: _FakeResp(200, doc)})
+
+    got = await bluesky_auth._did_doc(client, did)
+    assert got == doc
+    assert bluesky_auth._pds_endpoint(got) == "https://pds.example"
+    assert bluesky_auth._handle_from_did_doc(got) == "alice.test"
+
+
+@pytest.mark.asyncio
+async def test_did_web_doc_uses_well_known():
+    did = "did:web:example.com"
+    url = "https://example.com/.well-known/did.json"
+    doc = {"service": []}
+    client = _FakeGetClient({url: _FakeResp(200, doc)})
+
+    assert await bluesky_auth._did_doc(client, did) == doc
+    assert client.get_calls[0][0] == url
+
+
+@pytest.mark.asyncio
+async def test_did_doc_rejects_unknown_method_and_web_path_form():
+    with pytest.raises(bluesky_auth.FlowError):
+        await bluesky_auth._did_doc(_FakeGetClient({}), "did:key:z6Mk")
+    with pytest.raises(bluesky_auth.FlowError):
+        await bluesky_auth._did_doc(
+            _FakeGetClient({}), "did:web:example.com:user:alice"
+        )
+
+
+def test_pds_endpoint_requires_service_and_https():
+    with pytest.raises(bluesky_auth.FlowError):
+        bluesky_auth._pds_endpoint(
+            {"service": [{"id": "#other", "serviceEndpoint": "https://x"}]}
+        )
+    with pytest.raises(bluesky_auth.FlowError):
+        bluesky_auth._pds_endpoint(
+            {
+                "service": [
+                    {"id": "#atproto_pds", "serviceEndpoint": "http://pds.example"}
+                ]
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_authserver():
+    pds = "https://pds.example"
+    url = pds + "/.well-known/oauth-protected-resource"
+    client = _FakeGetClient(
+        {url: _FakeResp(200, {"authorization_servers": ["https://as.example"]})}
+    )
+    assert await bluesky_auth._resolve_authserver(client, pds) == "https://as.example"
+
+
+@pytest.mark.asyncio
+async def test_authserver_metadata_ok_and_issuer_mismatch():
+    issuer = "https://as.example"
+    url = issuer + "/.well-known/oauth-authorization-server"
+    meta = {
+        "issuer": issuer,
+        "pushed_authorization_request_endpoint": "https://as.example/par",
+        "authorization_endpoint": "https://as.example/authorize",
+        "token_endpoint": "https://as.example/token",
+    }
+    client = _FakeGetClient({url: _FakeResp(200, meta)})
+    assert await bluesky_auth._authserver_metadata(client, issuer) == meta
+
+    bad = dict(meta, issuer="https://evil.example")
+    client2 = _FakeGetClient({url: _FakeResp(200, bad)})
+    with pytest.raises(bluesky_auth.FlowError):
+        await bluesky_auth._authserver_metadata(client2, issuer)

@@ -46,10 +46,16 @@ secret. See README.md (ticket 05) for the full protocol walkthrough.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
+import secrets
+import time
 import urllib.parse
 from typing import TYPE_CHECKING
 
+import httpx
+from authlib.jose import JsonWebKey, jwt
 from datasette import Response, hookimpl
 
 from datasette_accounts.providers import AuthProvider, provider_gate
@@ -177,6 +183,206 @@ def _public_origin(datasette: Datasette, request: Request) -> str:
     absolute = datasette.absolute_url(request, datasette.urls.path("/"))
     parsed = urllib.parse.urlsplit(absolute)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+# ==========================================================================
+# Protocol helpers (atproto OAuth: DPoP + PKCE + identity resolution)
+#
+# There is no @atproto/oauth-client-node equivalent among this repo's Python
+# deps, so the three mechanics plain OAuth2 lacks are hand-rolled here. Field
+# names + endpoints: todos/bluesky-auth/README.md "Protocol cheat sheet";
+# arbiters are https://atproto.com/specs/oauth and bluesky-social/cookbook ->
+# python-oauth-web-app (which also uses authlib). Every helper is pure enough
+# to unit-test without a Datasette instance (tests/test_bluesky_sample.py); the
+# httpx-using ones take the client as a parameter so tests pass a fake.
+# ==========================================================================
+
+# Unauthenticated appview shortcut for handle -> DID (spec cheat sheet); the
+# trustless DNS-TXT/.well-known path is a documented non-goal (ticket 05).
+RESOLVE_HANDLE_URL = (
+    "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle"
+)
+# did:plc documents are served by the PLC directory.
+PLC_DIRECTORY_URL = "https://plc.directory"
+
+
+class FlowError(Exception):
+    """Any resolution failure / malformed protocol document. Tickets 03/04
+    catch this single type and answer a generic 400 (never leak internals)."""
+
+
+def _require_https(url: str) -> str:
+    """Reject non-HTTPS endpoint URLs (SSRF hygiene, matching npmx's avatar
+    fetch). Deliberate simplification: no http://localhost carve-out. This
+    sign-in-only sample never reaches a developer's local PDS — even loopback
+    dev authenticates against the real bsky.social auth server over https — so
+    requiring https everywhere keeps the check trivial and closes the hole."""
+    if not isinstance(url, str) or not url.startswith("https://"):
+        raise FlowError(f"refusing non-HTTPS endpoint URL: {url!r}")
+    return url
+
+
+def _gen_dpop_jwk() -> dict:
+    """Fresh per-flow P-256 private key as a JWK dict (JSON-serializable for
+    the flow row's dpop_private_jwk column). Cheat sheet: "DPoP proof JWT"."""
+    key = JsonWebKey.generate_key("EC", "P-256", is_private=True)
+    return key.as_dict(is_private=True)
+
+
+def _dpop_proof(
+    private_jwk: dict, method: str, url: str, nonce: str | None = None
+) -> str:
+    """One ES256 DPoP proof JWT for a single PAR/token POST. The header's `jwk`
+    is the PUBLIC half only — as_dict(is_private=False) drops the private
+    scalar `d`; leaking it would hand out the flow's signing key. `htu` is the
+    request URL with query/fragment stripped, per the spec. `ath` is omitted:
+    it is only for resource requests carrying an access token, which this
+    sign-in-only sample never makes."""
+    key = JsonWebKey.import_key(private_jwk)
+    header = {
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": key.as_dict(is_private=False),  # public half only — never `d`
+    }
+    claims = {
+        "jti": secrets.token_urlsafe(16),
+        "htm": method,
+        "htu": url.split("?", 1)[0],  # no query/fragment
+        "iat": int(time.time()),
+    }
+    if nonce:
+        claims["nonce"] = nonce
+    return jwt.encode(header, claims, key).decode()
+
+
+def _pkce_pair() -> tuple[str, str]:
+    """(verifier, S256 challenge). Verifier length (48 url-safe bytes -> 64
+    chars) sits inside RFC 7636's 43-128 range; challenge is unpadded
+    base64url(sha256(verifier))."""
+    verifier = secrets.token_urlsafe(48)
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    return verifier, challenge
+
+
+async def _post_with_dpop(
+    client, private_jwk: dict, url: str, data: dict, nonce: str | None = None
+) -> tuple[httpx.Response, str | None]:
+    """POST form `data` with a DPoP proof; used by PAR (03) and the token
+    exchange (04). A 4xx JSON body {"error": "use_dpop_nonce"} is the NORMAL
+    path (bsky.social always demands a server nonce), not an error: retry ONCE
+    with the DPoP-Nonce response header folded into the proof. Returns
+    (response, latest_nonce) so callers persist the freshest nonce on the flow
+    row. No raise_for_status here — callers gate on the body (the GitHub
+    sample's errors-as-200 lesson, github_auth.py:182-187)."""
+    proof = _dpop_proof(private_jwk, "POST", url, nonce=nonce)
+    resp = await client.post(url, data=data, headers={"DPoP": proof})
+    latest = resp.headers.get("DPoP-Nonce", nonce)
+    if 400 <= resp.status_code < 500 and "DPoP-Nonce" in resp.headers:
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        if body.get("error") == "use_dpop_nonce":
+            server_nonce = resp.headers["DPoP-Nonce"]
+            proof = _dpop_proof(private_jwk, "POST", url, nonce=server_nonce)
+            resp = await client.post(url, data=data, headers={"DPoP": proof})
+            latest = resp.headers.get("DPoP-Nonce", server_nonce)
+    return resp, latest
+
+
+async def _resolve_handle(client, handle: str) -> str:
+    """Handle -> DID via the appview's resolveHandle. Cheat sheet:
+    "Handle -> DID"."""
+    resp = await client.get(RESOLVE_HANDLE_URL, params={"handle": handle})
+    if resp.status_code != 200:
+        raise FlowError(f"could not resolve handle {handle!r}")
+    did = resp.json().get("did")
+    if not did:
+        raise FlowError(f"no DID for handle {handle!r}")
+    return did
+
+
+async def _did_doc(client, did: str) -> dict:
+    """DID -> DID document. Supports did:plc (GET plc.directory/<did>, the DID
+    percent-encoded) and did:web:<host> (GET https://<host>/.well-known/
+    did.json). did:web is restricted to the plain-host form — DIDs with path
+    segments (further ':' parts) are rejected to keep the sample simple. Any
+    other method raises. Cheat sheet: "DID -> DID document"."""
+    if did.startswith("did:plc:"):
+        url = f"{PLC_DIRECTORY_URL}/{urllib.parse.quote(did, safe='')}"
+    elif did.startswith("did:web:"):
+        host = did[len("did:web:") :]
+        if not host or ":" in host:  # reject path form did:web:host:path...
+            raise FlowError(f"unsupported did:web form (path segments): {did!r}")
+        url = f"https://{host}/.well-known/did.json"
+    else:
+        raise FlowError(f"unsupported DID method: {did!r}")
+    resp = await client.get(url)
+    if resp.status_code != 200:
+        raise FlowError(f"DID document fetch failed for {did!r}")
+    return resp.json()
+
+
+def _pds_endpoint(did_doc: dict) -> str:
+    """PDS endpoint = the `service` entry whose `id` ends with '#atproto_pds'
+    (type AtprotoPersonalDataServer). https-only (_require_https). Cheat sheet:
+    "DID doc -> PDS"."""
+    for svc in did_doc.get("service") or []:
+        if str(svc.get("id", "")).endswith("#atproto_pds"):
+            return _require_https(svc.get("serviceEndpoint"))
+    raise FlowError("no #atproto_pds service in DID document")
+
+
+def _handle_from_did_doc(did_doc: dict) -> str | None:
+    """Handle from alsoKnownAs[0] ('at://<handle>' -> '<handle>'), or None. A
+    non-authoritative convenience for display; the authoritative subject is the
+    DID. Cheat sheet: "DID doc -> PDS" (alsoKnownAs note)."""
+    aka = did_doc.get("alsoKnownAs") or []
+    if aka and isinstance(aka[0], str) and aka[0].startswith("at://"):
+        return aka[0][len("at://") :]
+    return None
+
+
+async def _resolve_authserver(client, pds_url: str) -> str:
+    """PDS -> authorization-server issuer via the protected-resource metadata.
+    Cheat sheet: "PDS -> auth server"."""
+    url = pds_url.rstrip("/") + "/.well-known/oauth-protected-resource"
+    resp = await client.get(url)
+    if resp.status_code != 200:
+        raise FlowError(f"protected-resource metadata fetch failed for {pds_url!r}")
+    servers = resp.json().get("authorization_servers") or []
+    if not servers:
+        raise FlowError(f"no authorization_servers for PDS {pds_url!r}")
+    return _require_https(servers[0])
+
+
+async def _authserver_metadata(client, issuer: str) -> dict:
+    """Auth-server metadata (PAR/authorize/token endpoints). Spec self-
+    consistency check: the document's `issuer` MUST equal the URL it was
+    fetched from, and all three endpoints must be https. Cheat sheet: "Auth
+    server metadata"."""
+    url = issuer.rstrip("/") + "/.well-known/oauth-authorization-server"
+    resp = await client.get(url)
+    if resp.status_code != 200:
+        raise FlowError(f"auth-server metadata fetch failed for {issuer!r}")
+    meta = resp.json()
+    if meta.get("issuer") != issuer:
+        raise FlowError(
+            f"auth-server metadata issuer mismatch: {meta.get('issuer')!r} != {issuer!r}"
+        )
+    for field in (
+        "pushed_authorization_request_endpoint",
+        "authorization_endpoint",
+        "token_endpoint",
+    ):
+        if field not in meta:
+            raise FlowError(f"auth-server metadata missing {field}")
+        _require_https(meta[field])
+    return meta
 
 
 @provider_gate("bluesky")
