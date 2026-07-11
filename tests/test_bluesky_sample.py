@@ -2,9 +2,10 @@
 (samples/bluesky-auth). Exercised here: discovery, branding, the two
 `configured()` modes (public URL / dev loopback), the client-metadata document
 in both modes, the flow table's existence after startup, the ticket-02
-protocol helpers (DPoP/PKCE/identity resolution), and the ticket-03 start route
-(identity resolution -> PAR with DPoP-nonce retry -> flow-row insert -> 302).
-The callback (ticket 04) is still a 501 stub here.
+protocol helpers (DPoP/PKCE/identity resolution), the ticket-03 start route
+(identity resolution -> PAR with DPoP-nonce retry -> flow-row insert -> 302),
+and the ticket-04 callback (single-use flow row -> DPoP token exchange ->
+iss/sub + authoritative DID checks -> finish_login).
 
 The module is loaded exactly as ``just dev`` loads it: via Datasette's
 ``plugins_dir`` (a loose ``.py`` file), NOT an installed distribution.
@@ -25,6 +26,7 @@ from datasette.app import Datasette
 
 from datasette_accounts import db
 from datasette_accounts.providers import STATE_COOKIE, get_registry
+from datasette_accounts.security import COOKIE_NAME
 
 PAGE_DATA_RE = re.compile(
     r'<script type="application/json" id="pageData">(.*?)</script>', re.S
@@ -274,20 +276,6 @@ async def test_flow_table_exists_after_startup():
     # Idempotent: invoking startup again (e.g. a second import in the same
     # process) must not raise.
     await ds.invoke_startup()
-
-
-# ==========================================================================
-# 6. callback stub: 501 once enabled (start now does the real flow — see §8)
-# ==========================================================================
-
-
-@pytest.mark.asyncio
-async def test_callback_stub_returns_501(monkeypatch):
-    _configure_public(monkeypatch)
-    ds = await _make_ds()
-    await _enable(ds, signups="auto")
-    r = await ds.client.get("/-/bluesky-auth/callback")
-    assert r.status_code == 501
 
 
 # ==========================================================================
@@ -792,3 +780,265 @@ async def test_start_unconfigured_returns_503(monkeypatch):
     assert r.status_code == 503
     assert "DATASETTE_BLUESKY_PUBLIC_URL" in r.text
     assert "DATASETTE_BLUESKY_DEV_LOOPBACK" in r.text
+
+
+# ==========================================================================
+# 9. callback route (ticket 04): single-use flow row -> DPoP token exchange ->
+# iss/sub + authoritative DID checks -> finish_login.
+#
+# Same __wrapped__.__globals__ httpx swap as start (start + callback share the
+# module namespace). A callback is driven in two mocked phases: `start` runs
+# under the PAR mock to mint the flow row + state cookie, then the module's
+# `httpx` is re-swapped for a callback mock (token POST + resolution GETs +
+# getProfile) before the callback GET.
+# ==========================================================================
+
+OTHER_DID = "did:plc:mallory999"
+GETPROFILE_URL = "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile"
+
+
+def _token_response(sub=DID):
+    return _FakeResp(200, {"access_token": "at-1", "token_type": "DPoP", "sub": sub})
+
+
+def _callback_routes(*, with_handle=True, profile=None, pds_authserver=None):
+    """The canned callback resolution chain: the auth-server metadata re-fetch
+    (token_endpoint), the authoritative DID doc -> PDS -> protected-resource hop,
+    and getProfile enrichment. `pds_authserver` overrides what the PDS's
+    protected-resource metadata points back at (to break the authoritative
+    check); `profile` overrides the getProfile response."""
+    routes = _standard_get_routes(with_handle=with_handle)
+    if pds_authserver is not None:
+        routes["https://pds.example/.well-known/oauth-protected-resource"] = _FakeResp(
+            200, {"authorization_servers": [pds_authserver]}
+        )
+    routes[GETPROFILE_URL] = (
+        profile
+        if profile is not None
+        else _FakeResp(200, {"handle": "alice.example.com", "displayName": "Alice"})
+    )
+    return routes
+
+
+async def _drive_start(ds, monkeypatch, *, with_handle=True):
+    """Drive `start` under a PAR mock; return (state_value, cookies) for a
+    subsequent callback. With no handle the flow row's `did` is NULL."""
+    calls = _mock_httpx(
+        monkeypatch, _standard_get_routes(with_handle=with_handle), _par_responses()
+    )
+    path = "/-/bluesky-auth/start" + (
+        "?handle=alice.example.com" if with_handle else ""
+    )
+    r = await ds.client.get(path)
+    assert r.status_code == 302
+    state = calls["posts"][0]["data"]["state"]
+    return state, {STATE_COOKIE: r.cookies.get(STATE_COOKIE)}
+
+
+def _callback_url(state, *, code="c-1", iss="https://auth.example"):
+    return (
+        f"/-/bluesky-auth/callback?state={state}&code={code}&iss={quote(iss, safe='')}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_callback_auto_provisions_and_mints(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    internal = ds.get_internal_database()
+
+    state, cookies = await _drive_start(ds, monkeypatch)
+    # Capture the flow row's secrets BEFORE the callback consumes (deletes) it.
+    row = await _flow_row(ds, state)
+    calls = _mock_httpx(monkeypatch, _callback_routes(), [_token_response()])
+
+    r = await ds.client.get(_callback_url(state), cookies=cookies)
+    assert r.status_code == 302
+    assert r.cookies.get(COOKIE_NAME)  # a session was minted on bluesky provenance
+
+    # Identity keyed on the DID (never the handle / an email).
+    ident = await db.get_identity(internal, "bluesky", DID)
+    assert ident is not None
+    user = await db.get_user_by_id(internal, ident["user_id"])
+    # _slugify_username keeps [a-z0-9._-], so the handle's dots survive verbatim
+    # (NOT dashed) — "alice.example.com" is already a valid username.
+    assert user["username"] == "alice.example.com"
+    assert user["pending_approval"] == 0
+
+    srows = await internal.execute(f"SELECT provider FROM {db.SESSIONS}")
+    assert [r0[0] for r0 in srows.rows] == ["bluesky"]
+    last = await internal.execute(
+        f"SELECT reason, provider FROM {db.LOGIN_AUDIT} ORDER BY id DESC LIMIT 1"
+    )
+    assert dict(last.rows[0]) == {"reason": "success", "provider": "bluesky"}
+
+    # The flow row is gone (single-use).
+    assert await _flow_row(ds, state) is None
+
+    # The token POST carried a DPoP proof signed by the flow key, and the body
+    # carried the stored PKCE verifier.
+    token_post = calls["posts"][0]
+    assert token_post["url"] == "https://auth.example/token"
+    assert token_post["data"]["grant_type"] == "authorization_code"
+    assert token_post["data"]["code"] == "c-1"
+    assert token_post["data"]["code_verifier"] == row["pkce_verifier"]
+    key = JsonWebKey.import_key(json.loads(row["dpop_private_jwk"]))
+    proof = jwt.decode(token_post["headers"]["DPoP"], key)  # verifies the signature
+    assert proof["htu"] == "https://auth.example/token"
+    assert proof["htm"] == "POST"
+
+
+@pytest.mark.asyncio
+async def test_callback_replay_is_rejected(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+
+    state, cookies = await _drive_start(ds, monkeypatch)
+    _mock_httpx(monkeypatch, _callback_routes(), [_token_response()])
+    r1 = await ds.client.get(_callback_url(state), cookies=cookies)
+    assert r1.status_code == 302
+
+    # Same callback URL + cookies again: the flow row was consumed, so gate 2
+    # trips. (finish_login cleared the state cookie on the first response too;
+    # 400 regardless.)
+    _mock_httpx(monkeypatch, _callback_routes(), [_token_response()])
+    r2 = await ds.client.get(_callback_url(state), cookies=cookies)
+    assert r2.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_callback_iss_mismatch_is_rejected(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    internal = ds.get_internal_database()
+
+    state, cookies = await _drive_start(ds, monkeypatch)
+    calls = _mock_httpx(monkeypatch, _callback_routes(), [_token_response()])
+    r = await ds.client.get(
+        _callback_url(state, iss="https://evil.example"), cookies=cookies
+    )
+    assert r.status_code == 400
+    assert calls["posts"] == []  # never reached the token exchange
+    assert (await internal.execute(f"SELECT COUNT(*) FROM {db.USERS}")).rows[0][0] == 0
+    assert (await internal.execute(f"SELECT COUNT(*) FROM {db.SESSIONS}")).rows[0][
+        0
+    ] == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_sub_mismatch_is_rejected(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    internal = ds.get_internal_database()
+
+    # Handle typed at start -> flow row pins DID; the token asserts a different
+    # sub -> gate 5 trips.
+    state, cookies = await _drive_start(ds, monkeypatch, with_handle=True)
+    _mock_httpx(monkeypatch, _callback_routes(), [_token_response(sub=OTHER_DID)])
+    r = await ds.client.get(_callback_url(state), cookies=cookies)
+    assert r.status_code == 400
+    assert (await internal.execute(f"SELECT COUNT(*) FROM {db.USERS}")).rows[0][0] == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_authoritative_check_failure_is_rejected(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    internal = ds.get_internal_database()
+
+    # No handle at start -> flow row's did is NULL, so gate 5 can't catch this:
+    # only the authoritative DID doc -> PDS -> issuer check does. The sub's PDS
+    # points its protected-resource metadata at a DIFFERENT auth server.
+    state, cookies = await _drive_start(ds, monkeypatch, with_handle=False)
+    routes = _callback_routes(
+        with_handle=False, pds_authserver="https://other-auth.example"
+    )
+    _mock_httpx(monkeypatch, routes, [_token_response()])
+    r = await ds.client.get(_callback_url(state), cookies=cookies)
+    assert r.status_code == 400
+    assert (await internal.execute(f"SELECT COUNT(*) FROM {db.USERS}")).rows[0][0] == 0
+    assert (await internal.execute(f"SELECT COUNT(*) FROM {db.SESSIONS}")).rows[0][
+        0
+    ] == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_token_error_is_rejected(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+
+    state, cookies = await _drive_start(ds, monkeypatch)
+    # Token endpoint 400s with an error body (no DPoP-Nonce -> no retry).
+    calls = _mock_httpx(
+        monkeypatch,
+        _callback_routes(),
+        [_FakeResp(400, {"error": "invalid_grant"})],
+    )
+    r = await ds.client.get(_callback_url(state), cookies=cookies)
+    assert r.status_code == 400
+    # Enrichment never ran — the flow failed before it.
+    assert GETPROFILE_URL not in [u for (u, _p) in calls["gets"]]
+
+
+@pytest.mark.asyncio
+async def test_callback_enrichment_failure_is_non_fatal(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    internal = ds.get_internal_database()
+
+    state, cookies = await _drive_start(ds, monkeypatch)
+    # getProfile 500s -> sign-in still completes; username falls back to the
+    # DID-doc handle (alsoKnownAs), not a getProfile displayName.
+    routes = _callback_routes(profile=_FakeResp(500, None))
+    _mock_httpx(monkeypatch, routes, [_token_response()])
+    r = await ds.client.get(_callback_url(state), cookies=cookies)
+    assert r.status_code == 302
+    assert r.cookies.get(COOKIE_NAME)
+    ident = await db.get_identity(internal, "bluesky", DID)
+    user = await db.get_user_by_id(internal, ident["user_id"])
+    assert user["username"] == "alice.example.com"  # DID-doc alsoKnownAs handle
+
+
+@pytest.mark.asyncio
+async def test_callback_pending_approval_no_session(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="approval")
+    internal = ds.get_internal_database()
+
+    state, cookies = await _drive_start(ds, monkeypatch)
+    _mock_httpx(monkeypatch, _callback_routes(), [_token_response()])
+    r = await ds.client.get(_callback_url(state), cookies=cookies)
+    assert r.status_code == 200
+    assert "awaiting approval" in r.text
+    assert r.cookies.get(COOKIE_NAME) is None  # no session minted on approval
+    urows = await internal.execute(f"SELECT pending_approval FROM {db.USERS}")
+    assert [row0[0] for row0 in urows.rows] == [1]
+    srows = await internal.execute(f"SELECT COUNT(*) FROM {db.SESSIONS}")
+    assert srows.rows[0][0] == 0
+
+
+@pytest.mark.asyncio
+async def test_callback_disabled_provider_404(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    internal = ds.get_internal_database()
+
+    state, cookies = await _drive_start(ds, monkeypatch)
+    # Disable AFTER the flow row + state cookie exist: the gate 404s before the
+    # handler runs (and even ungated, finish_login re-checks enabled and refuses).
+    installed = list(get_registry(ds))
+    await db.set_provider_enabled(
+        internal, "root", "bluesky", False, installed_keys=installed
+    )
+    _mock_httpx(monkeypatch, _callback_routes(), [_token_response()])
+    r = await ds.client.get(_callback_url(state), cookies=cookies)
+    assert r.status_code == 404

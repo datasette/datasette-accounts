@@ -17,8 +17,9 @@ table (created idempotently by this module's own ``startup`` hookimpl — a loos
 sample can't append rows to core's ``internal_migrations.py``) holding each
 flow's PKCE verifier and per-flow DPoP private key. ``start`` (below) resolves
 the visitor's identity, pushes the authorization request, and redirects;
-``callback`` is still a 501 stub (ticket 04: the token exchange +
-iss/sub verification).
+``callback`` consumes the single-use flow row, does the DPoP-bound
+code->token exchange, cross-checks ``iss``/``sub``, verifies the returned DID
+authoritatively, and hands core an ``ExternalIdentity`` via ``finish_login``.
 
 Setup:
 
@@ -62,6 +63,8 @@ from datasette import Response, hookimpl
 from datasette_accounts import security
 from datasette_accounts.providers import (
     AuthProvider,
+    ExternalIdentity,
+    finish_login,
     make_state,
     provider_gate,
     read_state,
@@ -545,9 +548,131 @@ async def start(datasette: Datasette, request: Request) -> Response:
 
 @provider_gate("bluesky")
 async def callback(datasette: Datasette, request: Request) -> Response:
-    # Token exchange, the iss/sub authoritative cross-check, and finish_login
-    # land in ticket 04.
-    return Response.text("not implemented", status=501)
+    # Every refusal below is the SAME generic 400 — never distinguish which
+    # gate tripped (start's discipline; the GitHub sample's too).
+    fail = Response.text("Sign-in failed — please start over.", status=400)
+
+    # (1) State + query gates. read_state is the CSRF/replay defense for the
+    # round-trip (bad signature / wrong provider / TTL / state mismatch -> None);
+    # never trust intent/actor/next from the query — they ride in the signed
+    # state (providers/__init__.py:298). `code` and `iss` are both mandatory
+    # atproto callback args.
+    state = read_state(datasette, request, provider="bluesky")
+    if state is None or "code" not in request.args or "iss" not in request.args:
+        return fail
+
+    # (2) Consume the flow row ATOMICALLY, single-use even under concurrent
+    # replay: one DELETE ... RETURNING on datasette's single write thread, so a
+    # replayed callback's DELETE finds no row and 400s (no read-then-delete
+    # window). The TTL predicate in the WHERE is belt-and-braces with start's
+    # sweep — an expired row is treated as absent. Bundled SQLite is >= 3.35, so
+    # RETURNING is available (the repo's own sql/queries.sql already relies on it).
+    ttl = security.config(datasette, "provider_state_ttl_minutes")
+    internal = datasette.get_internal_database()
+
+    def _consume(conn):
+        return conn.execute(
+            f"DELETE FROM {FLOW_TABLE} WHERE state = :state AND created_at > "
+            "strftime('%Y-%m-%dT%H:%M:%f','now', printf('%+d minutes', -:ttl))"
+            "||'+00:00' "
+            "RETURNING did, issuer, pkce_verifier, dpop_private_jwk, dpop_nonce",
+            {"state": state["s"], "ttl": ttl},
+        ).fetchone()
+
+    row = await internal.execute_write_fn(_consume)
+    if row is None:  # expired, already used, or never created
+        return fail
+    row_did, issuer, pkce_verifier, dpop_jwk, dpop_nonce = row
+
+    # (3) `iss` MUST equal the issuer stored at start time (spec requirement).
+    if request.args["iss"] != issuer:
+        return fail
+
+    jwk = json.loads(dpop_jwk)
+    try:
+        # One AsyncClient for every hop (module-level `httpx` — the tests'
+        # monkeypatch target). Any FlowError / httpx error / non-JSON body is
+        # swallowed into the generic 400: never leak which step failed.
+        async with httpx.AsyncClient() as client:
+            # (4) DPoP-bound code -> token exchange. The token endpoint is
+            # re-fetched from the stored issuer's own metadata, never trusted
+            # from anything client-supplied; same DPoP key + stored nonce as PAR.
+            meta = await _authserver_metadata(client, issuer)
+            token_resp, _nonce = await _post_with_dpop(
+                client,
+                jwk,
+                meta["token_endpoint"],
+                {
+                    "grant_type": "authorization_code",
+                    "code": request.args["code"],
+                    "redirect_uri": _redirect_uri(datasette, request),
+                    "client_id": _client_id(datasette, request),
+                    "code_verifier": pkce_verifier,
+                },
+                nonce=dpop_nonce,
+            )
+            if not (200 <= token_resp.status_code < 300):
+                return fail
+            body = token_resp.json()
+            did = body.get("sub")
+            if not body.get("access_token") or not did:
+                return fail
+
+            # (5) If a handle was typed at start, the flow row pinned its DID —
+            # the returned `sub` must match it.
+            if row_did is not None and did != row_did:
+                return fail
+
+            # (6) THE load-bearing check (spec-required, cookbook-emphasized):
+            # resolve `sub`'s OWN documents (DID doc -> PDS -> protected-resource
+            # issuer) and require that issuer to equal the one that just
+            # authenticated the flow. Without it a hostile authorization server
+            # could complete a flow and assert somebody else's DID — the token's
+            # `sub` alone is NOT authoritative for the identity.
+            doc = await _did_doc(client, did)
+            pds = _pds_endpoint(doc)
+            if await _resolve_authserver(client, pds) != issuer:
+                return fail
+
+            # (7) The access token is now discarded — sign-in only, no token
+            # store, never used against a PDS (workstream design decision).
+            # Best-effort profile enrichment for display ONLY: any failure falls
+            # back to the DID-doc handle, then the DID, and NEVER fails sign-in.
+            handle = _handle_from_did_doc(doc)
+            display_name = None
+            try:
+                prof = await client.get(
+                    "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile",
+                    params={"actor": did},
+                )
+                if prof.status_code == 200:
+                    profile = prof.json()
+                    handle = profile.get("handle") or handle
+                    display_name = profile.get("displayName")
+            except Exception:
+                pass  # enrichment is display-only — never fatal to the sign-in
+    except _SIGN_IN_ERRORS:
+        return fail
+
+    # (8) Terminate through core: it owns everything downstream — the enabled
+    # re-check (the real kill switch), link/step-up intents, signups policy,
+    # account gates, and the single session mint (providers/__init__.py:473).
+    # subject = the DID (THE stable id — the handle is mutable/transferable);
+    # db.derive_username slugifies + uniquifies the raw handle (db.py:1238). No
+    # `email` kwarg: atproto exposes none, and identities map only by
+    # (provider, subject).
+    return await finish_login(
+        datasette,
+        request,
+        ExternalIdentity(
+            provider="bluesky",
+            subject=did,
+            username_hint=handle,
+            display_name=display_name or handle,
+        ),
+        provider_key="bluesky",
+        state=state,
+    )
 
 
 @hookimpl
