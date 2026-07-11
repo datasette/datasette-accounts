@@ -479,10 +479,16 @@ async def start(datasette: Datasette, request: Request) -> Response:
                     else await _resolve_handle(client, handle)
                 )
                 pds = _pds_endpoint(await _did_doc(client, did))
+                issuer = await _resolve_authserver(client, pds)
             else:
+                # bsky.social is the ENTRYWAY authorization server, not a PDS
+                # — it 404s /.well-known/oauth-protected-resource (accounts
+                # live on *.host.bsky.network PDS hosts), so use it as the
+                # issuer directly. Its metadata self-check still runs below,
+                # and the callback's authoritative check still goes the full
+                # sub -> DID doc -> PDS -> protected-resource route.
                 did = None
-                pds = "https://bsky.social"
-            issuer = await _resolve_authserver(client, pds)
+                issuer = "https://bsky.social"
             meta = await _authserver_metadata(client, issuer)
 
             # Fresh per-flow PKCE + DPoP secrets, then push the authorization

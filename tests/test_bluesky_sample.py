@@ -531,7 +531,10 @@ AUTHSERVER_META = {
 
 def _standard_get_routes(*, with_handle=True):
     """The canned resolution chain. `with_handle=False` drops the resolveHandle
-    route (default-server path) and adds bsky.social's protected-resource URL."""
+    route (default-server path) and adds bsky.social's entryway metadata —
+    bsky.social is an authorization server, NOT a PDS (its real deployment
+    404s /.well-known/oauth-protected-resource), so the no-handle path fetches
+    its oauth-authorization-server document directly."""
     routes = {
         PLC_URL: _FakeResp(200, DID_DOC),
         "https://pds.example/.well-known/oauth-protected-resource": _FakeResp(
@@ -540,8 +543,8 @@ def _standard_get_routes(*, with_handle=True):
         "https://auth.example/.well-known/oauth-authorization-server": _FakeResp(
             200, AUTHSERVER_META
         ),
-        "https://bsky.social/.well-known/oauth-protected-resource": _FakeResp(
-            200, {"authorization_servers": ["https://auth.example"]}
+        "https://bsky.social/.well-known/oauth-authorization-server": _FakeResp(
+            200, {**AUTHSERVER_META, "issuer": "https://bsky.social"}
         ),
     }
     if with_handle:
@@ -682,13 +685,16 @@ async def test_start_default_server_no_handle(monkeypatch):
     r = await ds.client.get("/-/bluesky-auth/start")
     assert r.status_code == 302
     get_urls = [u for (u, _p) in calls["gets"]]
-    # Resolution starts at bsky.social, never touching resolveHandle.
-    assert get_urls[0] == "https://bsky.social/.well-known/oauth-protected-resource"
+    # bsky.social is used as the ISSUER directly (it is the entryway auth
+    # server, not a PDS — no protected-resource fetch), never resolveHandle.
+    assert get_urls[0] == "https://bsky.social/.well-known/oauth-authorization-server"
     assert bluesky_auth.RESOLVE_HANDLE_URL not in get_urls
-    # No login_hint in the PAR body; the flow row records no expected DID.
+    # No login_hint in the PAR body; the flow row records no expected DID and
+    # pins the entryway as the issuer the callback's `iss` must match.
     assert "login_hint" not in calls["posts"][0]["data"]
     row = await _flow_row(ds, calls["posts"][0]["data"]["state"])
     assert row["did"] is None
+    assert row["issuer"] == "https://bsky.social"
 
 
 @pytest.mark.asyncio
@@ -951,15 +957,19 @@ async def test_callback_authoritative_check_failure_is_rejected(monkeypatch):
     await _enable(ds, signups="auto")
     internal = ds.get_internal_database()
 
-    # No handle at start -> flow row's did is NULL, so gate 5 can't catch this:
-    # only the authoritative DID doc -> PDS -> issuer check does. The sub's PDS
-    # points its protected-resource metadata at a DIFFERENT auth server.
+    # No handle at start -> flow row's did is NULL (issuer pinned to the
+    # bsky.social entryway), so gate 5 can't catch this: only the authoritative
+    # DID doc -> PDS -> issuer check does. The `iss` arg matches the stored
+    # issuer (gate 3 passes) but the sub's PDS points its protected-resource
+    # metadata at a DIFFERENT auth server.
     state, cookies = await _drive_start(ds, monkeypatch, with_handle=False)
     routes = _callback_routes(
         with_handle=False, pds_authserver="https://other-auth.example"
     )
     _mock_httpx(monkeypatch, routes, [_token_response()])
-    r = await ds.client.get(_callback_url(state), cookies=cookies)
+    r = await ds.client.get(
+        _callback_url(state, iss="https://bsky.social"), cookies=cookies
+    )
     assert r.status_code == 400
     assert (await internal.execute(f"SELECT COUNT(*) FROM {db.USERS}")).rows[0][0] == 0
     assert (await internal.execute(f"SELECT COUNT(*) FROM {db.SESSIONS}")).rows[0][
