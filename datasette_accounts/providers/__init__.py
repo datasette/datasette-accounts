@@ -95,11 +95,13 @@ def provider_gate(key: str) -> Callable[[RouteHandler], RouteHandler]:
     Reproduces, per route, exactly what the old core mount did in front of every
     provider request (design §3):
 
-    * **404** — byte-identical body to an uninstalled provider — when the
-      provider is disabled: a disabled provider's whole URL surface is dead and
-      we never reveal which providers are installed but off.
-    * **CSRF gate** on POST (``security.csrf_error``, the same 403-wrapping as
-      ``router._gate_mutation``): form / OAuth providers that POST get the core
+    * **404** when the provider is disabled: the gated URL surface goes dead.
+      (Honest caveat: this plain-text 404 differs from Datasette's HTML 404 for
+      never-registered paths, so "installed but disabled" is distinguishable
+      from "not installed" — the D3b trade-off, accepted as low-sensitivity;
+      see plans/auth-providers/03-decisions.md D3b.)
+    * **CSRF gate** on POST (``security.csrf_error`` → plain-text 403, matching
+      the old core mount): form / OAuth providers that POST get the core
       CSRF check for free.
     * **405** on any method other than GET / HEAD / POST.
 

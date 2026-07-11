@@ -11,8 +11,9 @@ The whole file is intentionally tiny and touches zero security machinery:
 datasette-accounts owns the signed ``state``, the account gates, provisioning
 policy, session mint, and the cookie, and re-checks the provider's enabled bit
 inside ``finish_login``. The provider owns its own routes (the ordinary
-Datasette ``register_routes`` hook) and wraps each one in ``@provider_gate`` for
-the enabled-404 + CSRF-on-POST + ``?next=`` validation lives in ``make_state``.
+Datasette ``register_routes`` hook) and wraps each one in ``@provider_gate``
+for the enabled-404, CSRF-on-POST, and method gating; ``?next=`` validation
+lives in ``make_state``.
 A provider's only job is to prove control of some external identity and hand core
 an ``ExternalIdentity``. See the README for the full contract + security checklist.
 """
