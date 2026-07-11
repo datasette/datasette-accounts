@@ -37,6 +37,11 @@ reset, promote, or delete existing ones:
   PBKDF2 run off the event loop, unconditional CSRF gates, strict `?next=`
   validation, brute-force lockout (shared by login and change-password), forced
   first-password-change, audit logging, and retention/pruning.
+- **Pluggable sign-in providers** — the built-in username/password login is one
+  provider; other packages add GitHub / OIDC / Discord / … through the
+  `datasette_accounts_auth_providers` hookspec, and every provider inherits the
+  same account gates, approval queue, session list, and audit. Admins choose
+  which providers are valid at runtime.
 - **A Svelte/TS frontend** for the login, account, and admin pages.
 - **Integrates with `datasette-user-profiles`** (a required dependency) — emits a
   stable actor `id` and seeds the profiles directory, so every account can view
@@ -120,6 +125,10 @@ datasette accounts unlock USERNAME        # clear lockout counters
 datasette accounts logout USERNAME        # revoke all of a user's sessions
 datasette accounts delete USERNAME --yes
 datasette accounts registration on|off|status  # open/close self-registration (runtime toggle)
+datasette accounts providers              # list installed sign-in providers + their state (--json)
+datasette accounts enable-provider KEY    # turn a provider on (break-glass: works with only disk access)
+datasette accounts disable-provider KEY   # turn a provider off (last-provider guard applies)
+datasette accounts set-signups KEY off|approval|auto  # per-provider signups policy
 datasette accounts audit                  # the admin-audit trail
 datasette accounts login-attempts         # the login-attempt audit
 datasette accounts hash-password [PASSWORD]
@@ -136,6 +145,49 @@ shown on the homepage to signed-out visitors, and a help/contact note shown belo
 the login form. Blank hides a message. Bodies are admin-authored HTML rendered
 verbatim, so you can include links and `mailto:` contacts (only admins can edit
 them). The same page holds the self-registration toggle.
+
+## Sign-in providers
+
+The username/password login is the built-in **provider**. Other packages can add
+sign-in methods (GitHub, Google/OIDC, Discord, …) through the
+`datasette_accounts_auth_providers` hookspec, and every provider inherits the
+same account semantics: the disable/expire/pending gates, the shared approval
+queue and abuse caps, the session list, and the audit trail. A provider only
+proves control of an external identity — datasette-accounts owns identity,
+policy, and sessions. External identities map to accounts **only** by the IdP's
+stable subject id (never by email).
+
+### For admins
+
+Installing a provider package changes nothing until you enable it — external
+providers are **disabled by default**. From the **Configuration** admin page
+(`/-/admin/config`) or the CLI:
+
+```bash
+datasette accounts providers -i accounts.db                 # list + state
+datasette accounts enable-provider github -i accounts.db    # turn it on
+datasette accounts set-signups github approval -i accounts.db  # off | approval | auto
+```
+
+Each provider has two runtime settings: **enabled** (on/off) and **signups**
+(`off` = only already-linked accounts may sign in; `approval` = first-time
+identities land in the approval queue; `auto` = first-time identities are
+activated immediately — for trusted IdPs only). Users link and unlink providers
+to their own account from `/-/account`, gated by fresh proof of an existing
+sign-in method.
+
+`enable-provider` is the **break-glass**: it works with only disk access and no
+web session, so a locked-out operator can always restore password login even
+after disabling every other provider. `disable-provider` refuses to disable the
+last enabled provider (the same guard applies in the UI).
+
+### For provider authors
+
+See [`examples/datasette-accounts-demo-auth`](examples/datasette-accounts-demo-auth/) —
+a tiny, installable demo provider whose README doubles as the provider-author
+tutorial (the hookspec contract, what core does for you, and a security
+checklist). It is development-only and authenticates nobody; copy it as
+scaffolding for a real OAuth/OIDC provider.
 
 ## Configuration
 

@@ -187,8 +187,11 @@ async def test_registry_includes_registered_provider(register_provider):
     ds = await make_ds()
     registry = getattr(ds, "_datasette_accounts_providers")
     assert registry["echo"] is provider
-    # The built-in password provider is always present and first.
-    assert list(registry) == ["password", "echo"]
+    # The built-in password provider is always present and first. (The installed
+    # datasette-accounts-demo-auth example package also contributes a `demo`
+    # provider to every startup — ignore it here.)
+    keys = [k for k in registry if k != "demo"]
+    assert keys == ["password", "echo"]
 
 
 @pytest.mark.asyncio

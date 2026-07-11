@@ -35,6 +35,20 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
   wrappers (KDF runs off the event loop) + DUMMY_HASH + length bounds.
 - `security.py` — CSRF gates, `?next=` validation, secure-cookie + IP-trust.
 - `router.py` — shared Router + POST-only/CSRF/admin decorators.
+- `hookspecs.py` — the `datasette_accounts_auth_providers(datasette)` hookspec,
+  added to core's `pm` at import time so other packages can add sign-in methods.
+- `providers/` — the pluggable sign-in provider layer (plans/auth-providers/).
+  `__init__.py` = the `AuthProvider` contract, `Local`/`ExternalIdentity`,
+  core-owned signed state (`make_state`/`read_state`), the registry, and
+  `finish_login` — the single termination point every sign-in (password, invite/
+  reset, external) funnels through: account gates → per-provider signups policy →
+  the one `db.create_session` mint. `password.py` = the built-in username/
+  password provider (login/register/set-password minting moved here, zero
+  behavior change; canonical `/-/login…` URLs unchanged). External identities map
+  to accounts only by `(provider, subject)`, never by email.
+- `routes/providers.py` — the mount: one route dispatching
+  `/-/login/provider/{key}/*`, with the enabled-bit check + CSRF gate in front of
+  `provider.handle` (a disabled provider's whole URL surface 404s).
 - `routes/api.py`, `routes/pages.py` — endpoints and HTML shells.
 - `grantable.py` — which global actions are grantable + principal gating +
   config-grant display; `db.py` `capability_grants` table + grant/revoke/list.
@@ -42,6 +56,14 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
   the acl-admin bridge (F2); `datasette_acl_valid_actors` exposes accounts (F3).
   Frontend: `frontend/src/pages/capabilities`. datasette-paper is a dev dep used
   as the worked example (`datasette-paper-create`) in tests + screenshots.
+- `examples/datasette-accounts-demo-auth/` — a dev-only installable demo sign-in
+  provider (`demo`, authenticates nobody) + its README-as-tutorial. Wired as an
+  editable path source in the dev group (`[tool.uv.sources]`), so it is
+  discovered via a real entry point on every instance — `tests/
+  test_demo_provider.py` drives the full external path through it (rather than
+  the pluggy fixture the other provider tests use). Because it is installed, a
+  `demo` provider shows up in the registry during the whole test suite; a couple
+  of provider tests filter it out of exact-registry assertions.
 
 ## Gotchas discovered during build
 - datasette-plugin-router does **not** dispatch by HTTP method: identical paths

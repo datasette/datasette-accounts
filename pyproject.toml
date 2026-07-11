@@ -20,12 +20,21 @@ dependencies = [
 dev = [
     "datasette-acl",
     "datasette-acl-share",
+    "datasette-accounts-demo-auth",
     "datasette-paper",
     "pytest",
     "pytest-asyncio",
     "ruff>=0.15.0",
     "solite>=0.0.1a36",
 ]
+
+# The demo auth provider (examples/) is a local, never-published package — an
+# editable path source, unlike datasette-paper which comes from PyPI. It ships
+# a `datasette` entry point so tests/test_demo_provider.py exercises real
+# entry-point discovery instead of the pluggy test fixture the other provider
+# tests use.
+[tool.uv.sources]
+datasette-accounts-demo-auth = { path = "examples/datasette-accounts-demo-auth", editable = true }
 
 [project.entry-points.datasette]
 accounts = "datasette_accounts"

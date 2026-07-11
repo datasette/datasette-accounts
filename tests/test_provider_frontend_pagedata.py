@@ -190,7 +190,10 @@ async def test_config_page_provider_rows(register_providers):
     data = extract_page_data(r.text)
 
     rows = {p["key"]: p for p in data["providers"]}
-    assert set(rows) == {"password", "acme"}
+    # The installed datasette-accounts-demo-auth example package also lists a
+    # `demo` provider (disabled by default) on every instance — assert our two
+    # are present rather than exact equality.
+    assert {"password", "acme"} <= set(rows)
     # Built-in password provider: enabled by default, source is our package.
     pw = rows["password"]
     assert pw["builtin"] is True
