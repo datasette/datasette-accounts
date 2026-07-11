@@ -22,8 +22,11 @@ explainer and no session can be minted. It stays invisible on the login page
 until an admin enables it. See README.md for the full contract + security notes.
 """
 
+from __future__ import annotations
+
 import os
 import urllib.parse
+from typing import TYPE_CHECKING
 
 import httpx
 from datasette import Response, hookimpl
@@ -35,6 +38,10 @@ from datasette_accounts.providers import (
     make_state,
     read_state,
 )
+
+if TYPE_CHECKING:
+    from datasette.app import Datasette
+    from datasette.utils.asgi import Request
 
 AUTHORIZE_URL = "https://discord.com/oauth2/authorize"
 TOKEN_URL = "https://discord.com/api/oauth2/token"
@@ -53,13 +60,13 @@ class DiscordProvider(AuthProvider):
     key = "discord"
     label = "Discord"
 
-    def _creds(self):
+    def _creds(self) -> tuple[str | None, str | None]:
         return (
             os.environ.get("DATASETTE_DISCORD_CLIENT_ID"),
             os.environ.get("DATASETTE_DISCORD_CLIENT_SECRET"),
         )
 
-    def _redirect_uri(self, datasette, request):
+    def _redirect_uri(self, datasette: Datasette, request: Request) -> str:
         # Discord requires this to byte-match the redirect URI registered on the
         # app AND the one sent at authorize time, so build it the same way in
         # both start and callback.
@@ -68,7 +75,9 @@ class DiscordProvider(AuthProvider):
             datasette.urls.path("/-/login/provider/discord/callback"),
         )
 
-    async def handle(self, datasette, request, subpath):
+    async def handle(
+        self, datasette: Datasette, request: Request, subpath: str
+    ) -> Response:
         client_id, client_secret = self._creds()
 
         if subpath == "start":
@@ -160,5 +169,5 @@ class DiscordProvider(AuthProvider):
 
 
 @hookimpl
-def datasette_accounts_auth_providers(datasette):
+def datasette_accounts_auth_providers(datasette: Datasette) -> list[AuthProvider]:
     return [DiscordProvider()]

@@ -8,10 +8,13 @@ the account gates and mints the session. Core owns the signed OAuth `state` so
 no provider hand-rolls it.
 """
 
+from __future__ import annotations
+
 import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, TypedDict
 from urllib.parse import quote
 
 from datasette import Response
@@ -19,6 +22,15 @@ from datasette import Response
 from .. import db, security
 from ..security import COOKIE_NAME, SIGN_NAMESPACE
 from ..sessions import mint_token, token_sha256
+
+if TYPE_CHECKING:
+    # Type-only imports: importing Datasette/Request at module load would pull
+    # the full app in before this plugin's submodules finish importing (the same
+    # reason the runtime code uses lazy imports — see providers/password.py).
+    # `from __future__ import annotations` makes every annotation a string, so
+    # these names are never evaluated at runtime.
+    from datasette.app import Datasette
+    from datasette.utils.asgi import Request
 
 # Provider keys: lowercase slug, must start with an alphanumeric. "password" is
 # reserved for the built-in provider; it matches KEY_RE like any other key, so
@@ -47,7 +59,9 @@ class AuthProvider:
     key: str
     label: str
 
-    async def handle(self, datasette, request, subpath: str):
+    async def handle(
+        self, datasette: Datasette, request: Request, subpath: str
+    ) -> Response:
         """Serve one request under /-/login/provider/{key}/{subpath}.
 
         Conventional subpaths: "start" (begin the flow) and "callback".
@@ -71,6 +85,11 @@ class ExternalIdentity:
     display_name: str | None = None  # audit detail only; we store no profile
 
 
+# What a provider hands finish_login: an existing local account (password /
+# invite / reset completion) or a proven external identity.
+Identity = LocalIdentity | ExternalIdentity
+
+
 # The built-in username/password provider lives in providers/password.py so the
 # login/register/set-password code it owns can move there without a circular
 # import against this module's finish_login.
@@ -81,17 +100,36 @@ class ExternalIdentity:
 # --------------------------------------------------------------------------
 
 
+class State(TypedDict):
+    """The signed OAuth-``state`` payload minted by ``make_state`` and returned
+    by ``read_state``. Keys are single letters to keep the signed cookie small;
+    ``make_state`` always writes all of them, so the shape is total.
+
+    ``u`` (step-up proof) is a small heterogeneous dict: a link-request state
+    carries ``{"target": <provider>}`` and a step-up proof carries
+    ``{"provider": <origin>, "at": <iso8601>}`` — hence ``dict[str, str] | None``.
+    """
+
+    s: str  # random nonce, double-submitted as the `state` query arg
+    p: str  # provider key this state is bound to
+    n: str  # validated post-login `next` path (validate_next never returns None)
+    i: str  # intent: "login" | "link" | "step-up"
+    a: str | None  # bound actor id (link / step-up flows), else None
+    u: dict[str, str] | None  # step-up proof / link target, else None
+    c: str  # created-at ISO8601 (millisecond + offset), for the TTL check
+
+
 def make_state(
-    datasette,
-    request,
-    response,
+    datasette: Datasette,
+    request: Request,
+    response: Response,
     *,
-    provider,
-    next=None,
-    intent="login",
-    actor_id=None,
-    step_up=None,
-):
+    provider: str,
+    next: str | None = None,
+    intent: str = "login",
+    actor_id: str | None = None,
+    step_up: dict[str, str] | None = None,
+) -> str:
     """Mint a signed OAuth `state`, set the state cookie, return the value.
 
     `request` is needed only to decide the cookie's Secure flag. `next` is
@@ -122,7 +160,9 @@ def make_state(
     return value
 
 
-def read_state(datasette, request, *, provider):
+def read_state(
+    datasette: Datasette, request: Request, *, provider: str
+) -> State | None:
     """Validate + return the signed state payload, or None on any failure.
 
     Requires: a well-signed cookie; the `state` query arg matching the stored
@@ -162,7 +202,7 @@ def read_state(datasette, request, *, provider):
     return payload
 
 
-def clear_state_cookie(response):
+def clear_state_cookie(response: Response) -> None:
     response.set_cookie(STATE_COOKIE, "", max_age=0, path="/", expires=0)
 
 
@@ -171,12 +211,12 @@ def clear_state_cookie(response):
 # --------------------------------------------------------------------------
 
 
-def get_registry(datasette):
+def get_registry(datasette: Datasette) -> dict[str, AuthProvider]:
     """The provider registry dict {key: AuthProvider} built at startup (§3)."""
     return getattr(datasette, REGISTRY_ATTR, {})
 
 
-def provider_label(datasette, key):
+def provider_label(datasette: Datasette, key: str) -> str:
     """Display label for a provider key, falling back to the key when the
     provider package is no longer installed (a linked identity outliving its
     provider still renders)."""
@@ -184,7 +224,7 @@ def provider_label(datasette, key):
     return provider.label if provider is not None else key
 
 
-def provider_source(provider):
+def provider_source(provider: AuthProvider) -> str:
     """The provider's source package — the top-level package of its class's
     module (e.g. "datasette_accounts" for the built-in password provider, or the
     third-party plugin's distribution package for an external provider). Shown in
@@ -192,13 +232,15 @@ def provider_source(provider):
     return (type(provider).__module__ or "").split(".")[0]
 
 
-def external_provider_keys(datasette):
+def external_provider_keys(datasette: Datasette) -> list[str]:
     """Every installed external provider key (registry order, `password`
     excluded) — the universe the account page filters to 'linkable'."""
     return [k for k in get_registry(datasette) if k != "password"]
 
 
-def to_identity_rows(datasette, raw_identities):
+def to_identity_rows(
+    datasette: Datasette, raw_identities: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     """Map db identity dicts → IdentityRow-shaped dicts, resolving the display
     label from the live registry. Shared by the account + admin surfaces."""
     return [
@@ -218,7 +260,9 @@ def to_identity_rows(datasette, raw_identities):
 # --------------------------------------------------------------------------
 
 
-def set_session_cookie(datasette, request, response, raw_token):
+def set_session_cookie(
+    datasette: Datasette, request: Request, response: Response, raw_token: str
+) -> None:
     response.set_cookie(
         COOKIE_NAME,
         datasette.sign(raw_token, SIGN_NAMESPACE),
@@ -230,7 +274,7 @@ def set_session_cookie(datasette, request, response, raw_token):
     )
 
 
-def clear_stale_core_actor_cookie(request, response):
+def clear_stale_core_actor_cookie(request: Request, response: Response) -> None:
     # This plugin owns auth via its own session cookie, but a leftover core
     # `ds_actor` cookie (e.g. an old root login) makes Datasette's base
     # template render its own Log out button next to ours. Signing in or out
@@ -241,7 +285,13 @@ def clear_stale_core_actor_cookie(request, response):
         response.set_cookie("ds_actor", "", max_age=0, path="/", expires=0)
 
 
-async def mint_session(datasette, request, response, user, provider="password"):
+async def mint_session(
+    datasette: Datasette,
+    request: Request,
+    response: Response,
+    user: dict[str, Any],
+    provider: str = "password",
+) -> None:
     """The single session mint: stamp login success, create the session row,
     and set the session + stale-core cookies on ``response``.
 
@@ -275,14 +325,14 @@ async def mint_session(datasette, request, response, user, provider="password"):
 
 
 async def finish_login(
-    datasette,
-    request,
-    identity,
+    datasette: Datasette,
+    request: Request,
+    identity: Identity,
     *,
-    provider_key,
-    response_mode="redirect",
-    state=None,
-):
+    provider_key: str,
+    response_mode: str = "redirect",
+    state: State | None = None,
+) -> Response:
     """Terminate a sign-in flow: run account gates + policy, then mint.
 
     `provider_key` is the key of the provider that produced `identity`; it is

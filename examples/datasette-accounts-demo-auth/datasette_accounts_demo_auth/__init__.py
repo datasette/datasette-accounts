@@ -15,7 +15,10 @@ is to prove control of some external identity and hand core an
 ``ExternalIdentity``. See the README for the full contract + security checklist.
 """
 
+from __future__ import annotations
+
 import warnings
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from datasette import Response, hookimpl
@@ -26,6 +29,10 @@ from datasette_accounts.providers import (
     make_state,
     read_state,
 )
+
+if TYPE_CHECKING:
+    from datasette.app import Datasette
+    from datasette.utils.asgi import Request
 
 # The pretend IdP page: subject + hint + display-name inputs behind a loud
 # development-only banner, submitting (via GET, so the whole loop is browser
@@ -85,7 +92,9 @@ class DemoProvider(AuthProvider):
     key = "demo"
     label = "Demo (dev only)"
 
-    async def handle(self, datasette, request, subpath):
+    async def handle(
+        self, datasette: Datasette, request: Request, subpath: str
+    ) -> Response:
         if subpath == "start":
             # A link / step-up flow reaches `start` with a signed state already
             # minted by datasette-accounts (intent + actor_id ride in that
@@ -144,7 +153,7 @@ class DemoProvider(AuthProvider):
 
 
 @hookimpl
-def datasette_accounts_auth_providers(datasette):
+def datasette_accounts_auth_providers(datasette: Datasette) -> list[AuthProvider]:
     # Loud at load time too: if this package is installed at all, something is
     # probably wrong outside a dev/test/demo environment.
     warnings.warn(

@@ -41,7 +41,7 @@ A provider is an `AuthProvider` subclass with a `key`, a `label`, and one async
 method:
 
 ```python
-async def handle(self, datasette, request, subpath) -> Response
+async def handle(self, datasette: Datasette, request: Request, subpath: str) -> Response
 ```
 
 Core mounts it at `/-/login/provider/{key}/*` and calls `handle` with the
@@ -52,9 +52,10 @@ hookimpl returns your instances:
 
 ```python
 from datasette import hookimpl
+from datasette_accounts.providers import AuthProvider
 
 @hookimpl
-def datasette_accounts_auth_providers(datasette):
+def datasette_accounts_auth_providers(datasette) -> list[AuthProvider]:
     return [DemoProvider()]
 ```
 

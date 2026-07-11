@@ -13,6 +13,9 @@ that exactly one PBKDF2 verify runs on every branch. Routing the calls through
 that module keeps those assertions valid after the move.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 from datasette import NotFound, Response
@@ -25,6 +28,14 @@ from ..passwords import (
     check_password_length,
 )
 from . import AuthProvider
+
+if TYPE_CHECKING:
+    # Type-only imports (annotations are strings under `from __future__ import
+    # annotations`), so no runtime import cost or cycle risk.
+    from datasette.app import Datasette
+    from datasette.utils.asgi import Request
+
+    from ..page_data import RegisterRequest
 
 # The user-facing login error is deliberately generic — the specific reason
 # lives only in the admin-only login_audit.
@@ -43,7 +54,9 @@ class PasswordProvider(AuthProvider):
     key = "password"
     label = "Username & password"
 
-    async def handle(self, datasette, request, subpath: str):
+    async def handle(
+        self, datasette: Datasette, request: Request, subpath: str
+    ) -> Response:
         base_url = datasette.setting("base_url") or "/"
         next_value = security.validate_next(request.args.get("next"), base_url)
         target = datasette.urls.path("/-/login")
@@ -52,13 +65,17 @@ class PasswordProvider(AuthProvider):
         return Response.redirect(target)
 
 
-async def verify_credentials(datasette, request, username, password):
+async def verify_credentials(
+    datasette: Datasette, request: Request, username: str, password: str
+) -> dict[str, Any] | Response:
     """Run the login verify half: lockout, one-KDF discipline, audit + lockout
     bookkeeping. Returns the authenticated user dict on success, or an error
     ``Response`` (429/401) to send verbatim. The caller mints via finish_login.
 
-    Moved verbatim from authenticate(); the timing-discipline comments are the
-    documentation and must stay intact.
+    The union return is load-bearing: the caller distinguishes the two by type
+    (``isinstance(result, Response)`` → send verbatim; otherwise it is the user
+    dict to mint). Moved verbatim from authenticate(); the timing-discipline
+    comments are the documentation and must stay intact.
     """
     # Imported here (not at module top) to avoid an import cycle — routes.api
     # imports this module. The tests monkeypatch api.averify_dummy /
@@ -119,7 +136,9 @@ async def verify_credentials(datasette, request, username, password):
     return user
 
 
-async def register(datasette, request, body):
+async def register(
+    datasette: Datasette, request: Request, body: RegisterRequest
+) -> Response:
     """Self-registration submit (moved verbatim from register_submit).
 
     A disabled password provider means no password signups at all, regardless of
