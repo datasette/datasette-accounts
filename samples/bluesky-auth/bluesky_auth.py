@@ -12,13 +12,13 @@ store, no refresh, no PDS writes (see ``todos/bluesky-auth/README.md``). It is
 a single loose module that Datasette's ``--plugins-dir`` imports directly (no
 packaging); ``just dev`` loads it via ``samples/dev-plugins``.
 
-This ticket (01) only scaffolds the provider: the descriptor, the
-client-metadata route, and a SQL table (created idempotently by this module's
-own ``startup`` hookimpl — a loose sample can't append rows to core's
-``internal_migrations.py``) that will hold each flow's PKCE verifier and
-per-flow DPoP private key. ``start`` and ``callback`` are 501 stubs; tickets
-02-04 fill in DPoP/identity helpers, the PAR + redirect, and the token
-exchange + verification.
+The provider scaffolding: the descriptor, the client-metadata route, and a SQL
+table (created idempotently by this module's own ``startup`` hookimpl — a loose
+sample can't append rows to core's ``internal_migrations.py``) holding each
+flow's PKCE verifier and per-flow DPoP private key. ``start`` (below) resolves
+the visitor's identity, pushes the authorization request, and redirects;
+``callback`` is still a 501 stub (ticket 04: the token exchange +
+iss/sub verification).
 
 Setup:
 
@@ -33,8 +33,8 @@ Setup:
      no metadata hosting needed; real auth servers (bsky.social) special-case
      this form.
    - Neither set -> ``configured()`` is False: core hides the login button
-     (and link/step-up targets), and ``start`` will 503 once ticket 03 lands —
-     the same inert-when-unconfigured contract as the other OAuth samples.
+     (and link/step-up targets), and ``start`` answers a 503 explainer — the
+     same inert-when-unconfigured contract as the other OAuth samples.
 2. Enable + open the provider (external providers are disabled by default):
        datasette accounts enable-provider bluesky -i accounts.db
        datasette accounts set-signups bluesky auto -i accounts.db   # or approval
@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import secrets
 import time
@@ -58,7 +59,13 @@ import httpx
 from authlib.jose import JsonWebKey, jwt
 from datasette import Response, hookimpl
 
-from datasette_accounts.providers import AuthProvider, provider_gate
+from datasette_accounts import security
+from datasette_accounts.providers import (
+    AuthProvider,
+    make_state,
+    provider_gate,
+    read_state,
+)
 
 if TYPE_CHECKING:
     from datasette.app import Datasette
@@ -209,6 +216,15 @@ PLC_DIRECTORY_URL = "https://plc.directory"
 class FlowError(Exception):
     """Any resolution failure / malformed protocol document. Tickets 03/04
     catch this single type and answer a generic 400 (never leak internals)."""
+
+
+# Everything that can go wrong mid-flight — a resolution FlowError, an httpx
+# transport error, or a non-JSON protocol body — funnels to the same generic
+# 400 (see `start`; ticket 04's callback too). Captured at import time on
+# purpose: the route tests swap the module-level `httpx` name, so an
+# `httpx.HTTPError` reference inside the `except` clause would break once
+# swapped — this tuple is built against the real httpx before any swap.
+_SIGN_IN_ERRORS = (FlowError, httpx.HTTPError, ValueError)
 
 
 def _require_https(url: str) -> str:
@@ -407,9 +423,124 @@ async def client_metadata(datasette: Datasette, request: Request) -> Response:
 
 @provider_gate("bluesky")
 async def start(datasette: Datasette, request: Request) -> Response:
-    # Identity resolution (handle -> DID -> PDS -> auth server), PAR with a
-    # fresh PKCE/DPoP pair, and the flow-row insert land in ticket 03.
-    return Response.text("not implemented", status=501)
+    if _mode() is None:
+        # Defense in depth — core already hides the button when configured() is
+        # False. Name both env vars so a half-set instance can self-diagnose.
+        return Response.html(
+            "<p>Bluesky sign-in is not configured — set "
+            "<code>DATASETTE_BLUESKY_PUBLIC_URL</code> (production) or "
+            "<code>DATASETTE_BLUESKY_DEV_LOOPBACK=1</code> (local dev).</p>",
+            status=503,
+        )
+
+    # A link / step-up flow reaches `start` with a signed state already minted by
+    # core (intent + actor_id ride in that cookie): carry it through untouched,
+    # never re-mint. A fresh login has none, so we mint a login-intent one on the
+    # response we are about to return. The resulting string is BOTH the OAuth
+    # `state` parameter sent to PAR and this flow row's primary key.
+    response = Response.redirect("about:blank")
+    existing = read_state(datasette, request, provider="bluesky")
+    if existing is not None:
+        state = request.args.get("state", "")
+    else:
+        state = make_state(
+            datasette,
+            request,
+            response,
+            provider="bluesky",
+            next=request.args.get("next"),
+            intent=request.args.get("intent", "login"),
+        )
+
+    # ?handle= selects a specific account's PDS; strip whitespace and a leading
+    # '@'. A did: value is used directly (skip resolveHandle). With no handle we
+    # send the visitor to bsky.social's own sign-in (npmx.dev's default too) and
+    # store no expected DID.
+    handle = (request.args.get("handle") or "").strip().lstrip("@") or None
+
+    try:
+        # One AsyncClient for every network hop the handler makes (module-level
+        # `httpx` — the tests' monkeypatch target). Any FlowError / httpx error /
+        # non-JSON body is swallowed into the generic 400 below: never leak which
+        # resolution step failed.
+        async with httpx.AsyncClient() as client:
+            if handle:
+                did = (
+                    handle
+                    if handle.startswith("did:")
+                    else await _resolve_handle(client, handle)
+                )
+                pds = _pds_endpoint(await _did_doc(client, did))
+            else:
+                did = None
+                pds = "https://bsky.social"
+            issuer = await _resolve_authserver(client, pds)
+            meta = await _authserver_metadata(client, issuer)
+
+            # Fresh per-flow PKCE + DPoP secrets, then push the authorization
+            # request. bsky.social always demands a server nonce on the first
+            # PAR, so _post_with_dpop retries once — that is the normal path.
+            verifier, challenge = _pkce_pair()
+            jwk = _gen_dpop_jwk()
+            par_data = {
+                "client_id": _client_id(datasette, request),
+                "redirect_uri": _redirect_uri(datasette, request),
+                "response_type": "code",
+                "scope": "atproto",
+                "state": state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            }
+            if handle:
+                par_data["login_hint"] = handle
+            par_resp, nonce = await _post_with_dpop(
+                client, jwk, meta["pushed_authorization_request_endpoint"], par_data
+            )
+            if not (200 <= par_resp.status_code < 300):
+                raise FlowError("PAR request rejected")
+            request_uri = par_resp.json().get("request_uri")
+            if not request_uri:
+                raise FlowError("PAR response missing request_uri")
+    except _SIGN_IN_ERRORS:
+        return Response.text("Sign-in failed — please start over.", status=400)
+
+    # Persist the per-flow secrets server-side (the DPoP private key can't ride in
+    # a cookie). Keyed by the same state string; the row's TTL matches the state
+    # cookie's, so both expire together. Sweep expired rows first with the repo's
+    # SQL-relative-deadline idiom, then INSERT OR REPLACE the fresh one.
+    ttl = security.config(datasette, "provider_state_ttl_minutes")
+    internal = datasette.get_internal_database()
+    await internal.execute_write(
+        f"DELETE FROM {FLOW_TABLE} WHERE created_at <= "
+        "strftime('%Y-%m-%dT%H:%M:%f','now', printf('%+d minutes', -:ttl))"
+        "||'+00:00'",
+        {"ttl": ttl},
+    )
+    await internal.execute_write(
+        f"INSERT OR REPLACE INTO {FLOW_TABLE} "
+        "(state, did, issuer, pkce_verifier, dpop_private_jwk, dpop_nonce, created_at) "
+        "VALUES (:state, :did, :issuer, :verifier, :jwk_json, :nonce, "
+        "strftime('%Y-%m-%dT%H:%M:%f','now')||'+00:00')",
+        {
+            "state": state,
+            "did": did,
+            "issuer": issuer,
+            "verifier": verifier,
+            "jwk_json": json.dumps(jwk),
+            "nonce": nonce,
+        },
+    )
+
+    # Response.redirect wrote "Location" (capital L); overwrite that exact key so
+    # we don't emit a second, lowercase header (the duplicate-header gotcha).
+    response.headers["Location"] = (
+        meta["authorization_endpoint"]
+        + "?"
+        + urllib.parse.urlencode(
+            {"client_id": _client_id(datasette, request), "request_uri": request_uri}
+        )
+    )
+    return response
 
 
 @provider_gate("bluesky")

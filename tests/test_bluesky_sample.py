@@ -1,9 +1,10 @@
-"""Unit coverage for the Bluesky (AT Protocol OAuth) sample scaffold
-(samples/bluesky-auth) — ticket 01. Only the scaffold is exercised here:
-discovery, branding, the two `configured()` modes (public URL / dev
-loopback), the client-metadata document in both modes, the flow table's
-existence after startup, and the 501 stubs for start/callback. Tickets 02-04
-add the real PAR/token-exchange coverage.
+"""Unit coverage for the Bluesky (AT Protocol OAuth) sample
+(samples/bluesky-auth). Exercised here: discovery, branding, the two
+`configured()` modes (public URL / dev loopback), the client-metadata document
+in both modes, the flow table's existence after startup, the ticket-02
+protocol helpers (DPoP/PKCE/identity resolution), and the ticket-03 start route
+(identity resolution -> PAR with DPoP-nonce retry -> flow-row insert -> 302).
+The callback (ticket 04) is still a 501 stub here.
 
 The module is loaded exactly as ``just dev`` loads it: via Datasette's
 ``plugins_dir`` (a loose ``.py`` file), NOT an installed distribution.
@@ -14,6 +15,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import types
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
@@ -22,7 +24,7 @@ from authlib.jose import JsonWebKey, jwt
 from datasette.app import Datasette
 
 from datasette_accounts import db
-from datasette_accounts.providers import get_registry
+from datasette_accounts.providers import STATE_COOKIE, get_registry
 
 PAGE_DATA_RE = re.compile(
     r'<script type="application/json" id="pageData">(.*?)</script>', re.S
@@ -275,17 +277,8 @@ async def test_flow_table_exists_after_startup():
 
 
 # ==========================================================================
-# 6. start/callback stubs: 501 once enabled
+# 6. callback stub: 501 once enabled (start now does the real flow — see §8)
 # ==========================================================================
-
-
-@pytest.mark.asyncio
-async def test_start_stub_returns_501(monkeypatch):
-    _configure_public(monkeypatch)
-    ds = await _make_ds()
-    await _enable(ds, signups="auto")
-    r = await ds.client.get("/-/bluesky-auth/start")
-    assert r.status_code == 501
 
 
 @pytest.mark.asyncio
@@ -517,3 +510,285 @@ async def test_authserver_metadata_ok_and_issuer_mismatch():
     client2 = _FakeGetClient({url: _FakeResp(200, bad)})
     with pytest.raises(bluesky_auth.FlowError):
         await bluesky_auth._authserver_metadata(client2, issuer)
+
+
+# ==========================================================================
+# 8. start route (ticket 03): identity resolution -> PAR -> flow row -> 302
+#
+# The whole handler's HTTP is swapped out via the gated route's
+# __wrapped__.__globals__ (same targeting as test_github_sample.py:110-125),
+# for a URL-dispatching fake AsyncClient that answers the resolve/DID/PDS/
+# auth-server GETs and the two-call PAR POST (use_dpop_nonce, then request_uri).
+# ==========================================================================
+
+DID = "did:plc:alice123"
+PLC_URL = f"https://plc.directory/{quote(DID, safe='')}"
+DID_DOC = {
+    "alsoKnownAs": ["at://alice.example.com"],
+    "service": [
+        {
+            "id": "#atproto_pds",
+            "type": "AtprotoPersonalDataServer",
+            "serviceEndpoint": "https://pds.example",
+        }
+    ],
+}
+AUTHSERVER_META = {
+    "issuer": "https://auth.example",
+    "pushed_authorization_request_endpoint": "https://auth.example/par",
+    "authorization_endpoint": "https://auth.example/authorize",
+    "token_endpoint": "https://auth.example/token",
+}
+
+
+def _standard_get_routes(*, with_handle=True):
+    """The canned resolution chain. `with_handle=False` drops the resolveHandle
+    route (default-server path) and adds bsky.social's protected-resource URL."""
+    routes = {
+        PLC_URL: _FakeResp(200, DID_DOC),
+        "https://pds.example/.well-known/oauth-protected-resource": _FakeResp(
+            200, {"authorization_servers": ["https://auth.example"]}
+        ),
+        "https://auth.example/.well-known/oauth-authorization-server": _FakeResp(
+            200, AUTHSERVER_META
+        ),
+        "https://bsky.social/.well-known/oauth-protected-resource": _FakeResp(
+            200, {"authorization_servers": ["https://auth.example"]}
+        ),
+    }
+    if with_handle:
+        routes[bluesky_auth.RESOLVE_HANDLE_URL] = _FakeResp(200, {"did": DID})
+    return routes
+
+
+def _par_responses():
+    """PAR answers: first a use_dpop_nonce 4xx (normal — server hands out its
+    nonce), then the 201 carrying the request_uri. The 201 omits a DPoP-Nonce
+    header, so _post_with_dpop keeps 'n-1' as the latest nonce."""
+    return [
+        _FakeResp(400, {"error": "use_dpop_nonce"}, {"DPoP-Nonce": "n-1"}),
+        _FakeResp(201, {"request_uri": "urn:ietf:params:oauth:request_uri:req-1"}),
+    ]
+
+
+def _fake_httpx_client(get_routes, post_responses):
+    """A URL-dispatching fake httpx.AsyncClient class + a `calls` record. GET
+    routes on exact URL (params captured for assertions); POST pops the next
+    scripted response. Unrouted GET is a test bug, not a 404 path."""
+    calls = {"gets": [], "posts": []}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url, params=None):
+            calls["gets"].append((url, params))
+            if url not in get_routes:
+                raise AssertionError(f"unexpected GET {url!r}")
+            return get_routes[url]
+
+        async def post(self, url, data=None, headers=None):
+            calls["posts"].append({"url": url, "data": data, "headers": headers})
+            return post_responses.pop(0)
+
+    return _FakeAsyncClient, calls
+
+
+def _mock_httpx(monkeypatch, get_routes, post_responses):
+    """Swap ONLY the bluesky_auth module's `httpx` reference (patching the global
+    would break Datasette's own httpx-based test client) through the gated
+    handler's __wrapped__.__globals__ — same targeting as the GitHub sample."""
+    from datasette.plugins import pm
+
+    fake_client, calls = _fake_httpx_client(get_routes, post_responses)
+    module = pm.get_plugin("bluesky_auth.py")
+    module_globals = module.start.__wrapped__.__globals__
+    monkeypatch.setitem(
+        module_globals, "httpx", types.SimpleNamespace(AsyncClient=fake_client)
+    )
+    return calls
+
+
+async def _flow_row(ds, state):
+    internal = ds.get_internal_database()
+    rows = await internal.execute(
+        "SELECT did, issuer, pkce_verifier, dpop_private_jwk, dpop_nonce "
+        "FROM bluesky_auth_oauth_flows WHERE state = ?",
+        [state],
+    )
+    return dict(rows.rows[0]) if rows.rows else None
+
+
+@pytest.mark.asyncio
+async def test_start_with_handle_pars_and_redirects(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    calls = _mock_httpx(monkeypatch, _standard_get_routes(), _par_responses())
+
+    r = await ds.client.get("/-/bluesky-auth/start?handle=alice.example.com")
+    assert r.status_code == 302
+    location = r.headers["location"]
+    assert location.startswith("https://auth.example/authorize?")
+    q = parse_qs(urlsplit(location).query)
+    assert q["request_uri"] == ["urn:ietf:params:oauth:request_uri:req-1"]
+    assert q["client_id"] == ["https://ds.example/-/bluesky-auth/client-metadata.json"]
+    # Core state round-trips through the state cookie (link/step-up keeps working).
+    assert r.cookies.get(STATE_COOKIE)
+
+    # The flow row is keyed by the state PAR carried.
+    state = calls["posts"][0]["data"]["state"]
+    row = await _flow_row(ds, state)
+    assert row["did"] == DID
+    assert row["issuer"] == "https://auth.example"
+    assert row["pkce_verifier"]
+    assert json.loads(row["dpop_private_jwk"])["kty"] == "EC"
+    assert row["dpop_nonce"] == "n-1"
+
+
+@pytest.mark.asyncio
+async def test_start_par_body(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    calls = _mock_httpx(monkeypatch, _standard_get_routes(), _par_responses())
+
+    await ds.client.get("/-/bluesky-auth/start?handle=alice.example.com")
+
+    par = calls["posts"][0]["data"]
+    assert par["scope"] == "atproto"
+    assert par["code_challenge_method"] == "S256"
+    assert par["login_hint"] == "alice.example.com"
+    assert par["redirect_uri"] == "https://ds.example/-/bluesky-auth/callback"
+    # code_challenge is S256 of the verifier the flow row stored.
+    row = await _flow_row(ds, par["state"])
+    expected = (
+        base64.urlsafe_b64encode(hashlib.sha256(row["pkce_verifier"].encode()).digest())
+        .rstrip(b"=")
+        .decode()
+    )
+    assert par["code_challenge"] == expected
+    # Both PAR posts carried a DPoP proof; the retry folded in the server nonce.
+    assert "DPoP" in calls["posts"][0]["headers"]
+    assert "DPoP" in calls["posts"][1]["headers"]
+    key = JsonWebKey.import_key(json.loads(row["dpop_private_jwk"]))
+    second = jwt.decode(calls["posts"][1]["headers"]["DPoP"], key)
+    assert second["nonce"] == "n-1"
+
+
+@pytest.mark.asyncio
+async def test_start_default_server_no_handle(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    calls = _mock_httpx(
+        monkeypatch, _standard_get_routes(with_handle=False), _par_responses()
+    )
+
+    r = await ds.client.get("/-/bluesky-auth/start")
+    assert r.status_code == 302
+    get_urls = [u for (u, _p) in calls["gets"]]
+    # Resolution starts at bsky.social, never touching resolveHandle.
+    assert get_urls[0] == "https://bsky.social/.well-known/oauth-protected-resource"
+    assert bluesky_auth.RESOLVE_HANDLE_URL not in get_urls
+    # No login_hint in the PAR body; the flow row records no expected DID.
+    assert "login_hint" not in calls["posts"][0]["data"]
+    row = await _flow_row(ds, calls["posts"][0]["data"]["state"])
+    assert row["did"] is None
+
+
+@pytest.mark.asyncio
+async def test_start_strips_at_prefix(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    calls = _mock_httpx(monkeypatch, _standard_get_routes(), _par_responses())
+
+    r = await ds.client.get("/-/bluesky-auth/start?handle=@alice.example.com")
+    assert r.status_code == 302
+    # The leading '@' is stripped before resolveHandle and in the login_hint.
+    handle_params = [
+        p for (u, p) in calls["gets"] if u == bluesky_auth.RESOLVE_HANDLE_URL
+    ]
+    assert handle_params[0]["handle"] == "alice.example.com"
+    assert calls["posts"][0]["data"]["login_hint"] == "alice.example.com"
+
+
+@pytest.mark.asyncio
+async def test_start_did_input_skips_resolve_handle(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    calls = _mock_httpx(
+        monkeypatch, _standard_get_routes(with_handle=False), _par_responses()
+    )
+
+    r = await ds.client.get(f"/-/bluesky-auth/start?handle={DID}")
+    assert r.status_code == 302
+    get_urls = [u for (u, _p) in calls["gets"]]
+    # A did: value skips resolveHandle and fetches the DID doc directly.
+    assert bluesky_auth.RESOLVE_HANDLE_URL not in get_urls
+    assert PLC_URL in get_urls
+    row = await _flow_row(ds, calls["posts"][0]["data"]["state"])
+    assert row["did"] == DID
+
+
+@pytest.mark.asyncio
+async def test_start_sweeps_expired_rows(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    internal = ds.get_internal_database()
+    # Pre-seed a row 60 minutes old (TTL default 10) — start must sweep it.
+    await internal.execute_write(
+        "INSERT INTO bluesky_auth_oauth_flows "
+        "(state, did, issuer, pkce_verifier, dpop_private_jwk, dpop_nonce, "
+        "created_at) VALUES ('stale', NULL, 'https://old.example', 'v', '{}', "
+        "NULL, strftime('%Y-%m-%dT%H:%M:%f','now','-60 minutes')||'+00:00')"
+    )
+    calls = _mock_httpx(monkeypatch, _standard_get_routes(), _par_responses())
+
+    r = await ds.client.get("/-/bluesky-auth/start?handle=alice.example.com")
+    assert r.status_code == 302
+    rows = await internal.execute("SELECT state FROM bluesky_auth_oauth_flows")
+    states = {row[0] for row in rows.rows}
+    assert "stale" not in states  # swept
+    assert calls["posts"][0]["data"]["state"] in states  # fresh row present
+
+
+@pytest.mark.asyncio
+async def test_start_resolution_failure_is_generic_400(monkeypatch):
+    _configure_public(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    # DID doc with no #atproto_pds service -> _pds_endpoint raises FlowError.
+    routes = _standard_get_routes()
+    routes[PLC_URL] = _FakeResp(
+        200, {"alsoKnownAs": ["at://alice.example.com"], "service": []}
+    )
+    _mock_httpx(monkeypatch, routes, _par_responses())
+
+    r = await ds.client.get("/-/bluesky-auth/start?handle=alice.example.com")
+    assert r.status_code == 400
+    assert "Sign-in failed" in r.text
+    # Nothing was persisted on the failed flow.
+    internal = ds.get_internal_database()
+    rows = await internal.execute("SELECT COUNT(*) FROM bluesky_auth_oauth_flows")
+    assert rows.rows[0][0] == 0
+
+
+@pytest.mark.asyncio
+async def test_start_unconfigured_returns_503(monkeypatch):
+    _unset_env(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    r = await ds.client.get("/-/bluesky-auth/start")
+    assert r.status_code == 503
+    assert "DATASETTE_BLUESKY_PUBLIC_URL" in r.text
+    assert "DATASETTE_BLUESKY_DEV_LOOPBACK" in r.text
