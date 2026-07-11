@@ -26,10 +26,17 @@ class ProviderButton(BaseModel):
     # One enabled external sign-in provider, rendered on the login page as a
     # "Continue with {label}" button (design §9). `start_url` is a full-page
     # navigation target (the redirect-based flow's entry), already carrying the
-    # page's validated `next`. No provider HTML/CSS — descriptors only (D10).
+    # page's validated `next`. Descriptors only (D10) — the optional branding
+    # below is declarative data from the descriptor, not provider-owned HTML.
     key: str
     label: str
     start_url: str
+    # Inline <svg> element (startup-validated shape), rendered inside the
+    # button; None → text-only button.
+    icon: Optional[str] = None
+    # Hex colour (startup-validated) for the button background (white text);
+    # None → the neutral default button style.
+    brand_color: Optional[str] = None
 
 
 class LoginPageData(BaseModel):

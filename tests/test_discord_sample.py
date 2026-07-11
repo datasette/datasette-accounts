@@ -327,7 +327,12 @@ async def test_login_page_shows_configured_discord(monkeypatch):
     await _enable(ds, signups="auto")
     r = await ds.client.get("/-/login")
     data = _extract_page_data(r.text)
-    assert "discord" in {p["key"] for p in data["providers"]}
+    button = {p["key"]: p for p in data["providers"]}.get("discord")
+    assert button is not None
+    # Branding threads from the descriptor: the bi-discord SVG mark + blurple.
+    assert button["icon"].startswith("<svg")
+    assert 'class="bi bi-discord"' in button["icon"]
+    assert button["brand_color"] == "#5865F2"
 
 
 @pytest.mark.asyncio

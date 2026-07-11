@@ -81,6 +81,8 @@ async def login_page(datasette, request):
                     key=key,
                     label=registry[key].label,
                     start_url=f"{start}?next={quote(next_value)}",
+                    icon=registry[key].icon,
+                    brand_color=registry[key].brand_color,
                 )
             )
     page_data = LoginPageData(

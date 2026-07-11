@@ -43,6 +43,11 @@ Configuration table, flagged **not configured**, so an operator sees why. As
 defense in depth `start` also returns a **503** explainer if hit directly, and
 no session can ever be minted.
 
+The button itself is branded via the descriptor's optional `icon` (the
+Bootstrap-icons Discord mark, inline SVG with `fill="currentColor"`) and
+`brand_color` (`#5865F2`, Discord blurple) — core renders the icon inside the
+button and uses the colour as its background with white text.
+
 ## What it does
 
 `start` redirects to Discord's authorize URL carrying the core-minted signed

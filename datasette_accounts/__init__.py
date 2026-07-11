@@ -215,6 +215,9 @@ def startup(datasette):
                     f"Auth provider {provider.key!r} has an invalid "
                     f"start_path: {start_path!r}"
                 )
+            # Optional login-button branding (icon SVG / hex brand_color) —
+            # malformed values fail startup just like a bad start_path.
+            providers_mod.validate_branding(provider)
             registry[provider.key] = provider
         setattr(datasette, providers_mod.REGISTRY_ATTR, registry)
 

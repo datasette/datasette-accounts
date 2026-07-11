@@ -45,6 +45,16 @@ class DummyProvider(AuthProvider):
         self.start_path = f"/-/{key}-auth/start"
 
 
+class BrandedProvider(DummyProvider):
+    """Sets the two optional branding attributes the login button renders."""
+
+    icon = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+        '<path d="M0 0h16v16H0z"/></svg>'
+    )
+    brand_color = "#5865F2"
+
+
 class UnconfiguredProvider(DummyProvider):
     """An enabled-but-not-deployed provider: `configured()` reports False, so
     every user-facing surface hides it while the admin table still lists it."""
@@ -182,6 +192,25 @@ async def test_login_page_no_external_providers(register_providers):
     data = extract_page_data(r.text)
     assert data["password_enabled"] is True
     assert data["providers"] == []
+
+
+@pytest.mark.asyncio
+async def test_login_page_provider_branding(register_providers):
+    # The descriptor's optional icon + brand_color thread into the button's
+    # page data; a descriptor without them serializes explicit nulls (the
+    # frontend falls back to the neutral text-only button).
+    register_providers([BrandedProvider("acme", "Acme"), DummyProvider("okta", "Okta")])
+    ds = await make_ds()
+    await _enable(ds, "acme")
+    await _enable(ds, "okta")
+
+    r = await ds.client.get("/-/login")
+    data = extract_page_data(r.text)
+    buttons = {p["key"]: p for p in data["providers"]}
+    assert buttons["acme"]["icon"] == BrandedProvider.icon
+    assert buttons["acme"]["brand_color"] == "#5865F2"
+    assert buttons["okta"]["icon"] is None
+    assert buttons["okta"]["brand_color"] is None
 
 
 @pytest.mark.asyncio

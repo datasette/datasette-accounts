@@ -80,7 +80,20 @@
       <!-- Redirect-based flow: a full-page navigation, never a fetch. The
            validated `next` is already baked into start_url. -->
       {#each providers as p (p.key)}
-        <a class="provider-btn" href={p.start_url}>Continue with {p.label}</a>
+        <!-- Optional branding from the descriptor: an inline SVG icon
+             (startup-validated shape, plugin-trusted — hence {@html}) and a
+             brand background colour threaded through the --brand variable. -->
+        <a
+          class="provider-btn"
+          class:branded={!!p.brand_color}
+          style={p.brand_color ? `--brand: ${p.brand_color}` : null}
+          href={p.start_url}
+        >
+          {#if p.icon}<span class="provider-icon" aria-hidden="true"
+              >{@html p.icon}</span
+            >{/if}
+          Continue with {p.label}
+        </a>
       {/each}
     {/if}
   </div>
@@ -122,11 +135,13 @@
     flex: 1;
     border-top: 1px solid var(--border);
   }
-  /* Fixed-style provider button — no per-provider colour/icon in v1 (D10). */
+  /* Provider button: neutral by default; a descriptor's brand_color switches
+     it to a filled brand button (white text), its icon rides currentColor. */
   .provider-btn {
     display: flex;
     align-items: center;
     justify-content: center;
+    gap: 0.5rem;
     width: 100%;
     box-sizing: border-box;
     margin-top: 0.6rem;
@@ -141,6 +156,25 @@
   .provider-btn:hover {
     border-color: var(--acc);
     color: var(--acc-d);
+  }
+  .provider-btn.branded {
+    background: var(--brand);
+    border-color: var(--brand);
+    color: #fff;
+  }
+  .provider-btn.branded:hover {
+    filter: brightness(1.08);
+    border-color: var(--brand);
+    color: #fff;
+  }
+  .provider-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+  .provider-icon :global(svg) {
+    display: block;
+    width: 1em;
+    height: 1em;
   }
   .register-link {
     margin: 0.9rem 0 0;

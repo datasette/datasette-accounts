@@ -47,6 +47,19 @@ class DemoProvider(AuthProvider):
     start_path = "/-/demo-auth/start"  # absolute path to your start route
 ```
 
+**Optional branding** — two more class attributes dress up the login button
+(the demo sets neither, so it gets the neutral default button):
+
+```python
+    icon = '<svg xmlns="http://www.w3.org/2000/svg" ... fill="currentColor" ...>...</svg>'
+    brand_color = "#5865F2"   # hex only; button background, text goes white
+```
+
+`icon` must be a single inline `<svg>…</svg>` element — use
+`fill="currentColor"` so it inherits the button's text colour. `brand_color`
+must be a plain hex colour. Startup validates both shapes and fails loudly on
+anything else. See the Discord sample for a real pair.
+
 **Optional** `configured(self, datasette) -> bool` — override it to report
 whether the provider's deployment config (OAuth client id/secret, etc.) is
 actually present. It defaults to `True` (the demo needs nothing, so it inherits

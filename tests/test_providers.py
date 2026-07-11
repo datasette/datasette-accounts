@@ -218,6 +218,58 @@ async def test_invalid_key_fails_startup(register_provider):
         await make_ds()
 
 
+class _BrandedProvider(AuthProvider):
+    """Optional branding set per-test, so startup validation can be probed."""
+
+    key = "branded"
+    label = "Branded"
+    start_path = "/-/branded-auth/start"
+
+    def __init__(self, icon=None, brand_color=None):
+        self.icon = icon
+        self.brand_color = brand_color
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "icon",
+    [
+        "not svg at all",
+        '<img src="x.png">',
+        # Well-formed wrapper, but smuggles a <script> element.
+        "<svg><script>alert(1)</script></svg>",
+        # Truncated — no closing tag.
+        "<svg><path d='M0 0'/>",
+    ],
+)
+async def test_invalid_icon_fails_startup(register_provider, icon):
+    register_provider(_BrandedProvider(icon=icon))
+    with pytest.raises(RuntimeError, match="invalid icon"):
+        await make_ds()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "brand_color",
+    ["blurple", "#12345", "rgb(88, 101, 242)", "#5865F2; background:url(x)"],
+)
+async def test_invalid_brand_color_fails_startup(register_provider, brand_color):
+    register_provider(_BrandedProvider(brand_color=brand_color))
+    with pytest.raises(RuntimeError, match="invalid brand_color"):
+        await make_ds()
+
+
+@pytest.mark.asyncio
+async def test_valid_branding_accepted_at_startup(register_provider):
+    provider = _BrandedProvider(
+        icon='<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h16"/></svg>',
+        brand_color="#5865F2",
+    )
+    register_provider(provider)
+    ds = await make_ds()
+    assert getattr(ds, "_datasette_accounts_providers")["branded"] is provider
+
+
 # --------------------------------------------------------------------------
 # provider_gate — the per-route enabled-bit / CSRF / method gate (D3b)
 #

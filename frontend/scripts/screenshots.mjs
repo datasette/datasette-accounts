@@ -90,7 +90,14 @@ async function startServer() {
     {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        // Fake Discord credentials so the sample provider reports
+        // configured() → true and its branded button shows on the login shot.
+        // No OAuth flow ever runs — these values are never sent anywhere.
+        DATASETTE_DISCORD_CLIENT_ID: "screenshots-fake-client-id",
+        DATASETTE_DISCORD_CLIENT_SECRET: "screenshots-fake-client-secret",
+      },
     },
   );
   let log = "";

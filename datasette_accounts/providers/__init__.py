@@ -48,6 +48,10 @@ if TYPE_CHECKING:
 # the registry validates it the same way and simply rejects a *duplicate*.
 KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
+# Optional descriptor branding (see AuthProvider.icon / .brand_color):
+# brand_color must be a plain hex CSS colour.
+BRAND_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
 # Signed-state cookie + namespace, and the attribute the registry lives on.
 STATE_COOKIE = "ds_accounts_state"
 STATE_NAMESPACE = "datasette-accounts-state"
@@ -76,6 +80,22 @@ class AuthProvider:
         point the visitor here (threading a validated ``?next=`` / ``?state=``).
         Startup validates it is non-empty and starts with "/".
 
+    Two optional presentation attributes brand the login button (a declarative
+    amendment to D10 — descriptors carry data, still no provider-owned HTML
+    surface):
+
+    ``icon``
+        A single inline ``<svg>…</svg>`` element, rendered inside the button
+        before "Continue with {label}". Use ``fill="currentColor"`` so it
+        inherits the button's text colour. Startup validates the shape (must be
+        one ``<svg>`` element, no ``<script``) — a lint for trusted plugin
+        authors, not a security boundary: a provider is installed Python and
+        could already do anything.
+    ``brand_color``
+        Hex CSS colour (``#5865F2``) used as the button's background with white
+        text; omit for the neutral default button. Startup validates the hex
+        shape (ICON/BRAND checks live in ``__init__.startup``).
+
     Providers own their URL surface via the ordinary Datasette
     ``register_routes`` hook and terminate every flow by returning
     ``await finish_login(...)``. Wrapping each route handler in
@@ -87,6 +107,8 @@ class AuthProvider:
     key: str
     label: str
     start_path: str
+    icon: str | None = None
+    brand_color: str | None = None
 
     def configured(self, datasette: Datasette) -> bool:
         """Is this provider ready to authenticate (credentials/config present)?
@@ -110,6 +132,36 @@ def provider_configured(datasette: Datasette, provider: AuthProvider) -> bool:
         return bool(provider.configured(datasette))
     except Exception:
         return False
+
+
+def validate_branding(provider: AuthProvider) -> None:
+    """Startup lint for the optional icon/brand_color descriptor attributes.
+
+    Raises RuntimeError (startup fails loudly, like the key/start_path checks).
+    The icon lands in the login page via ``{@html}``, so require it to be one
+    inline ``<svg>…</svg>`` element with no ``<script`` — this catches an author
+    pasting a data URL, a whole HTML snippet, or an ``<img>`` tag; it is NOT a
+    sanitizer (an installed provider is trusted Python already)."""
+    icon = getattr(provider, "icon", None)
+    if icon is not None:
+        trimmed = icon.strip() if isinstance(icon, str) else ""
+        if (
+            not trimmed.startswith("<svg")
+            or not trimmed.endswith("</svg>")
+            or "<script" in trimmed.lower()
+        ):
+            raise RuntimeError(
+                f"Auth provider {provider.key!r} has an invalid icon: must be "
+                "a single inline <svg>…</svg> element"
+            )
+    brand_color = getattr(provider, "brand_color", None)
+    if brand_color is not None and not (
+        isinstance(brand_color, str) and BRAND_COLOR_RE.match(brand_color)
+    ):
+        raise RuntimeError(
+            f"Auth provider {provider.key!r} has an invalid brand_color: "
+            f"{brand_color!r} (expected a hex colour like '#5865F2')"
+        )
 
 
 def provider_gate(key: str) -> Callable[[RouteHandler], RouteHandler]:
