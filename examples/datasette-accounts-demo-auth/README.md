@@ -47,6 +47,16 @@ class DemoProvider(AuthProvider):
     start_path = "/-/demo-auth/start"  # absolute path to your start route
 ```
 
+**Optional** `configured(self, datasette) -> bool` — override it to report
+whether the provider's deployment config (OAuth client id/secret, etc.) is
+actually present. It defaults to `True` (the demo needs nothing, so it inherits
+that). When it returns `False`, core keeps the provider off the login page and
+out of account-linking targets even while an admin has it *enabled* — `enabled`
+is runtime policy, `configured` is deployment state. The admin Configuration
+table still lists the provider, flagged **not configured**. See the Discord
+sample (`samples/discord-auth/`), which returns `False` until its two env vars
+are set.
+
 You register your routes with the ordinary Datasette `register_routes` hook,
 under your own `/-/{plugin}/...` prefix (the datasette-paper model — plugins own
 their routes). The conventional handlers are `start` (begin the flow — a redirect

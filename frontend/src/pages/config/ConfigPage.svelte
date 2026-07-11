@@ -144,6 +144,13 @@
                 <span class="pname">{p.label}</span>
                 <code class="chip-key">{p.key}</code>
                 {#if p.builtin}<span class="chip">built-in</span>{/if}
+                {#if p.configured === false}
+                  <span
+                    class="chip warn"
+                    title="Enabled, but its credentials/config aren't deployed — its sign-in button stays hidden until it is configured."
+                    >not configured</span
+                  >
+                {/if}
               </td>
               <td class="muted src">{p.source}</td>
               <td>

@@ -45,6 +45,22 @@ class DummyProvider(AuthProvider):
         self.start_path = f"/-/{key}-auth/start"
 
 
+class UnconfiguredProvider(DummyProvider):
+    """An enabled-but-not-deployed provider: `configured()` reports False, so
+    every user-facing surface hides it while the admin table still lists it."""
+
+    def configured(self, datasette):
+        return False
+
+
+class RaisingProvider(DummyProvider):
+    """A misbehaving provider whose `configured()` raises — must be treated as
+    NOT configured (defensively) and never 500 a page render."""
+
+    def configured(self, datasette):
+        raise RuntimeError("boom")
+
+
 @pytest.fixture
 def register_providers():
     names = []
@@ -139,9 +155,7 @@ async def test_login_page_provider_buttons_thread_next(register_providers):
     button = data["providers"][0]
     assert button["label"] == "Acme"
     # The validated `next` is threaded into the redirect-based start_url.
-    assert button["start_url"] == (
-        "/-/acme-auth/start?next=" + quote("/reports")
-    )
+    assert button["start_url"] == ("/-/acme-auth/start?next=" + quote("/reports"))
 
 
 @pytest.mark.asyncio
@@ -157,9 +171,7 @@ async def test_login_page_password_disabled_buttons_only(register_providers):
 
     assert data["password_enabled"] is False
     assert [p["key"] for p in data["providers"]] == ["okta"]
-    assert data["providers"][0]["start_url"].startswith(
-        "/-/okta-auth/start?next="
-    )
+    assert data["providers"][0]["start_url"].startswith("/-/okta-auth/start?next=")
 
 
 @pytest.mark.asyncio
@@ -169,6 +181,36 @@ async def test_login_page_no_external_providers(register_providers):
     r = await ds.client.get("/-/login")
     data = extract_page_data(r.text)
     assert data["password_enabled"] is True
+    assert data["providers"] == []
+
+
+@pytest.mark.asyncio
+async def test_login_page_hides_enabled_but_unconfigured(register_providers):
+    # Two enabled external providers, but one reports configured()=False (its
+    # credentials aren't deployed). Only the configured one gets a button.
+    register_providers(
+        [DummyProvider("acme", "Acme"), UnconfiguredProvider("okta", "Okta")]
+    )
+    ds = await make_ds()
+    await _enable(ds, "acme")
+    await _enable(ds, "okta")
+
+    r = await ds.client.get("/-/login")
+    data = extract_page_data(r.text)
+    assert [p["key"] for p in data["providers"]] == ["acme"]
+
+
+@pytest.mark.asyncio
+async def test_login_page_renders_when_configured_raises(register_providers):
+    # A provider whose configured() raises must be treated as unconfigured and
+    # must never break the page render (defensive provider_configured guard).
+    register_providers([RaisingProvider("acme", "Acme")])
+    ds = await make_ds()
+    await _enable(ds, "acme")
+
+    r = await ds.client.get("/-/login")
+    assert r.status_code == 200
+    data = extract_page_data(r.text)
     assert data["providers"] == []
 
 
@@ -206,6 +248,27 @@ async def test_config_page_provider_rows(register_providers):
     assert acme["enabled"] is True
     assert acme["signups"] == "auto"
     assert acme["label"] == "Acme"
+    # A provider that needs no external config reports configured=True (default);
+    # the built-in password provider does too.
+    assert acme["configured"] is True
+    assert pw["configured"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_page_shows_enabled_but_unconfigured(register_providers):
+    # Admins must see reality: an enabled-but-unconfigured provider still lists,
+    # with enabled=True AND configured=False (the frontend flags it).
+    register_providers([UnconfiguredProvider("okta", "Okta")])
+    ds = await make_ds()
+    await _enable(ds, "okta")
+    uid = await _insert_user(ds, "admin", is_admin=True)
+    sess = await _session_cookie(ds, uid)
+
+    r = await ds.client.get("/-/admin/config", cookies={COOKIE_NAME: sess})
+    data = extract_page_data(r.text)
+    rows = {p["key"]: p for p in data["providers"]}
+    assert rows["okta"]["enabled"] is True
+    assert rows["okta"]["configured"] is False
 
 
 # --------------------------------------------------------------------------
@@ -237,6 +300,25 @@ async def test_account_page_identities_and_linkable(register_providers):
     # Session provenance: the mint stamped 'password' on this session row.
     assert data["sessions"]
     assert data["sessions"][0]["provider"] == "password"
+
+
+@pytest.mark.asyncio
+async def test_account_page_linkable_omits_unconfigured(register_providers):
+    # An enabled-but-unconfigured provider can't complete a link flow, so it is
+    # filtered out of the account page's linkable list exactly like the login
+    # button — only the configured `acme` is offered.
+    register_providers(
+        [DummyProvider("acme", "Acme"), UnconfiguredProvider("okta", "Okta")]
+    )
+    ds = await make_ds()
+    await _enable(ds, "acme")
+    await _enable(ds, "okta")
+    uid = await _insert_user(ds, "alice")
+    sess = await _session_cookie(ds, uid)
+
+    r = await ds.client.get("/-/account", cookies={COOKIE_NAME: sess})
+    data = extract_page_data(r.text)
+    assert [p["key"] for p in data["linkable_providers"]] == ["acme"]
 
 
 @pytest.mark.asyncio

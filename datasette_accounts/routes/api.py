@@ -55,6 +55,7 @@ from ..providers import (
     get_registry,
     make_state,
     mint_session,
+    provider_configured,
     provider_start_path,
     to_identity_rows,
 )
@@ -320,8 +321,15 @@ async def link_start(datasette, request, body: Annotated[LinkStartRequest, Body(
 
     target = body.provider
     provider = _linkable_target(datasette, target, linked_keys)
-    # A disabled provider isn't a valid target either — its whole surface is off.
-    if provider is None or not await db.get_provider_enabled(internal, target):
+    # A disabled OR unconfigured provider isn't a valid target — its whole
+    # user-facing surface is off (a configured=False provider's start route
+    # 503s). Same generic error/status as a disabled target: the non-admin
+    # surface never distinguishes "disabled" from "not configured".
+    if (
+        provider is None
+        or not await db.get_provider_enabled(internal, target)
+        or not provider_configured(datasette, provider)
+    ):
         return Response.json(
             {"ok": False, "error": "That provider can't be linked."}, status=400
         )

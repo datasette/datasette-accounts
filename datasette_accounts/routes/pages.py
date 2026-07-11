@@ -29,6 +29,7 @@ from ..passwords import UNUSABLE_PASSWORD
 from ..providers import (
     external_provider_keys,
     get_registry,
+    provider_configured,
     provider_label,
     provider_source,
     provider_start_path,
@@ -68,7 +69,12 @@ async def login_page(datasette, request):
     registry = get_registry(datasette)
     providers = []
     for key in external_provider_keys(datasette):
-        if await db.get_provider_enabled(internal, key):
+        # Enabled AND configured: a provider whose credentials aren't deployed
+        # (e.g. the Discord sample without its env vars) is enabled-but-not-ready
+        # — its start route 503s — so we don't offer a button that dead-ends.
+        if await db.get_provider_enabled(internal, key) and provider_configured(
+            datasette, registry[key]
+        ):
             start = provider_start_path(datasette, key)
             providers.append(
                 ProviderButton(
@@ -175,10 +181,18 @@ async def account_page(datasette, request):
         raw_identities = await db.list_identities(internal, actor["id"])
         identities = to_identity_rows(datasette, raw_identities)
         linked_keys = {i["provider"] for i in raw_identities}
-        # Linkable = installed external providers, enabled, not already linked.
-        # Carry the label so the "Link…" button can name the provider directly.
+        # Linkable = installed external providers, enabled, configured, not
+        # already linked. Carry the label so the "Link…" button can name the
+        # provider directly. An unconfigured provider (no credentials deployed)
+        # can't complete a link flow, so it's filtered out exactly like the
+        # login button.
+        registry = get_registry(datasette)
         for key in external_provider_keys(datasette):
-            if key not in linked_keys and await db.get_provider_enabled(internal, key):
+            if (
+                key not in linked_keys
+                and await db.get_provider_enabled(internal, key)
+                and provider_configured(datasette, registry[key])
+            ):
                 linkable.append(
                     LinkableProvider(key=key, label=provider_label(datasette, key))
                 )
@@ -237,6 +251,7 @@ async def config_page(datasette, request):
             source=provider_source(provider),
             builtin=key == "password",
             enabled=await db.get_provider_enabled(internal, key),
+            configured=provider_configured(datasette, provider),
             signups=await db.get_provider_signups(internal, key),
             linked_count=counts.get(key, 0),
         )

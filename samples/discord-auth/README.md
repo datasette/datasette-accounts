@@ -35,9 +35,13 @@ model), each wrapped in `@provider_gate("discord")`.
    datasette accounts set-signups discord auto -i accounts.db   # or: approval
    ```
 
-The button appears on the login page only once `discord` is enabled. Without the
-two env vars the provider is harmless: `start` returns a **503** explainer and no
-session can ever be minted.
+The button appears on the login page only once `discord` is enabled **and**
+configured. Without the two env vars the provider is harmless: its `configured()`
+returns False, so core keeps the button off the login page (and off account
+linking) even when an admin has enabled it — the row still shows in the admin
+Configuration table, flagged **not configured**, so an operator sees why. As
+defense in depth `start` also returns a **503** explainer if hit directly, and
+no session can ever be minted.
 
 ## What it does
 

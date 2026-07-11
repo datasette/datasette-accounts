@@ -88,6 +88,29 @@ class AuthProvider:
     label: str
     start_path: str
 
+    def configured(self, datasette: Datasette) -> bool:
+        """Is this provider ready to authenticate (credentials/config present)?
+        Checked before offering the provider to users (login button, link
+        targets). Distinct from the admin enabled bit: enabled is runtime
+        policy, configured is deployment state. Default True."""
+        return True
+
+
+def provider_configured(datasette: Datasette, provider: AuthProvider) -> bool:
+    """Defensively evaluate ``provider.configured(datasette)``.
+
+    A provider that raises from ``configured`` counts as NOT configured — a
+    provider that can't answer whether it is deployable must not be offered to
+    users. The registry-building code (``__init__.startup``) fails loud on a
+    misbehaving provider descriptor, but that is startup; this runs on every
+    user-facing request, so it swallows rather than 500s. There is no logging
+    surface in this module, so the swallow is silent (matching read_state's and
+    resolve_actor's broad guards around untrusted/provider code)."""
+    try:
+        return bool(provider.configured(datasette))
+    except Exception:
+        return False
+
 
 def provider_gate(key: str) -> Callable[[RouteHandler], RouteHandler]:
     """Decorator for a provider-owned route handler (optional but recommended).

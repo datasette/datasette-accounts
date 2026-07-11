@@ -11,6 +11,8 @@ The module is loaded exactly as ``just dev`` loads it: via Datasette's
 signups go through the real ticket-05 db functions, as the admin UI / CLI would.
 """
 
+import json
+import re
 import types
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -19,8 +21,42 @@ import pytest
 from datasette.app import Datasette
 
 from datasette_accounts import db
+from datasette_accounts.passwords import hash_password
 from datasette_accounts.providers import STATE_COOKIE, get_registry
-from datasette_accounts.security import COOKIE_NAME
+from datasette_accounts.security import COOKIE_NAME, SIGN_NAMESPACE
+from datasette_accounts.sessions import mint_token, token_sha256
+
+JSON = {"content-type": "application/json"}
+
+PAGE_DATA_RE = re.compile(
+    r'<script type="application/json" id="pageData">(.*?)</script>', re.S
+)
+
+
+def _extract_page_data(html):
+    return json.loads(PAGE_DATA_RE.search(html).group(1))
+
+
+async def _insert_user(ds, username, *, is_admin=False):
+    internal = ds.get_internal_database()
+    uid = db.new_id()
+    ts = db.now_iso()
+    await internal.execute_write(
+        f"INSERT INTO {db.USERS} (id, username, password_hash, is_admin, disabled, "
+        "must_change_password, failed_attempts, locked_until, created_at, updated_at, "
+        "expires_at, pending_approval) "
+        "VALUES (?, ?, ?, ?, 0, 0, 0, NULL, ?, ?, NULL, 0)",
+        [uid, username, hash_password("password123"), 1 if is_admin else 0, ts, ts],
+    )
+    return uid
+
+
+async def _session_cookie(ds, uid):
+    internal = ds.get_internal_database()
+    raw = mint_token()
+    await db.create_session(internal, uid, token_sha256(raw), 14, "ua", "1.1.1.1")
+    return ds.sign(raw, SIGN_NAMESPACE)
+
 
 SAMPLE_DIR = str(Path(__file__).resolve().parent.parent / "samples" / "discord-auth")
 
@@ -251,3 +287,88 @@ async def test_callback_without_code_fails(monkeypatch):
     # Valid state but Discord returned no code (e.g. user denied) → 400.
     r = await ds.client.get(f"/-/discord-auth/callback?state={state}", cookies=cookies)
     assert r.status_code == 400
+
+
+# ==========================================================================
+# 4. configured dimension: enabled but no env vars → hidden everywhere user-
+#    facing, but visible (flagged) to admins
+# ==========================================================================
+
+
+def _unset_env(monkeypatch):
+    monkeypatch.delenv("DATASETTE_DISCORD_CLIENT_ID", raising=False)
+    monkeypatch.delenv("DATASETTE_DISCORD_CLIENT_SECRET", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_configured_reflects_env(monkeypatch):
+    _unset_env(monkeypatch)
+    ds = await _make_ds()
+    provider = get_registry(ds)["discord"]
+    assert provider.configured(ds) is False
+    _configure_env(monkeypatch)
+    assert provider.configured(ds) is True
+
+
+@pytest.mark.asyncio
+async def test_login_page_hides_unconfigured_discord(monkeypatch):
+    _unset_env(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")  # enabled, but env vars absent
+    r = await ds.client.get("/-/login")
+    data = _extract_page_data(r.text)
+    assert "discord" not in {p["key"] for p in data["providers"]}
+
+
+@pytest.mark.asyncio
+async def test_login_page_shows_configured_discord(monkeypatch):
+    _configure_env(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    r = await ds.client.get("/-/login")
+    data = _extract_page_data(r.text)
+    assert "discord" in {p["key"] for p in data["providers"]}
+
+
+@pytest.mark.asyncio
+async def test_account_linkable_omits_unconfigured_discord(monkeypatch):
+    _unset_env(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    uid = await _insert_user(ds, "alice")
+    sess = await _session_cookie(ds, uid)
+    r = await ds.client.get("/-/account", cookies={COOKIE_NAME: sess})
+    data = _extract_page_data(r.text)
+    assert "discord" not in {p["key"] for p in data["linkable_providers"]}
+
+
+@pytest.mark.asyncio
+async def test_link_start_unconfigured_discord_rejected(monkeypatch):
+    _unset_env(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")
+    uid = await _insert_user(ds, "alice")
+    sess = await _session_cookie(ds, uid)
+    r = await ds.client.post(
+        "/-/account/api/link-start",
+        content=json.dumps({"provider": "discord", "password": "password123"}),
+        headers=JSON,
+        cookies={COOKIE_NAME: sess},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"] == "That provider can't be linked."
+
+
+@pytest.mark.asyncio
+async def test_admin_config_flags_unconfigured_discord(monkeypatch):
+    _unset_env(monkeypatch)
+    ds = await _make_ds()
+    await _enable(ds, signups="auto")  # enabled, but env vars absent
+    uid = await _insert_user(ds, "admin", is_admin=True)
+    sess = await _session_cookie(ds, uid)
+    r = await ds.client.get("/-/admin/config", cookies={COOKIE_NAME: sess})
+    data = _extract_page_data(r.text)
+    row = {p["key"]: p for p in data["providers"]}["discord"]
+    # Admins see reality: enabled=True (they flipped it on) AND configured=False.
+    assert row["enabled"] is True
+    assert row["configured"] is False

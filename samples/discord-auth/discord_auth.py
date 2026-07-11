@@ -17,9 +17,11 @@ Setup:
        datasette accounts enable-provider discord -i accounts.db
        datasette accounts set-signups discord auto -i accounts.db   # or approval
 
-Without the two env vars the provider stays harmless: ``start`` returns a 503
-explainer and no session can be minted. It stays invisible on the login page
-until an admin enables it. See README.md for the full contract + security notes.
+Without the two env vars the provider stays harmless: ``configured`` returns
+False, so core keeps its button off the login page (and off account linking)
+even when an admin has enabled it; ``start`` also returns a 503 explainer as
+defense in depth, and no session can be minted. See README.md for the full
+contract + security notes.
 """
 
 from __future__ import annotations
@@ -63,6 +65,13 @@ class DiscordProvider(AuthProvider):
     key = "discord"
     label = "Discord"
     start_path = "/-/discord-auth/start"
+
+    def configured(self, datasette: Datasette) -> bool:
+        # Ready to authenticate only when both OAuth2 credentials are present.
+        # Until then the login button + link targets hide it (core respects
+        # this), and `start` 503s as defense in depth if someone hits it directly.
+        client_id, client_secret = _creds()
+        return bool(client_id and client_secret)
 
 
 def _creds() -> tuple[str | None, str | None]:

@@ -211,6 +211,12 @@ class ProviderAdminRow(BaseModel):
     # Runtime enabled bit (design §7): password defaults enabled, external
     # providers default disabled until an admin flips them on.
     enabled: bool
+    # Deployment state: is the provider ready to authenticate (credentials/config
+    # present)? Distinct from `enabled` — an admin may pre-enable before deploying
+    # creds. False here → the login button + link targets hide it, and the admin
+    # table shows a "not configured" warning chip. Default True (most providers
+    # need no external config). See plans/auth-providers, AuthProvider.configured.
+    configured: bool = True
     # Signups policy: "off" | "approval" | "auto".
     signups: str
     # Count of external identities linked through this provider (0 for password,

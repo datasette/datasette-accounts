@@ -94,8 +94,7 @@ def register_providers():
         @hookimpl
         def register_routes():
             return [
-                (rf"/-/{p.key}-auth/(?P<rest>.*)$", _make_view(p))
-                for p in providers
+                (rf"/-/{p.key}-auth/(?P<rest>.*)$", _make_view(p)) for p in providers
             ]
 
         mod.datasette_accounts_auth_providers = datasette_accounts_auth_providers
@@ -192,9 +191,7 @@ async def _login_reasons(ds):
     """Every login_audit reason, oldest first — lets a refusal test assert both
     that the expected reason was written and that nothing else was."""
     internal = ds.get_internal_database()
-    rows = await internal.execute(
-        f"SELECT reason FROM {db.LOGIN_AUDIT} ORDER BY id"
-    )
+    rows = await internal.execute(f"SELECT reason FROM {db.LOGIN_AUDIT} ORDER BY id")
     return [r[0] for r in rows.rows]
 
 
@@ -248,9 +245,7 @@ async def test_link_happy_path_password_account(register_providers):
         {"provider": "echo", "subject": "gh-1"}
     ]
     page = await ds.client.get("/-/account", cookies={COOKIE_NAME: sess})
-    data = json.loads(
-        page.text.split('id="pageData">', 1)[1].split("</script>", 1)[0]
-    )
+    data = json.loads(page.text.split('id="pageData">', 1)[1].split("</script>", 1)[0])
     assert [i["subject"] for i in data["identities"]] == ["gh-1"]
     assert data["identities"][0]["label"] == "Echo"
     assert data["has_password"] is True
@@ -316,6 +311,33 @@ async def test_link_start_disabled_target_rejected(register_providers):
         cookies={COOKIE_NAME: sess},
     )
     assert r.status_code == 400
+
+
+class UnconfiguredLinkProvider(LinkProvider):
+    """Enabled but not deployment-configured: configured() reports False."""
+
+    def configured(self, datasette):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_link_start_unconfigured_target_rejected(register_providers):
+    # Enabled but unconfigured (no credentials deployed): its start route would
+    # 503, so it isn't a valid link target — same generic 400/message as a
+    # disabled target (no distinguishable error on the non-admin surface).
+    register_providers([UnconfiguredLinkProvider("echo", "Echo")])
+    ds = await make_ds()
+    await _enable(ds, "echo")  # enabled, but configured() is False
+    uid = await insert_user(ds, "alice")
+    sess = await _session_cookie(ds, uid)
+    r = await ds.client.post(
+        "/-/account/api/link-start",
+        content=json.dumps({"provider": "echo", "password": "password123"}),
+        headers=JSON,
+        cookies={COOKIE_NAME: sess},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"] == "That provider can't be linked."
 
 
 # ==========================================================================
@@ -514,9 +536,7 @@ async def test_forged_actor_id_link_refused(register_providers):
 
     # A link state bound to A (no step-up proof — a direct password-link state),
     # presented with B's live session.
-    value, cookie = _sign_link_state(
-        ds, provider="echo", actor_id=user_a, step_up=None
-    )
+    value, cookie = _sign_link_state(ds, provider="echo", actor_id=user_a, step_up=None)
     r = await ds.client.get(
         f"/-/echo-auth/start?state={value}&subject=fresh",
         cookies={COOKIE_NAME: b_sess, STATE_COOKIE: cookie},
@@ -555,9 +575,7 @@ async def test_unlink_strand_guard_self_and_admin(register_providers):
     # Admin-unlink refused for the same reason (different message).
     r = await ds.client.post(
         "/-/admin/api/unlink-identity",
-        content=json.dumps(
-            {"target_id": uid, "provider": "echo", "subject": "only"}
-        ),
+        content=json.dumps({"target_id": uid, "provider": "echo", "subject": "only"}),
         headers=JSON,
         cookies={COOKIE_NAME: admin_sess},
     )
@@ -571,9 +589,7 @@ async def test_unlink_strand_guard_self_and_admin(register_providers):
     await db.reset_password(internal, admin_id, uid, hash_password("newpass123"))
     r = await ds.client.post(
         "/-/admin/api/unlink-identity",
-        content=json.dumps(
-            {"target_id": uid, "provider": "echo", "subject": "only"}
-        ),
+        content=json.dumps({"target_id": uid, "provider": "echo", "subject": "only"}),
         headers=JSON,
         cookies={COOKIE_NAME: admin_sess},
     )
@@ -694,7 +710,9 @@ async def test_admin_list_includes_identities(register_providers):
     admin_sess = await _session_cookie(ds, admin_id)
 
     r = await ds.client.post(
-        "/-/admin/api/list", content="{}", headers=JSON,
+        "/-/admin/api/list",
+        content="{}",
+        headers=JSON,
         cookies={COOKIE_NAME: admin_sess},
     )
     users = {u["username"]: u for u in r.json()["users"]}
@@ -719,9 +737,7 @@ async def test_link_completion_while_signed_out_refused(register_providers):
     await _enable(ds, "echo")
     uid = await insert_user(ds, "alice")
 
-    value, cookie = _sign_link_state(
-        ds, provider="echo", actor_id=uid, step_up=None
-    )
+    value, cookie = _sign_link_state(ds, provider="echo", actor_id=uid, step_up=None)
     # No COOKIE_NAME (session) cookie — the visitor is fully signed out.
     r = await ds.client.get(
         f"/-/echo-auth/start?state={value}&subject=fresh",
@@ -749,9 +765,7 @@ async def test_step_up_state_missing_target_refused(register_providers):
     sess = await _session_cookie(ds, uid)
 
     # Step-up state for echo, actor = uid, but `u` has no `target`.
-    value, cookie = _sign_step_up_state(
-        ds, provider="echo", actor_id=uid, step_up={}
-    )
+    value, cookie = _sign_step_up_state(ds, provider="echo", actor_id=uid, step_up={})
     r = await ds.client.get(
         f"/-/echo-auth/start?state={value}&subject=mine",
         cookies={COOKIE_NAME: sess, STATE_COOKIE: cookie},
@@ -915,8 +929,11 @@ async def test_link_start_password_less_unlinked_step_up_400(register_providers)
     """A password-less account naming a `step_up_provider` that isn't currently
     linked to it → 400, no state cookie, nothing linked."""
     register_providers(
-        [LinkProvider("echo", "Echo"), LinkProvider("echo2", "Echo2"),
-         LinkProvider("echo3", "Echo3")]
+        [
+            LinkProvider("echo", "Echo"),
+            LinkProvider("echo2", "Echo2"),
+            LinkProvider("echo3", "Echo3"),
+        ]
     )
     ds = await make_ds()
     await _enable(ds, "echo")
