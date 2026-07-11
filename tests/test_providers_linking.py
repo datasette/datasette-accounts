@@ -23,6 +23,7 @@ from datasette.plugins import pm
 from datasette_accounts import db
 from datasette_accounts.passwords import UNUSABLE_PASSWORD, hash_password
 from datasette_accounts.providers import (
+    GENERIC_FLOW_ERROR,
     STATE_COOKIE,
     STATE_NAMESPACE,
     AuthProvider,
@@ -165,6 +166,16 @@ async def _audit_ops(ds, operation):
         [operation],
     )
     return [json.loads(r[0]) if r[0] else None for r in rows.rows]
+
+
+async def _login_reasons(ds):
+    """Every login_audit reason, oldest first — lets a refusal test assert both
+    that the expected reason was written and that nothing else was."""
+    internal = ds.get_internal_database()
+    rows = await internal.execute(
+        f"SELECT reason FROM {db.LOGIN_AUDIT} ORDER BY id"
+    )
+    return [r[0] for r in rows.rows]
 
 
 def _state_cookie_from(resp):
@@ -383,6 +394,23 @@ def _sign_link_state(ds, *, provider, actor_id, step_up, next="/-/account"):
         "a": actor_id,
         "u": step_up,
         "c": db.now_iso(),  # cookie itself is fresh; step_up.at may be stale
+    }
+    return value, ds.sign(payload, STATE_NAMESPACE)
+
+
+def _sign_step_up_state(ds, *, provider, actor_id, step_up, next="/-/account"):
+    """Mint a signed *step-up*-intent state by hand — lets a test present a
+    step-up state whose `u` payload is malformed (e.g. missing `target`) without
+    routing through link-start, which always fills `target` in."""
+    value = "test-step-up-value"
+    payload = {
+        "s": value,
+        "p": provider,
+        "n": next,
+        "i": "step-up",
+        "a": actor_id,
+        "u": step_up,
+        "c": db.now_iso(),
     }
     return value, ds.sign(payload, STATE_NAMESPACE)
 
@@ -653,3 +681,239 @@ async def test_admin_list_includes_identities(register_providers):
     assert [i["subject"] for i in users["alice"]["identities"]] == ["gh-1"]
     assert users["alice"]["identities"][0]["label"] == "Echo"
     assert users["admin"]["identities"] == []
+
+
+# ==========================================================================
+# Backfills from the 19b4fa9 security review of the linking state machine
+# ==========================================================================
+
+
+@pytest.mark.asyncio
+async def test_link_completion_while_signed_out_refused(register_providers):
+    """`_finish_link` resolves the actor from the LIVE session cookie. A valid
+    link state for user A, redeemed with NO session cookie at all (`live is None`)
+    → generic refusal, no session minted, no identity linked. The existing
+    forged-actor test only covers a *different* signed-in user."""
+    register_providers([LinkProvider("echo", "Echo")])
+    ds = await make_ds()
+    await _enable(ds, "echo")
+    uid = await insert_user(ds, "alice")
+
+    value, cookie = _sign_link_state(
+        ds, provider="echo", actor_id=uid, step_up=None
+    )
+    # No COOKIE_NAME (session) cookie — the visitor is fully signed out.
+    r = await ds.client.get(
+        f"/-/login/provider/echo/start?state={value}&subject=fresh",
+        cookies={STATE_COOKIE: cookie},
+    )
+    assert r.status_code == 403
+    assert GENERIC_FLOW_ERROR in r.text
+    assert not r.cookies.get(COOKIE_NAME)
+    internal = ds.get_internal_database()
+    assert await db.get_identity(internal, "echo", "fresh") is None
+    assert await _login_reasons(ds) == ["provider_state_invalid"]
+
+
+@pytest.mark.asyncio
+async def test_step_up_state_missing_target_refused(register_providers):
+    """`_finish_step_up`'s `not target` clause: a step-up state whose `u` payload
+    carries no `target` (never produced by link-start, but a tampered/rolled state
+    could) → refused, generic, `provider_state_invalid`, no forward, no session."""
+    register_providers([LinkProvider("echo", "Echo"), LinkProvider("echo2", "Echo2")])
+    ds = await make_ds()
+    await _enable(ds, "echo")
+    await _enable(ds, "echo2")
+    uid = await insert_user(ds, "sso", password_less=True)
+    await _link(ds, uid, "echo", "mine")  # a genuinely-owned, matchable identity
+    sess = await _session_cookie(ds, uid)
+
+    # Step-up state for echo, actor = uid, but `u` has no `target`.
+    value, cookie = _sign_step_up_state(
+        ds, provider="echo", actor_id=uid, step_up={}
+    )
+    r = await ds.client.get(
+        f"/-/login/provider/echo/start?state={value}&subject=mine",
+        cookies={COOKIE_NAME: sess, STATE_COOKIE: cookie},
+    )
+    assert r.status_code == 403
+    assert GENERIC_FLOW_ERROR in r.text
+    assert not r.cookies.get(COOKIE_NAME)
+    assert await _login_reasons(ds) == ["provider_state_invalid"]
+
+
+@pytest.mark.asyncio
+async def test_step_up_subject_matching_no_identity_refused(register_providers):
+    """`_finish_step_up`'s `existing is None` branch: a valid step-up state, but
+    the presented subject matches NO linked identity at all → refused, generic,
+    `provider_state_invalid` (distinct from the subject-of-another-user case)."""
+    register_providers([LinkProvider("echo", "Echo"), LinkProvider("echo2", "Echo2")])
+    ds = await make_ds()
+    await _enable(ds, "echo")
+    await _enable(ds, "echo2")
+    uid = await insert_user(ds, "sso", password_less=True)
+    await _link(ds, uid, "echo", "mine")
+    sess = await _session_cookie(ds, uid)
+
+    # A well-formed step-up start (echo2 target, echo step-up).
+    r = await ds.client.post(
+        "/-/account/api/link-start",
+        content=json.dumps({"provider": "echo2", "step_up_provider": "echo"}),
+        headers=JSON,
+        cookies={COOKIE_NAME: sess},
+    )
+    start_url = r.json()["start_url"]
+    step_state = _state_cookie_from(r)
+    # Present a subject nobody owns → get_identity returns None → refused.
+    r2 = await ds.client.get(
+        start_url + "&subject=ghost-subject",
+        cookies={COOKIE_NAME: sess, STATE_COOKIE: step_state},
+    )
+    assert r2.status_code == 403
+    assert GENERIC_FLOW_ERROR in r2.text
+    assert not r2.cookies.get(COOKIE_NAME)
+    internal = ds.get_internal_database()
+    assert await db.get_identity(internal, "echo2", "ghost-subject") is None
+    assert await _login_reasons(ds) == ["provider_state_invalid"]
+
+
+@pytest.mark.asyncio
+async def test_step_up_state_replayed_against_target_is_bad_state(register_providers):
+    """Confusion-attack regression: the gen-1 step-up state is bound to the
+    step-up provider (echo). Replaying it against the TARGET provider's start
+    (echo2) trips `read_state`'s provider-mismatch guard → the provider returns
+    'bad state' BEFORE finish_login, so nothing is linked and no login_audit row
+    (state-invalid or otherwise) is written."""
+    register_providers([LinkProvider("echo", "Echo"), LinkProvider("echo2", "Echo2")])
+    ds = await make_ds()
+    await _enable(ds, "echo")
+    await _enable(ds, "echo2")
+    uid = await insert_user(ds, "sso", password_less=True)
+    await _link(ds, uid, "echo", "mine")
+    sess = await _session_cookie(ds, uid)
+
+    # link-start → a step-up state bound to provider `echo`.
+    r = await ds.client.post(
+        "/-/account/api/link-start",
+        content=json.dumps({"provider": "echo2", "step_up_provider": "echo"}),
+        headers=JSON,
+        cookies={COOKIE_NAME: sess},
+    )
+    start_url = r.json()["start_url"]  # /-/login/provider/echo/start?state=VALUE
+    step_state = _state_cookie_from(r)
+    state_value = start_url.split("state=", 1)[1]
+
+    # Replay that echo-bound state against echo2's start: read_state(provider=echo2)
+    # sees payload p="echo" and returns None → LinkProvider's "bad state" 400.
+    r2 = await ds.client.get(
+        f"/-/login/provider/echo2/start?state={state_value}&subject=mine",
+        cookies={COOKIE_NAME: sess, STATE_COOKIE: step_state},
+    )
+    assert r2.status_code == 400
+    assert not r2.cookies.get(COOKIE_NAME)
+    internal = ds.get_internal_database()
+    assert await db.get_identity(internal, "echo2", "mine") is None
+    # Refused at the state gate — no login_audit row of any kind.
+    assert await _login_reasons(ds) == []
+
+
+# ==========================================================================
+# link-start error branches (early 4xx, before any KDF verify)
+# ==========================================================================
+
+
+@pytest.mark.asyncio
+async def test_link_start_locked_account_429_no_kdf(register_providers, monkeypatch):
+    """A locked account short-circuits to 429 BEFORE the password verify: the KDF
+    must never run (mirrors the change-password re-auth lockout discipline). No
+    verify, no failed-attempt tick, no state cookie."""
+    import datasette_accounts.routes.api as api
+
+    def boom(*a, **k):  # pragma: no cover - must never be called
+        raise AssertionError("averify_password ran on a locked account")
+
+    monkeypatch.setattr(api, "averify_password", boom)
+
+    register_providers([LinkProvider("echo", "Echo")])
+    ds = await make_ds()
+    await _enable(ds, "echo")
+    uid = await insert_user(ds, "alice")
+    internal = ds.get_internal_database()
+    await internal.execute_write(
+        f"UPDATE {db.USERS} SET locked_until = ? WHERE id = ?",
+        ["2999-01-01T00:00:00.000+00:00", uid],
+    )
+    sess = await _session_cookie(ds, uid)
+
+    r = await ds.client.post(
+        "/-/account/api/link-start",
+        content=json.dumps({"provider": "echo", "password": "password123"}),
+        headers=JSON,
+        cookies={COOKIE_NAME: sess},
+    )
+    assert r.status_code == 429
+    assert "start_url" not in r.json()
+    assert not _state_cookie_from(r)
+    # The locked branch returns before register_failed_attempt.
+    assert await _failed_attempts(ds, uid) == 0
+
+
+@pytest.mark.asyncio
+async def test_link_start_target_validation_400s(register_providers, monkeypatch):
+    """The target-validation 400s all fire before the KDF verify: `password` as a
+    target, a nonexistent target, and an already-linked target. The verify must
+    never run for any of them."""
+    import datasette_accounts.routes.api as api
+
+    def boom(*a, **k):  # pragma: no cover - must never be called
+        raise AssertionError("averify_password ran on an invalid target")
+
+    monkeypatch.setattr(api, "averify_password", boom)
+
+    register_providers([LinkProvider("echo", "Echo")])
+    ds = await make_ds()
+    await _enable(ds, "echo")
+    uid = await insert_user(ds, "alice")
+    sess = await _session_cookie(ds, uid)
+
+    async def link_start(provider):
+        return await ds.client.post(
+            "/-/account/api/link-start",
+            content=json.dumps({"provider": provider, "password": "password123"}),
+            headers=JSON,
+            cookies={COOKIE_NAME: sess},
+        )
+
+    assert (await link_start("password")).status_code == 400  # built-in, never a target
+    assert (await link_start("nope")).status_code == 400  # nonexistent provider
+    await _link(ds, uid, "echo", "gh-1")
+    assert (await link_start("echo")).status_code == 400  # already linked
+
+
+@pytest.mark.asyncio
+async def test_link_start_password_less_unlinked_step_up_400(register_providers):
+    """A password-less account naming a `step_up_provider` that isn't currently
+    linked to it → 400, no state cookie, nothing linked."""
+    register_providers(
+        [LinkProvider("echo", "Echo"), LinkProvider("echo2", "Echo2"),
+         LinkProvider("echo3", "Echo3")]
+    )
+    ds = await make_ds()
+    await _enable(ds, "echo")
+    await _enable(ds, "echo2")
+    await _enable(ds, "echo3")
+    uid = await insert_user(ds, "sso", password_less=True)
+    await _link(ds, uid, "echo", "mine")  # only echo is linked
+    sess = await _session_cookie(ds, uid)
+
+    # Target echo2 (valid, unlinked); step-up echo3 is installed but NOT linked
+    # to this account → refused before any provider flow starts.
+    r = await ds.client.post(
+        "/-/account/api/link-start",
+        content=json.dumps({"provider": "echo2", "step_up_provider": "echo3"}),
+        headers=JSON,
+        cookies={COOKIE_NAME: sess},
+    )
+    assert r.status_code == 400
+    assert "start_url" not in r.json()
+    assert not _state_cookie_from(r)
