@@ -22,6 +22,16 @@ class IdentityRow(BaseModel):
     last_login_at: Optional[str] = None
 
 
+class ProviderButton(BaseModel):
+    # One enabled external sign-in provider, rendered on the login page as a
+    # "Continue with {label}" button (design §9). `start_url` is a full-page
+    # navigation target (the redirect-based flow's entry), already carrying the
+    # page's validated `next`. No provider HTML/CSS — descriptors only (D10).
+    key: str
+    label: str
+    start_url: str
+
+
 class LoginPageData(BaseModel):
     next: str = "/"
     # Optional admin-authored help/contact note (plain text), "" when unset.
@@ -33,6 +43,9 @@ class LoginPageData(BaseModel):
     # toggle). When false, the page renders no username/password form — see
     # plans/auth-providers. Enabled by default (absent settings row).
     password_enabled: bool = True
+    # Enabled external providers, in registry order — the "Continue with …"
+    # buttons below the form (or the whole page when password is disabled).
+    providers: List[ProviderButton] = []
 
 
 class RegisterPageData(BaseModel):
@@ -92,9 +105,22 @@ class OwnSessionRow(BaseModel):
     last_seen_at: str
     user_agent: Optional[str] = None
     ip: Optional[str] = None
+    # Which sign-in provider minted this session (provenance, design §7):
+    # "password" for the built-in flow, else the external provider's key.
+    # Rendered as a small "Signed in via" badge in the sessions table.
+    provider: str = "password"
     # True for the session the viewer is currently browsing with (computed
     # server-side by comparing token_sha256 against the request's own cookie).
     current: bool = False
+
+
+class LinkableProvider(BaseModel):
+    # An enabled external provider the account has NOT yet linked — offered as a
+    # "Link…" button in the account's Sign-in methods section (design §6). Both
+    # the key (sent to the link-start API) and the display label are carried so
+    # the button can read "Link Okta…" without a second registry round-trip.
+    key: str
+    label: str
 
 
 class AccountPageData(BaseModel):
@@ -108,9 +134,9 @@ class AccountPageData(BaseModel):
     # The account's linked external sign-in methods (design §6, "Sign-in
     # methods"). Empty for a password-only account or during forced change.
     identities: List[IdentityRow] = []
-    # Keys of the enabled external providers this account has NOT yet linked —
-    # the "Link…" buttons to offer. Empty during forced change.
-    linkable_providers: List[str] = []
+    # Enabled external providers this account has NOT yet linked — the "Link…"
+    # buttons to offer ({key, label}). Empty during forced change.
+    linkable_providers: List[LinkableProvider] = []
     # False when the account has no usable password (SSO-only). Drives whether
     # linking asks for a password (step-up) or names an already-linked provider.
     has_password: bool = True
@@ -382,6 +408,9 @@ class SessionRow(BaseModel):
     last_seen_at: str
     user_agent: Optional[str] = None
     ip: Optional[str] = None
+    # Which sign-in provider minted this session (provenance, design §7);
+    # "password" for the built-in flow, else the external provider's key.
+    provider: str = "password"
 
 
 class SessionListResponse(BaseModel):

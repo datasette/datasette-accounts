@@ -227,12 +227,14 @@ WHERE id = $user_id::text;
 -- ============================================================================
 
 -- name: selectSession :row -> SessionRow
-SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip
+SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip,
+       provider
 FROM datasette_accounts_sessions
 WHERE token_sha256 = $token_sha256::text;
 
 -- name: listSessionsForUser :rows -> SessionRow
-SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip
+SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip,
+       provider
 FROM datasette_accounts_sessions
 WHERE actor_id = $actor_id::text
 ORDER BY last_seen_at DESC;

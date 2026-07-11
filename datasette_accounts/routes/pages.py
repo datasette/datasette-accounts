@@ -8,16 +8,20 @@ logout page is a tiny dependency-free redirect (no Svelte needed).
 from datasette import NotFound, Response
 
 from .. import db, grantable, messages, security
+from urllib.parse import quote
+
 from ..page_data import (
     AccountPageData,
     AdminAuditPageData,
     AdminPageData,
     CapabilitiesPageData,
     ConfigPageData,
+    LinkableProvider,
     LoginAttemptRow,
     LoginAttemptsPageData,
     LoginPageData,
     ProviderAdminRow,
+    ProviderButton,
     RegisterPageData,
     SetPasswordPageData,
 )
@@ -25,6 +29,7 @@ from ..passwords import UNUSABLE_PASSWORD
 from ..providers import (
     external_provider_keys,
     get_registry,
+    provider_label,
     provider_source,
     to_identity_rows,
 )
@@ -54,11 +59,28 @@ async def login_page(datasette, request):
     )
     internal = datasette.get_internal_database()
     help_text = await db.get_site_message(internal, "login_help") or ""
+    # One "Continue with …" button per ENABLED external provider (registry
+    # order). The validated `next` rides along as a query arg; the mount's start
+    # handler folds it into the signed state so the post-login redirect honours
+    # it. The whole surface is redirect-based (full-page navigation, not fetch).
+    registry = get_registry(datasette)
+    providers = []
+    for key in external_provider_keys(datasette):
+        if await db.get_provider_enabled(internal, key):
+            start = datasette.urls.path(f"/-/login/provider/{key}/start")
+            providers.append(
+                ProviderButton(
+                    key=key,
+                    label=registry[key].label,
+                    start_url=f"{start}?next={quote(next_value)}",
+                )
+            )
     page_data = LoginPageData(
         next=next_value,
         help=help_text,
         allow_register=await db.get_registration_enabled(internal),
         password_enabled=await db.get_provider_enabled(internal, "password"),
+        providers=providers,
     ).model_dump()
     return await _render(
         datasette, request, "src/pages/login/index.ts", "Log in", page_data
@@ -152,9 +174,12 @@ async def account_page(datasette, request):
         identities = to_identity_rows(datasette, raw_identities)
         linked_keys = {i["provider"] for i in raw_identities}
         # Linkable = installed external providers, enabled, not already linked.
+        # Carry the label so the "Link…" button can name the provider directly.
         for key in external_provider_keys(datasette):
             if key not in linked_keys and await db.get_provider_enabled(internal, key):
-                linkable.append(key)
+                linkable.append(
+                    LinkableProvider(key=key, label=provider_label(datasette, key))
+                )
     page_data = AccountPageData(
         id=actor["id"],
         username=actor.get("username", ""),

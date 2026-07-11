@@ -328,9 +328,11 @@ function buildShots(browser) {
       await ctx.close();
     },
 
-    // The Configuration admin page: the self-registration toggle + the
-    // admin-editable site messages (homepage sign-in prompt + login
-    // help/contact), seeded with demo copy.
+    // The Configuration admin page: the Sign-in providers section (enable +
+    // signups per provider) + the admin-editable site messages (homepage
+    // sign-in prompt + login help/contact), seeded with demo copy. Only the
+    // built-in password provider is installed in the shots harness — external
+    // provider rows land with ticket 08's real sample provider.
     config: async () => {
       const { ctx, page } = await loginContext(
         browser,
@@ -341,7 +343,7 @@ function buildShots(browser) {
         .getByRole("heading", { name: "Configuration" })
         .waitFor({ timeout: 15_000 });
       await page
-        .getByRole("heading", { name: "Self-registration" })
+        .getByRole("heading", { name: "Sign-in providers" })
         .waitFor();
       await page
         .getByRole("heading", { name: "Homepage sign-in prompt" })

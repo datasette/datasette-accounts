@@ -56,7 +56,10 @@
     const d = new Date(iso);
     return isNaN(d.getTime())
       ? iso
-      : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+      : d.toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        });
   }
 
   // Tooltip for the invited / invite-expired / reset-link badges. The URL
@@ -64,7 +67,9 @@
   // there is to show.
   function linkTitle(u: User): string {
     const when = fmtDate(u.link_expires_at);
-    const parts = [u.invite_expired ? `Link expired ${when}` : `Link expires ${when}`];
+    const parts = [
+      u.invite_expired ? `Link expired ${when}` : `Link expires ${when}`,
+    ];
     if (u.link_created_by) parts.push(`created by ${u.link_created_by}`);
     return parts.join(" · ");
   }
@@ -111,7 +116,10 @@
 
   async function op(path: string, body: Record<string, unknown>) {
     error = "";
-    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(path, body);
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(
+      path,
+      body,
+    );
     if (!ok || !data.ok) {
       error = data.error || "Operation failed";
       return false;
@@ -135,10 +143,14 @@
     e.preventDefault();
     createError = "";
     if (newMode === "invite") {
-      const { ok, data } = await postJSON<{ ok: boolean; error?: string; url?: string }>(
-        "/-/admin/api/invite",
-        { username: newUsername, is_admin: newIsAdmin },
-      );
+      const { ok, data } = await postJSON<{
+        ok: boolean;
+        error?: string;
+        url?: string;
+      }>("/-/admin/api/invite", {
+        username: newUsername,
+        is_admin: newIsAdmin,
+      });
       if (!ok || !data.ok || !data.url) {
         createError = data.error || "Could not create account";
         return;
@@ -152,13 +164,17 @@
       createError = "Passwords don't match";
       return;
     }
-    const body: Record<string, unknown> = { username: newUsername, is_admin: newIsAdmin };
+    const body: Record<string, unknown> = {
+      username: newUsername,
+      is_admin: newIsAdmin,
+    };
     if (newMode === "generate") body.generate = true;
     else body.password = newPassword;
-    const { ok, data } = await postJSON<{ ok: boolean; error?: string; password?: string }>(
-      "/-/admin/api/create",
-      body,
-    );
+    const { ok, data } = await postJSON<{
+      ok: boolean;
+      error?: string;
+      password?: string;
+    }>("/-/admin/api/create", body);
     if (!ok || !data.ok) {
       createError = data.error || "Could not create account";
       return;
@@ -187,7 +203,8 @@
   }
 
   async function approve(u: User) {
-    if (!window.confirm(`Approve the account request from “${u.username}”?`)) return;
+    if (!window.confirm(`Approve the account request from “${u.username}”?`))
+      return;
     if (await op("/-/admin/api/approve", { id: u.id })) await refresh();
   }
 
@@ -210,10 +227,11 @@
     const body: Record<string, unknown> = { id: u.id };
     if (resetGenerate) body.generate = true;
     else body.password = resetPassword;
-    const { ok, data } = await postJSON<{ ok: boolean; error?: string; password?: string }>(
-      "/-/admin/api/reset-password",
-      body,
-    );
+    const { ok, data } = await postJSON<{
+      ok: boolean;
+      error?: string;
+      password?: string;
+    }>("/-/admin/api/reset-password", body);
     if (!ok || !data.ok) {
       resetError = data.error || "Could not reset password";
       return;
@@ -229,9 +247,12 @@
   }
 
   async function openSessions(u: User) {
-    const { data } = await postJSON<{ sessions: Session[] }>("/-/admin/api/list-sessions", {
-      id: u.id,
-    });
+    const { data } = await postJSON<{ sessions: Session[] }>(
+      "/-/admin/api/list-sessions",
+      {
+        id: u.id,
+      },
+    );
     sessions = data.sessions || [];
     sessionsTarget = u;
   }
@@ -239,11 +260,21 @@
   async function revoke(token: string) {
     const u = sessionsTarget;
     if (!u) return;
-    if (!window.confirm(`Revoke this session for “${u.username}”? They will be signed out on that device.`)) return;
-    if (await op("/-/admin/api/revoke-session", { id: u.id, token_sha256: token })) {
-      const { data } = await postJSON<{ sessions: Session[] }>("/-/admin/api/list-sessions", {
-        id: u.id,
-      });
+    if (
+      !window.confirm(
+        `Revoke this session for “${u.username}”? They will be signed out on that device.`,
+      )
+    )
+      return;
+    if (
+      await op("/-/admin/api/revoke-session", { id: u.id, token_sha256: token })
+    ) {
+      const { data } = await postJSON<{ sessions: Session[] }>(
+        "/-/admin/api/list-sessions",
+        {
+          id: u.id,
+        },
+      );
       sessions = data.sessions || [];
     }
   }
@@ -255,6 +286,43 @@
     resetGenerate = true;
     resetError = "";
     resetCred = null;
+  }
+
+  // Sign-in methods (identities) modal — admin view + unlink (design §6). The
+  // provenance badge on the approval queue reuses the same identity data:
+  // a pending account's linked identity, or "password" when it self-registered.
+  type Identity = NonNullable<User["identities"]>[number];
+  let identityTarget = $state<User | null>(null);
+  let identityError = $state("");
+
+  function identityLabel(u: User): string {
+    const first = (u.identities ?? [])[0];
+    return first ? first.label : "password";
+  }
+  function viaPassword(u: User): boolean {
+    return (u.identities ?? []).length === 0;
+  }
+
+  function openIdentities(u: User) {
+    identityTarget = u;
+    identityError = "";
+  }
+
+  async function unlinkIdentity(u: User, i: Identity) {
+    if (!window.confirm(`Unlink ${i.label} from “${u.username}”?`)) return;
+    identityError = "";
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(
+      "/-/admin/api/unlink-identity",
+      { target_id: u.id, provider: i.provider, subject: i.subject },
+    );
+    if (!ok || !data.ok) {
+      // Render the strand-guard 400 verbatim ("Reset their password first.").
+      identityError = data.error || "Could not unlink.";
+      return;
+    }
+    await refresh();
+    // Re-point the open modal at the refreshed user so its list updates.
+    identityTarget = users.find((x) => x.id === u.id) ?? null;
   }
 
   // Set-expiry modal (row-menu "Set expiry…"): quick relative presets or an
@@ -306,8 +374,15 @@
 
   async function mintLink(u: User, kind: "invite" | "reset") {
     error = "";
-    const path = kind === "invite" ? "/-/admin/api/invite-link" : "/-/admin/api/reset-link";
-    const { ok, data } = await postJSON<{ ok: boolean; error?: string; url?: string }>(path, {
+    const path =
+      kind === "invite"
+        ? "/-/admin/api/invite-link"
+        : "/-/admin/api/reset-link";
+    const { ok, data } = await postJSON<{
+      ok: boolean;
+      error?: string;
+      url?: string;
+    }>(path, {
       id: u.id,
     });
     if (!ok || !data.ok || !data.url) {
@@ -347,12 +422,24 @@
         {#each pending as u (u.id)}
           <li>
             <div class="req">
-              <span class="uname">{u.username}</span>
+              <span class="uname">
+                {u.username}
+                {#if viaPassword(u)}
+                  <span class="badge badge-pw">password</span>
+                {:else}
+                  <span class="badge badge-provider">{identityLabel(u)}</span>
+                {/if}
+              </span>
               <span class="requested">Requested {fmtDate(u.created_at)}</span>
             </div>
             <div class="verdict">
-              <button class="btn-primary btn-sm" onclick={() => approve(u)}>Approve</button>
-              <button class="btn-sm btn-danger" onclick={() => (rejectTarget = u)}>Reject</button>
+              <button class="btn-primary btn-sm" onclick={() => approve(u)}
+                >Approve</button
+              >
+              <button
+                class="btn-sm btn-danger"
+                onclick={() => (rejectTarget = u)}>Reject</button
+              >
             </div>
           </li>
         {/each}
@@ -365,9 +452,7 @@
       <span class="ico" aria-hidden="true">⌕</span>
       <input class="input" placeholder="Search accounts…" bind:value={search} />
     </div>
-    <button class="btn-primary" onclick={openCreate}>
-      + New account
-    </button>
+    <button class="btn-primary" onclick={openCreate}> + New account </button>
   </div>
 
   <div class="card table-wrap">
@@ -386,27 +471,46 @@
         {#each filtered as u (u.id)}
           <tr>
             <td class="uname">
-              {u.username}{#if u.id === pageData.viewer_id}<span class="you">(you)</span>{/if}
+              {u.username}{#if u.id === pageData.viewer_id}<span class="you"
+                  >(you)</span
+                >{/if}
             </td>
             <td>
               {#if u.is_admin}<span class="badge badge-admin">admin</span>{/if}
             </td>
             <td>
               <div class="status">
-                {#if u.disabled}<span class="badge badge-disabled">disabled</span>{/if}
-                {#if u.expired}<span class="badge badge-expired">expired</span>{/if}
-                {#if u.locked}<span class="badge badge-locked">locked</span>{/if}
-                {#if u.invited}<span class="badge badge-invited" title={linkTitle(u)}>invited</span>{/if}
-                {#if u.invite_expired}<span class="badge badge-invite-expired" title={linkTitle(u)}>invite expired</span>{/if}
-                {#if u.link_purpose === "reset"}<span class="badge badge-reset-link" title={linkTitle(u)}>reset link</span>{/if}
-                {#if !u.last_login_at}<span class="badge badge-pending">pending</span>{/if}
+                {#if u.disabled}<span class="badge badge-disabled"
+                    >disabled</span
+                  >{/if}
+                {#if u.expired}<span class="badge badge-expired">expired</span
+                  >{/if}
+                {#if u.locked}<span class="badge badge-locked">locked</span
+                  >{/if}
+                {#if u.invited}<span
+                    class="badge badge-invited"
+                    title={linkTitle(u)}>invited</span
+                  >{/if}
+                {#if u.invite_expired}<span
+                    class="badge badge-invite-expired"
+                    title={linkTitle(u)}>invite expired</span
+                  >{/if}
+                {#if u.link_purpose === "reset"}<span
+                    class="badge badge-reset-link"
+                    title={linkTitle(u)}>reset link</span
+                  >{/if}
+                {#if !u.last_login_at}<span class="badge badge-pending"
+                    >pending</span
+                  >{/if}
               </div>
             </td>
             <td>
               {#if u.last_login_at}
                 <span class="lastseen">{fmtDate(u.last_login_at)}</span>
               {:else}
-                <span class="never" title="This account has never signed in.">Never</span>
+                <span class="never" title="This account has never signed in."
+                  >Never</span
+                >
               {/if}
             </td>
             <td>
@@ -437,29 +541,97 @@
                             u.is_admin
                               ? `Revoke admin from “${u.username}”?`
                               : `Make “${u.username}” an admin?`,
-                          ))}
+                          ),
+                        )}
                     >
                       {u.is_admin ? "Revoke admin" : "Make admin"}
                     </button>
                     {#if u.disabled}
-                      <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/enable", `Enable the account “${u.username}”?`))}>Enable</button>
+                      <button
+                        role="menuitem"
+                        onclick={() =>
+                          pick(() =>
+                            toggle(
+                              u,
+                              "/-/admin/api/enable",
+                              `Enable the account “${u.username}”?`,
+                            ),
+                          )}>Enable</button
+                      >
                     {:else}
-                      <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/disable", `Disable the account “${u.username}”? They will no longer be able to sign in.`))}>Disable</button>
+                      <button
+                        role="menuitem"
+                        onclick={() =>
+                          pick(() =>
+                            toggle(
+                              u,
+                              "/-/admin/api/disable",
+                              `Disable the account “${u.username}”? They will no longer be able to sign in.`,
+                            ),
+                          )}>Disable</button
+                      >
                     {/if}
                     {#if u.locked}
-                      <button role="menuitem" onclick={() => pick(() => toggle(u, "/-/admin/api/unlock", `Unlock the account “${u.username}”?`))}>Unlock</button>
+                      <button
+                        role="menuitem"
+                        onclick={() =>
+                          pick(() =>
+                            toggle(
+                              u,
+                              "/-/admin/api/unlock",
+                              `Unlock the account “${u.username}”?`,
+                            ),
+                          )}>Unlock</button
+                      >
                     {/if}
-                    <button role="menuitem" onclick={() => pick(() => openExpiry(u))}>Set expiry…</button>
+                    <button
+                      role="menuitem"
+                      onclick={() => pick(() => openExpiry(u))}
+                      >Set expiry…</button
+                    >
                     <div class="sep"></div>
                     {#if u.invited || u.invite_expired}
-                      <button role="menuitem" onclick={() => pick(() => mintLink(u, "invite"))}>New invite link…</button>
+                      <button
+                        role="menuitem"
+                        onclick={() => pick(() => mintLink(u, "invite"))}
+                        >New invite link…</button
+                      >
                     {:else}
-                      <button role="menuitem" onclick={() => pick(() => mintLink(u, "reset"))}>Reset link…</button>
+                      <button
+                        role="menuitem"
+                        onclick={() => pick(() => mintLink(u, "reset"))}
+                        >Reset link…</button
+                      >
                     {/if}
-                    <button role="menuitem" onclick={() => pick(() => openReset(u))}>Reset password…</button>
-                    <button role="menuitem" onclick={() => pick(() => openSessions(u))}>Active sessions…</button>
-                    <a role="menuitem" href="/-/admin/login-attempts?username={encodeURIComponent(u.username)}">Login attempts…</a>
-                    <a role="menuitem" href="/-/admin/audit?username={encodeURIComponent(u.username)}">History…</a>
+                    <button
+                      role="menuitem"
+                      onclick={() => pick(() => openReset(u))}
+                      >Reset password…</button
+                    >
+                    {#if (u.identities ?? []).length > 0}
+                      <button
+                        role="menuitem"
+                        onclick={() => pick(() => openIdentities(u))}
+                        >Sign-in methods…</button
+                      >
+                    {/if}
+                    <button
+                      role="menuitem"
+                      onclick={() => pick(() => openSessions(u))}
+                      >Active sessions…</button
+                    >
+                    <a
+                      role="menuitem"
+                      href="/-/admin/login-attempts?username={encodeURIComponent(
+                        u.username,
+                      )}">Login attempts…</a
+                    >
+                    <a
+                      role="menuitem"
+                      href="/-/admin/audit?username={encodeURIComponent(
+                        u.username,
+                      )}">History…</a
+                    >
                   </div>
                 {/if}
               </div>
@@ -472,7 +644,10 @@
           </tr>
         {/each}
         {#if filtered.length === 0}
-          <tr><td colspan="6" class="empty">No accounts match “{search}”.</td></tr>
+          <tr
+            ><td colspan="6" class="empty">No accounts match “{search}”.</td
+            ></tr
+          >
         {/if}
       </tbody>
     </table>
@@ -489,12 +664,17 @@
   title="New account"
 >
   {#if createdCred}
-    <p class="lead">Account <strong>{createdCred.username}</strong> was created.</p>
-    <PasswordReveal username={createdCred.username} password={createdCred.password} />
+    <p class="lead">
+      Account <strong>{createdCred.username}</strong> was created.
+    </p>
+    <PasswordReveal
+      username={createdCred.username}
+      password={createdCred.password}
+    />
   {:else if createdLink}
     <p class="lead">
-      Account <strong>{createdLink.username}</strong> was created. Send them this link to choose
-      their password.
+      Account <strong>{createdLink.username}</strong> was created. Send them this
+      link to choose their password.
     </p>
     <LinkReveal url={createdLink.url} />
   {:else}
@@ -551,10 +731,15 @@
   {/if}
   {#snippet footer()}
     {#if createdCred || createdLink}
-      <button class="btn-primary btn-sm" onclick={() => (createOpen = false)}>Done</button>
+      <button class="btn-primary btn-sm" onclick={() => (createOpen = false)}
+        >Done</button
+      >
     {:else}
-      <button class="btn-sm" onclick={() => (createOpen = false)}>Cancel</button>
-      <button class="btn-primary btn-sm" type="submit" form="create-form">Create account</button>
+      <button class="btn-sm" onclick={() => (createOpen = false)}>Cancel</button
+      >
+      <button class="btn-primary btn-sm" type="submit" form="create-form"
+        >Create account</button
+      >
     {/if}
   {/snippet}
 </Modal>
@@ -567,27 +752,38 @@
 >
   <p class="lead">
     {#if linkKind === "invite"}
-      New invite link for <strong>{linkTarget?.username}</strong> — any previous link no longer
-      works.
+      New invite link for <strong>{linkTarget?.username}</strong> — any previous link
+      no longer works.
     {:else}
-      Reset link for <strong>{linkTarget?.username}</strong>. They stay signed in until they use
-      it; completing it sets the new password and signs them out everywhere else.
+      Reset link for <strong>{linkTarget?.username}</strong>. They stay signed
+      in until they use it; completing it sets the new password and signs them
+      out everywhere else.
     {/if}
   </p>
   <LinkReveal url={linkUrl} />
   {#snippet footer()}
-    <button class="btn-primary btn-sm" onclick={() => (linkTarget = null)}>Done</button>
+    <button class="btn-primary btn-sm" onclick={() => (linkTarget = null)}
+      >Done</button
+    >
   {/snippet}
 </Modal>
 
 <!-- Reset password -->
-<Modal open={resetTarget !== null} onclose={() => (resetTarget = null)} title="Reset password">
+<Modal
+  open={resetTarget !== null}
+  onclose={() => (resetTarget = null)}
+  title="Reset password"
+>
   {#if resetCred}
-    <p class="lead">Password reset for <strong>{resetTarget?.username}</strong>.</p>
+    <p class="lead">
+      Password reset for <strong>{resetTarget?.username}</strong>.
+    </p>
     <PasswordReveal username={resetTarget?.username} password={resetCred} />
   {:else}
     <form id="reset-form" onsubmit={submitReset}>
-      <p class="lead">Set a new password for <strong>{resetTarget?.username}</strong>.</p>
+      <p class="lead">
+        Set a new password for <strong>{resetTarget?.username}</strong>.
+      </p>
       {#if resetError}<p class="msg msg-error">{resetError}</p>{/if}
       <label class="check">
         <input type="checkbox" bind:checked={resetGenerate} />
@@ -623,30 +819,49 @@
   {/if}
   {#snippet footer()}
     {#if resetCred}
-      <button class="btn-primary btn-sm" onclick={() => (resetTarget = null)}>Done</button>
+      <button class="btn-primary btn-sm" onclick={() => (resetTarget = null)}
+        >Done</button
+      >
     {:else}
-      <button class="btn-sm" onclick={() => (resetTarget = null)}>Cancel</button>
-      <button class="btn-primary btn-sm" type="submit" form="reset-form">Reset password</button>
+      <button class="btn-sm" onclick={() => (resetTarget = null)}>Cancel</button
+      >
+      <button class="btn-primary btn-sm" type="submit" form="reset-form"
+        >Reset password</button
+      >
     {/if}
   {/snippet}
 </Modal>
 
 <!-- Set expiry -->
-<Modal open={expiryTarget !== null} onclose={() => (expiryTarget = null)} title="Set expiry">
+<Modal
+  open={expiryTarget !== null}
+  onclose={() => (expiryTarget = null)}
+  title="Set expiry"
+>
   <form id="expiry-form" onsubmit={submitExpiry}>
     <p class="lead">
-      Set a deadline for <strong>{expiryTarget?.username}</strong> — past it the account behaves
-      like a disabled one until the expiry is extended or cleared.
+      Set a deadline for <strong>{expiryTarget?.username}</strong> — past it the account
+      behaves like a disabled one until the expiry is extended or cleared.
     </p>
     {#if expiryTarget?.expires_at}
-      <p class="muted current">Currently expires {fmtDate(expiryTarget.expires_at)}.</p>
+      <p class="muted current">
+        Currently expires {fmtDate(expiryTarget.expires_at)}.
+      </p>
     {/if}
     {#if expiryError}<p class="msg msg-error">{expiryError}</p>{/if}
     <div class="presets">
-      <button type="button" class="btn-sm" onclick={() => postExpiry({ in_days: 30 })}>
+      <button
+        type="button"
+        class="btn-sm"
+        onclick={() => postExpiry({ in_days: 30 })}
+      >
         In 30 days
       </button>
-      <button type="button" class="btn-sm" onclick={() => postExpiry({ in_days: 90 })}>
+      <button
+        type="button"
+        class="btn-sm"
+        onclick={() => postExpiry({ in_days: 90 })}
+      >
         In 90 days
       </button>
     </div>
@@ -657,34 +872,50 @@
   </form>
   {#snippet footer()}
     {#if expiryTarget?.expires_at}
-      <button class="btn-sm btn-danger" onclick={() => postExpiry({})}>Clear expiry</button>
+      <button class="btn-sm btn-danger" onclick={() => postExpiry({})}
+        >Clear expiry</button
+      >
     {/if}
     <button class="btn-sm" onclick={() => (expiryTarget = null)}>Cancel</button>
-    <button class="btn-primary btn-sm" type="submit" form="expiry-form">Set expiry</button>
+    <button class="btn-primary btn-sm" type="submit" form="expiry-form"
+      >Set expiry</button
+    >
   {/snippet}
 </Modal>
 
 <!-- Delete confirm -->
-<Modal open={deleteTarget !== null} onclose={() => (deleteTarget = null)} title="Delete account">
+<Modal
+  open={deleteTarget !== null}
+  onclose={() => (deleteTarget = null)}
+  title="Delete account"
+>
   <p class="lead">
-    Delete <strong>{deleteTarget?.username}</strong>? This removes the account and all of its
-    sessions. This cannot be undone.
+    Delete <strong>{deleteTarget?.username}</strong>? This removes the account
+    and all of its sessions. This cannot be undone.
   </p>
   {#snippet footer()}
     <button class="btn-sm" onclick={() => (deleteTarget = null)}>Cancel</button>
-    <button class="btn-danger-solid btn-sm" onclick={confirmDelete}>Delete account</button>
+    <button class="btn-danger-solid btn-sm" onclick={confirmDelete}
+      >Delete account</button
+    >
   {/snippet}
 </Modal>
 
 <!-- Reject confirm (approval queue) -->
-<Modal open={rejectTarget !== null} onclose={() => (rejectTarget = null)} title="Reject request">
+<Modal
+  open={rejectTarget !== null}
+  onclose={() => (rejectTarget = null)}
+  title="Reject request"
+>
   <p class="lead">
-    Reject the account request from <strong>{rejectTarget?.username}</strong>? This deletes the
-    request. They can submit a new one while signups are open.
+    Reject the account request from <strong>{rejectTarget?.username}</strong>?
+    This deletes the request. They can submit a new one while signups are open.
   </p>
   {#snippet footer()}
     <button class="btn-sm" onclick={() => (rejectTarget = null)}>Cancel</button>
-    <button class="btn-danger-solid btn-sm" onclick={confirmReject}>Reject request</button>
+    <button class="btn-danger-solid btn-sm" onclick={confirmReject}
+      >Reject request</button
+    >
   {/snippet}
 </Modal>
 
@@ -703,9 +934,47 @@
         <li>
           <div class="sinfo">
             <div class="stime">{fmtDate(s.last_seen_at)}</div>
-            <div class="smeta">{s.ip ?? "unknown IP"} · {s.user_agent ?? "unknown device"}</div>
+            <div class="smeta">
+              {s.ip ?? "unknown IP"} · {s.user_agent ?? "unknown device"}
+            </div>
           </div>
-          <button class="btn-sm btn-danger" onclick={() => revoke(s.token_sha256)}>Revoke</button>
+          <button
+            class="btn-sm btn-danger"
+            onclick={() => revoke(s.token_sha256)}>Revoke</button
+          >
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</Modal>
+
+<!-- Sign-in methods (admin identity view + unlink) -->
+<Modal
+  open={identityTarget !== null}
+  onclose={() => (identityTarget = null)}
+  title="Sign-in methods"
+>
+  <p class="lead"><strong>{identityTarget?.username}</strong></p>
+  {#if identityError}<p class="msg msg-error">{identityError}</p>{/if}
+  {#if (identityTarget?.identities ?? []).length === 0}
+    <p class="muted">No linked external sign-in methods.</p>
+  {:else}
+    <ul class="sessions">
+      {#each identityTarget?.identities ?? [] as i (i.provider + i.subject)}
+        <li>
+          <div class="sinfo">
+            <div class="stime">
+              <span class="badge badge-provider">{i.label}</span>
+              subject <code>{i.subject}</code>
+            </div>
+            <div class="smeta">linked {fmtDate(i.created_at)}</div>
+          </div>
+          <button
+            class="btn-sm btn-danger"
+            onclick={() => identityTarget && unlinkIdentity(identityTarget, i)}
+          >
+            Unlink
+          </button>
         </li>
       {/each}
     </ul>
@@ -718,6 +987,16 @@
   }
   .bar h1 {
     margin: 0;
+  }
+  .badge-pw {
+    color: var(--ok);
+  }
+  .badge-provider {
+    color: var(--acc);
+  }
+  .uname .badge {
+    margin-left: 0.5rem;
+    font-weight: 600;
   }
 
   /* Awaiting-approval queue — pinned above the main table with a warn accent
