@@ -2,7 +2,9 @@
 
 Datasette accepts a single ``--plugins-dir`` (a second flag overrides the
 first), so ``just dev`` points here and this loose module imports each sibling
-sample (``samples/*-auth/*.py``) and re-exports the two hookimpls, aggregated.
+sample (``samples/*-auth/*.py``) and re-exports their hookimpls, aggregated.
+Only the hooks relayed below reach Datasette — pluggy never sees the sample
+modules themselves — so a sample needing another hook must have it added here.
 Each sample module is imported under its own basename ("discord_auth",
 "github_auth", …) so the admin Configuration table's provider Source column
 reads the same as when a sample is loaded directly via its own directory.
@@ -16,6 +18,7 @@ import importlib.util
 from pathlib import Path
 
 from datasette import hookimpl
+from datasette.utils import await_me_maybe
 
 _SAMPLES = Path(__file__).resolve().parents[1]
 
@@ -48,3 +51,19 @@ def register_routes():
     for module in _modules:
         routes.extend(module.register_routes())
     return routes
+
+
+@hookimpl
+def startup(datasette):
+    # Samples that own tables in the internal DB create them in their startup
+    # hookimpl (e.g. bluesky-auth's flow table). Datasette runs each startup
+    # result through await_me_maybe, so relay with the same semantics.
+    results = [
+        module.startup(datasette) for module in _modules if hasattr(module, "startup")
+    ]
+
+    async def inner():
+        for result in results:
+            await await_me_maybe(result)
+
+    return inner

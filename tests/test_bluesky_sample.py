@@ -103,6 +103,14 @@ async def test_dev_plugins_loader_serves_every_sample():
     ):
         r = await ds.client.get(path)
         assert r.status_code == 404, path  # registered route, disabled provider
+    # The loader must relay `startup` too, or the flow table never exists
+    # under `just dev` (pluggy never sees the sample modules themselves —
+    # only the hooks load_samples.py re-exports).
+    rows = await ds.get_internal_database().execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name='bluesky_auth_oauth_flows'"
+    )
+    assert [r[0] for r in rows.rows] == ["bluesky_auth_oauth_flows"]
 
 
 @pytest.mark.asyncio
