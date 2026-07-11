@@ -25,7 +25,7 @@ frontend-dev *flags:
 dev *flags:
     DATASETTE_SECRET=abc123 uv run datasette --root -p 8006 --internal accounts.db \
       -s permissions.profile_access.id '*' \
-      --plugins-dir samples/discord-auth {{flags}}
+      --plugins-dir samples/dev-plugins {{flags}}
 
 # Datasette + Vite HMR (auto-restart on .py/.html changes)
 dev-with-hmr *flags:

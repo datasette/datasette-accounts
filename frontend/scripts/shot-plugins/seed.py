@@ -129,14 +129,14 @@ def startup(datasette):
     return inner
 
 
-# Enable the Discord sample provider (samples/discord-auth, loaded into this
-# harness by the sibling load_discord_sample.py shim) so the login page shows a
-# "Continue with Discord" button and the Configuration page shows an enabled
-# external-provider row. The demo provider stays at its default (disabled), so
-# the login shot shows Discord alone rather than developer-only noise. Mirrors
+# Enable the sample providers (samples/*-auth, loaded into this harness by the
+# sibling load_sample_providers.py shim) so the login page shows "Continue
+# with Discord" / "Continue with GitHub" buttons and the Configuration page
+# shows enabled external-provider rows. The demo provider stays at its default
+# (disabled), so the login shot skips developer-only noise. Mirrors
 # db.set_provider_enabled's row shape (explicit '1', absence = disabled).
 def seed_providers(conn):
-    """Seed the Discord provider's enabled + signups settings (idempotent)."""
+    """Seed the sample providers' enabled + signups settings (idempotent)."""
     db = Database(conn)
     settings = db[accounts_db.SETTINGS]
     if settings.exists() and settings.count > 0:
@@ -144,6 +144,8 @@ def seed_providers(conn):
     for key, value in (
         ("provider:discord:enabled", "1"),
         ("provider:discord:signups", "auto"),
+        ("provider:github:enabled", "1"),
+        ("provider:github:signups", "auto"),
     ):
         settings.insert(
             {

@@ -34,11 +34,11 @@ const INTERNAL_DB = "/tmp/datasette-accounts-shots-internal.db";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // The seed plugin lives here; it also carries a loose shim
-// (load_discord_sample.py) that loads the real Discord sample from
-// samples/discord-auth, so the login shot shows the "Continue with Discord"
-// button and the Configuration shot shows a real external-provider row. Datasette
-// takes a single --plugins-dir (a second flag would override the first), hence
-// the shim rather than a second directory.
+// (load_sample_providers.py) that loads every real sample provider from
+// samples/ (via samples/dev-plugins), so the login shot shows the "Continue
+// with …" buttons and the Configuration shot shows real external-provider
+// rows. Datasette takes a single --plugins-dir (a second flag would override
+// the first), hence the shim rather than a second directory.
 const PLUGINS_DIR = resolve(HERE, "shot-plugins");
 const OUT = resolve(HERE, "../../docs/screenshots");
 const out = (n) => resolve(OUT, `${n}.png`);
@@ -92,11 +92,13 @@ async function startServer() {
       detached: true,
       env: {
         ...process.env,
-        // Fake Discord credentials so the sample provider reports
-        // configured() → true and its branded button shows on the login shot.
-        // No OAuth flow ever runs — these values are never sent anywhere.
+        // Fake credentials so the sample providers report configured() → true
+        // and their branded buttons show on the login shot. No OAuth flow
+        // ever runs — these values are never sent anywhere.
         DATASETTE_DISCORD_CLIENT_ID: "screenshots-fake-client-id",
         DATASETTE_DISCORD_CLIENT_SECRET: "screenshots-fake-client-secret",
+        DATASETTE_GITHUB_CLIENT_ID: "screenshots-fake-client-id",
+        DATASETTE_GITHUB_CLIENT_SECRET: "screenshots-fake-client-secret",
       },
     },
   );
@@ -345,8 +347,8 @@ function buildShots(browser) {
     // The Configuration admin page: the Sign-in providers section (enable +
     // signups per provider) + the admin-editable site messages (homepage
     // sign-in prompt + login help/contact), seeded with demo copy. The harness
-    // loads the built-in password provider, the enabled Discord sample
-    // (samples/discord-auth, via load_discord_sample.py), and the installed
+    // loads the built-in password provider, the enabled Discord + GitHub
+    // samples (samples/, via load_sample_providers.py), and the installed
     // demo provider (left disabled) — one row each.
     config: async () => {
       const { ctx, page } = await loginContext(

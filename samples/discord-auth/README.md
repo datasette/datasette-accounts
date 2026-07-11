@@ -8,8 +8,9 @@ A **real-world** OAuth2 sign-in provider for
 this one really authenticates people.
 
 It is a single loose module (`discord_auth.py`) that Datasette's `--plugins-dir`
-imports directly — no packaging. `just dev` loads it, so the dev login page can
-show a "Continue with Discord" button. The module owns its routes under
+imports directly — no packaging. `just dev` loads it (via `samples/dev-plugins`,
+which loads every sample), so the dev login page can show a "Continue with
+Discord" button. The module owns its routes under
 `/-/discord-auth/...` via the ordinary `register_routes` hook (the datasette-paper
 model), each wrapped in `@provider_gate("discord")`.
 

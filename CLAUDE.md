@@ -70,6 +70,13 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
   the pluggy fixture the other provider tests use). Because it is installed, a
   `demo` provider shows up in the registry during the whole test suite; a couple
   of provider tests filter it out of exact-registry assertions.
+- `samples/{discord,github}-auth/` — real OAuth2 sign-in providers as loose
+  `--plugins-dir` modules (no packaging), each with a README. `just dev` and the
+  screenshots harness load them all through one loader
+  (`samples/dev-plugins/load_samples.py` — Datasette accepts a single
+  `--plugins-dir`); a new `samples/*-auth/` dir is picked up automatically.
+  Unconfigured (no env vars) they are inert: `configured()` false → no login
+  button, `start` 503s. Tests: `tests/test_{discord,github}_sample.py`.
 
 ## Gotchas discovered during build
 - datasette-plugin-router does **not** dispatch by HTTP method: identical paths
