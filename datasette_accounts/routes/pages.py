@@ -17,11 +17,17 @@ from ..page_data import (
     LoginAttemptRow,
     LoginAttemptsPageData,
     LoginPageData,
+    ProviderAdminRow,
     RegisterPageData,
     SetPasswordPageData,
 )
 from ..passwords import UNUSABLE_PASSWORD
-from ..providers import external_provider_keys, to_identity_rows
+from ..providers import (
+    external_provider_keys,
+    get_registry,
+    provider_source,
+    to_identity_rows,
+)
 from ..router import require_admin_page, router
 from ..sessions import list_own_sessions, token_sha256
 from .api import _user_row, audit_entries
@@ -196,9 +202,23 @@ async def capabilities_page(datasette, request):
 async def config_page(datasette, request):
     internal = datasette.get_internal_database()
     view = await messages.slots_view(internal)
+    counts = await db.count_identities_by_provider(internal)
+    providers = [
+        ProviderAdminRow(
+            key=key,
+            label=provider.label,
+            source=provider_source(provider),
+            builtin=key == "password",
+            enabled=await db.get_provider_enabled(internal, key),
+            signups=await db.get_provider_signups(internal, key),
+            linked_count=counts.get(key, 0),
+        )
+        for key, provider in get_registry(datasette).items()
+    ]
     page_data = ConfigPageData(
         **view,
         registration_enabled=await db.get_registration_enabled(internal),
+        providers=providers,
     ).model_dump()
     return await _render(
         datasette, request, "src/pages/config/index.ts", "Configuration", page_data

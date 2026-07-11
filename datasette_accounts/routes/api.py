@@ -28,6 +28,7 @@ from ..page_data import (
     RevokeSessionRequest,
     SessionRow,
     SetExpiryRequest,
+    SetProviderRequest,
     SetRegistrationRequest,
     SetSiteMessageRequest,
     TargetRequest,
@@ -349,8 +350,13 @@ async def link_start(datasette, request, body: Annotated[LinkStartRequest, Body(
             )
         # Direct password link: start the target provider with intent=link.
         return _link_start_response(
-            datasette, request, provider=target, intent="link",
-            actor_id=actor_id, step_up=None, start_provider=target,
+            datasette,
+            request,
+            provider=target,
+            intent="link",
+            actor_id=actor_id,
+            step_up=None,
+            start_provider=target,
         )
 
     # Password-less: the proof is re-completing an ALREADY-linked provider.
@@ -363,8 +369,13 @@ async def link_start(datasette, request, body: Annotated[LinkStartRequest, Body(
     # Start the step-up provider with intent=step-up; the target rides in the
     # state so the step-up callback knows where to forward once proof is shown.
     return _link_start_response(
-        datasette, request, provider=step_up, intent="step-up",
-        actor_id=actor_id, step_up={"target": target}, start_provider=step_up,
+        datasette,
+        request,
+        provider=step_up,
+        intent="step-up",
+        actor_id=actor_id,
+        step_up={"target": target},
+        start_provider=step_up,
     )
 
 
@@ -947,3 +958,52 @@ async def admin_set_registration(
         internal, request.actor["id"], body.enabled
     )
     return Response.json({"ok": True, "enabled": enabled})
+
+
+# --------------------------------------------------------------------------
+# Sign-in provider settings (enable/disable + signups — see plans/auth-providers)
+# --------------------------------------------------------------------------
+
+
+@router.POST("/-/admin/api/set-provider$")
+@require_admin
+async def admin_set_provider(
+    datasette, request, body: Annotated[SetProviderRequest, Body()]
+):
+    """Enable/disable a provider and/or set its signups policy (design §9).
+
+    ``key`` must be in the registry (an unknown key → 400). Either or both of
+    ``enabled`` / ``signups`` may be sent; a ``None`` field is left unchanged.
+    The last-provider guard surfaces as a 400 with its message. The write takes
+    effect on the very next request (nothing about it is cached)."""
+    registry = get_registry(datasette)
+    if body.key not in registry:
+        return Response.json({"ok": False, "error": "Unknown provider"}, status=400)
+    if body.signups is not None and body.signups not in ("off", "approval", "auto"):
+        return Response.json({"ok": False, "error": "Invalid signups mode"}, status=400)
+    internal = datasette.get_internal_database()
+    try:
+        if body.enabled is not None:
+            await db.set_provider_enabled(
+                internal,
+                request.actor["id"],
+                body.key,
+                body.enabled,
+                installed_keys=list(registry),
+            )
+        if body.signups is not None:
+            await db.set_provider_signups(
+                internal, request.actor["id"], body.key, body.signups
+            )
+    except db.LastProviderError:
+        return Response.json(
+            {"ok": False, "error": "Cannot disable the last sign-in provider."},
+            status=400,
+        )
+    return Response.json(
+        {
+            "ok": True,
+            "enabled": await db.get_provider_enabled(internal, body.key),
+            "signups": await db.get_provider_signups(internal, body.key),
+        }
+    )

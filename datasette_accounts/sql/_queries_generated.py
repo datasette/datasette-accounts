@@ -57,6 +57,12 @@ class IdentityRow:
 
 
 @dataclass
+class CountIdentitiesByProviderRow:
+    provider: str
+    n: Any
+
+
+@dataclass
 class LoginAttemptRow:
     id: int | None
     username: str | None
@@ -579,6 +585,19 @@ def count_identities_for_user(conn: sqlite3.Connection, user_id: str) -> Any | N
     cursor = conn.execute(sql, params)
     row = cursor.fetchone()
     return row[0] if row is not None else None
+
+
+def count_identities_by_provider(
+    conn: sqlite3.Connection,
+) -> list[CountIdentitiesByProviderRow]:
+    sql = """\
+SELECT provider, COUNT(*) AS n
+FROM datasette_accounts_identities
+GROUP BY provider;
+"""
+    params: dict[str, Any] = {}
+    cursor = conn.execute(sql, params)
+    return [CountIdentitiesByProviderRow(*row) for row in cursor.fetchall()]
 
 
 def insert_identity(

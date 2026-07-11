@@ -625,3 +625,164 @@ async def test_head_request_dispatches_to_provider(register_provider):
     r = await ds.client.head("/-/login/provider/echo/ping")
     assert r.status_code == 200
     assert provider.calls == [("HEAD", "ping")]
+
+
+# --------------------------------------------------------------------------
+# Admin set-provider endpoint + config page data (ticket 05)
+# --------------------------------------------------------------------------
+
+
+async def _admin_cookies(ds, username="boss"):
+    """Create an admin, log in through the real endpoint, return its cookies."""
+    await insert_user(ds, username, is_admin=True)
+    r = await ds.client.post(
+        "/-/login/api/authenticate",
+        content=json.dumps({"username": username, "password": "password123"}),
+        headers=JSON,
+    )
+    cookie = r.cookies.get(COOKIE_NAME)
+    return {COOKIE_NAME: cookie} if cookie else {}
+
+
+async def _set_provider(ds, cookies, **body):
+    return await ds.client.post(
+        "/-/admin/api/set-provider",
+        content=json.dumps(body),
+        headers=JSON,
+        cookies=cookies,
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_provider_enables_and_takes_effect_next_request(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+
+    # Disabled at first: the mount 404s.
+    assert (await ds.client.get("/-/login/provider/echo/ping")).status_code == 404
+
+    on = await _set_provider(ds, cookies, key="echo", enabled=True)
+    assert on.status_code == 200
+    assert on.json() == {"ok": True, "enabled": True, "signups": "off"}
+
+    # Live on the very next request — no restart.
+    assert (await ds.client.get("/-/login/provider/echo/ping")).status_code == 200
+
+    off = await _set_provider(ds, cookies, key="echo", enabled=False)
+    assert off.json()["enabled"] is False
+    assert (await ds.client.get("/-/login/provider/echo/ping")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_set_provider_signups_only(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    r = await _set_provider(ds, cookies, key="echo", signups="approval")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "enabled": False, "signups": "approval"}
+    internal = ds.get_internal_database()
+    assert await db.get_provider_signups(internal, "echo") == "approval"
+
+
+@pytest.mark.asyncio
+async def test_set_provider_requires_admin(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    await insert_user(ds, "alice")  # not an admin
+    r = await ds.client.post(
+        "/-/login/api/authenticate",
+        content=json.dumps({"username": "alice", "password": "password123"}),
+        headers=JSON,
+    )
+    cookies = {COOKIE_NAME: r.cookies.get(COOKIE_NAME)}
+    resp = await _set_provider(ds, cookies, key="echo", enabled=True)
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_set_provider_unknown_key_400(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    resp = await _set_provider(ds, cookies, key="nope", enabled=True)
+    assert resp.status_code == 400
+    assert resp.json()["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_provider_invalid_signups_400(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    resp = await _set_provider(ds, cookies, key="echo", signups="sometimes")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_set_provider_last_provider_guard(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+
+    # Only password is enabled → disabling it is refused.
+    refuse = await _set_provider(ds, cookies, key="password", enabled=False)
+    assert refuse.status_code == 400
+    assert refuse.json()["error"] == "Cannot disable the last sign-in provider."
+
+    # Enable echo, then password may be disabled...
+    await _set_provider(ds, cookies, key="echo", enabled=True)
+    ok = await _set_provider(ds, cookies, key="password", enabled=False)
+    assert ok.status_code == 200
+
+    # ...but now echo is the last one and cannot be disabled.
+    refuse2 = await _set_provider(ds, cookies, key="echo", enabled=False)
+    assert refuse2.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_set_provider_noop_writes_one_audit_row(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    await _set_provider(ds, cookies, key="echo", enabled=True)
+    await _set_provider(ds, cookies, key="echo", enabled=True)  # no-op
+    internal = ds.get_internal_database()
+    rows = (
+        await internal.execute(
+            f"SELECT operation FROM {db.ADMIN_AUDIT} "
+            "WHERE operation = 'enable-provider'"
+        )
+    ).rows
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_config_page_data_has_provider_rows(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    internal = ds.get_internal_database()
+    # One linked identity for echo → linked_count == 1.
+    uid = await insert_user(ds, "carol")
+    await internal.execute_write(
+        f"INSERT INTO {db.IDENTITIES} "
+        "(provider, subject, user_id, created_at) VALUES (?, ?, ?, ?)",
+        ["echo", "sub-1", uid, db.now_iso()],
+    )
+    await _set_provider(ds, cookies, key="echo", enabled=True, signups="approval")
+
+    page = await ds.client.get("/-/admin/config", cookies=cookies)
+    data = _page_data(page)
+    providers = {p["key"]: p for p in data["providers"]}
+    assert providers["password"]["builtin"] is True
+    assert providers["password"]["enabled"] is True
+    assert providers["password"]["linked_count"] == 0
+    assert providers["echo"]["builtin"] is False
+    assert providers["echo"]["enabled"] is True
+    assert providers["echo"]["signups"] == "approval"
+    assert providers["echo"]["linked_count"] == 1
+    # Source = the provider class's top-level module (this test file).
+    assert providers["echo"]["source"] == "test_providers"
+    assert providers["password"]["source"] == "datasette_accounts"

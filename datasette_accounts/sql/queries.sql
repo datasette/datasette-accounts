@@ -300,6 +300,14 @@ ORDER BY created_at;
 -- name: countIdentitiesForUser :value
 SELECT COUNT(*) FROM datasette_accounts_identities WHERE user_id = $user_id::text;
 
+-- Per-provider count of linked identities — the Configuration providers table
+-- shows this as each row's linked_count. Password never has identities rows
+-- (D4), so it is simply absent here and the caller defaults it to 0.
+-- name: countIdentitiesByProvider :rows
+SELECT provider, COUNT(*) AS n
+FROM datasette_accounts_identities
+GROUP BY provider;
+
 -- Link a (provider, subject) to an account. last_login_at is NULL until the
 -- first sign-in *through* the link (touchIdentityLastLogin stamps it); a link
 -- created during a login mints the session and stamps it in the same flow.

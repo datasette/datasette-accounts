@@ -172,13 +172,36 @@ class SiteMessageSlot(BaseModel):
     body: str = ""
 
 
+class ProviderAdminRow(BaseModel):
+    # One installed sign-in provider, as shown in the Configuration page's
+    # "Sign-in providers" section (design §9). See plans/auth-providers.
+    key: str
+    label: str
+    # Provider package name — the top-level package of the provider class's
+    # module (e.g. "datasette_accounts" for the built-in password provider).
+    source: str
+    # True for the built-in password provider (key == "password").
+    builtin: bool
+    # Runtime enabled bit (design §7): password defaults enabled, external
+    # providers default disabled until an admin flips them on.
+    enabled: bool
+    # Signups policy: "off" | "approval" | "auto".
+    signups: str
+    # Count of external identities linked through this provider (0 for password,
+    # which has no identities rows — D4).
+    linked_count: int
+
+
 class ConfigPageData(BaseModel):
-    """The /-/admin/config page: site messages + the self-registration toggle."""
+    """The /-/admin/config page: site messages + self-registration + providers."""
 
     slots: List[SiteMessageSlot]
     # Current state of the runtime self-registration toggle, so the switch
     # renders with the live value. See plans/self-registration.
     registration_enabled: bool = False
+    # One row per installed sign-in provider, for the "Sign-in providers"
+    # section (design §9). See plans/auth-providers.
+    providers: List[ProviderAdminRow] = []
 
 
 # --- Login attempts (admin audit view) ---
@@ -427,6 +450,15 @@ class RegisterRequest(BaseModel):
 
 class SetRegistrationRequest(BaseModel):
     enabled: bool
+
+
+class SetProviderRequest(BaseModel):
+    # Admin toggle for one sign-in provider (design §9). `key` must be in the
+    # registry. Either or both of the two fields may be sent; each `None` field
+    # is left unchanged.
+    key: str
+    enabled: Optional[bool] = None
+    signups: Optional[str] = None  # "off" | "approval" | "auto"
 
 
 # --- Identity linking / unlinking (see plans/auth-providers §6) ---

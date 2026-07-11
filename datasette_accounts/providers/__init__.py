@@ -184,6 +184,14 @@ def provider_label(datasette, key):
     return provider.label if provider is not None else key
 
 
+def provider_source(provider):
+    """The provider's source package — the top-level package of its class's
+    module (e.g. "datasette_accounts" for the built-in password provider, or the
+    third-party plugin's distribution package for an external provider). Shown in
+    the Configuration providers table and the CLI `providers` listing."""
+    return (type(provider).__module__ or "").split(".")[0]
+
+
 def external_provider_keys(datasette):
     """Every installed external provider key (registry order, `password`
     excluded) — the universe the account page filters to 'linkable'."""
@@ -321,7 +329,9 @@ def _gate_reason(user, *, external):
     return None
 
 
-async def _finish_local(datasette, request, identity, *, provider_key, response_mode, state):
+async def _finish_local(
+    datasette, request, identity, *, provider_key, response_mode, state
+):
     internal = datasette.get_internal_database()
     ip = security.client_ip(datasette, request)
     user = await db.get_user_by_id(internal, identity.user_id)
@@ -379,13 +389,23 @@ async def _finish_external(
     # split is delegated so each intent decides explicitly.
     if intent == "step-up":
         return await _finish_step_up(
-            datasette, request, identity, existing,
-            provider_key=provider_key, response_mode=response_mode, state=state,
+            datasette,
+            request,
+            identity,
+            existing,
+            provider_key=provider_key,
+            response_mode=response_mode,
+            state=state,
         )
     if intent == "link":
         return await _finish_link(
-            datasette, request, identity, existing,
-            provider_key=provider_key, response_mode=response_mode, state=state,
+            datasette,
+            request,
+            identity,
+            existing,
+            provider_key=provider_key,
+            response_mode=response_mode,
+            state=state,
         )
 
     # intent == "login" from here down.
@@ -425,7 +445,10 @@ async def _finish_external(
 
     if signups == "approval":
         return await _provision_pending(
-            datasette, request, identity, provider_key=provider_key,
+            datasette,
+            request,
+            identity,
+            provider_key=provider_key,
             response_mode=response_mode,
         )
 
@@ -528,13 +551,17 @@ async def _finish_link(
     step_up = (state or {}).get("u") or {}
     if step_up.get("at") is not None or step_up.get("provider") is not None:
         ttl = security.config(datasette, "provider_state_ttl_minutes")
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(minutes=ttl)
-        ).isoformat(timespec="milliseconds")
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=ttl)).isoformat(
+            timespec="milliseconds"
+        )
         at = step_up.get("at")
         if not at or at <= cutoff:
             await db.record_login_attempt(
-                internal, None, ip, False, "provider_state_invalid",
+                internal,
+                None,
+                ip,
+                False,
+                "provider_state_invalid",
                 provider=provider_key,
             )
             return _refuse(response_mode)
@@ -552,7 +579,9 @@ async def _finish_link(
     return response
 
 
-async def _provision_pending(datasette, request, identity, *, provider_key, response_mode):
+async def _provision_pending(
+    datasette, request, identity, *, provider_key, response_mode
+):
     """Approval-mode provisioning: shared abuse caps, then create a pending
     account (no session). Caps + the `register` login_audit reason are shared
     with password self-registration so the per-IP/day + pending-queue budgets
@@ -587,7 +616,9 @@ async def _registration_over_cap(datasette, internal, ip):
     )
 
 
-async def _mint_external(datasette, request, user, *, provider_key, response_mode, state):
+async def _mint_external(
+    datasette, request, user, *, provider_key, response_mode, state
+):
     """Mint for a linked/auto-provisioned external account, writing the success
     login_audit row here (with the provider column) — external flows have no
     verify half to write it, unlike password."""
@@ -606,7 +637,9 @@ async def _mint_external(datasette, request, user, *, provider_key, response_mod
     )
 
 
-async def _mint_and_respond(datasette, request, user, *, provider_key, response_mode, state):
+async def _mint_and_respond(
+    datasette, request, user, *, provider_key, response_mode, state
+):
     """Shared success tail for every finish_login path: build the response,
     mint the session (provenance = provider_key), run the periodic housekeeping,
     clear the state cookie. Does NOT write the success login_audit row — that is
@@ -650,7 +683,9 @@ def _refuse(response_mode):
 def _refuse_no_account(response_mode):
     # Deliberately identical whether signups are off or the identity is simply
     # unknown — never distinguishes the two (design §4).
-    return _error_page(response_mode, "No account is linked to that identity.", status=403)
+    return _error_page(
+        response_mode, "No account is linked to that identity.", status=403
+    )
 
 
 def _refuse_closed(response_mode):
