@@ -286,7 +286,11 @@ async def test_linked_identity_mints_with_provenance(register_provider):
     assert srows.rows[0][0] == "echo"
     ident = await db.get_identity(internal, "echo", "subj-1")
     assert ident["last_login_at"] is not None
-    assert await _last_audit(ds) == {"reason": "success", "provider": "echo", "success": 1}
+    assert await _last_audit(ds) == {
+        "reason": "success",
+        "provider": "echo",
+        "success": 1,
+    }
 
 
 @pytest.mark.asyncio

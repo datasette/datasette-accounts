@@ -300,18 +300,14 @@ async def test_login_and_logout_clear_stale_core_actor_cookie():
         headers=JSON,
         cookies={**cookies, "ds_actor": "stale"},
     )
-    assert any(
-        c.startswith('ds_actor="";') for c in r.headers.get_list("set-cookie")
-    )
+    assert any(c.startswith('ds_actor="";') for c in r.headers.get_list("set-cookie"))
 
     # Without the stale cookie, nothing touches ds_actor.
     _, cookies = await login(ds, "alice", "password123")
     r = await ds.client.post(
         "/-/logout/perform", content="{}", headers=JSON, cookies=cookies
     )
-    assert not any(
-        c.startswith("ds_actor=") for c in r.headers.get_list("set-cookie")
-    )
+    assert not any(c.startswith("ds_actor=") for c in r.headers.get_list("set-cookie"))
 
 
 @pytest.mark.asyncio
@@ -1177,8 +1173,7 @@ async def test_admin_page_anonymous_redirects_to_login():
     r = await ds.client.get("/-/admin/audit?username=alice")
     assert r.status_code == 302
     assert (
-        r.headers["location"]
-        == "/-/login?next=%2F-%2Fadmin%2Faudit%3Fusername%3Dalice"
+        r.headers["location"] == "/-/login?next=%2F-%2Fadmin%2Faudit%3Fusername%3Dalice"
     )
 
 

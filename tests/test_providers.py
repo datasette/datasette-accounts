@@ -616,9 +616,7 @@ async def test_finish_login_nonexistent_user_refuses(register_provider):
     register_provider(EchoProvider())
     ds = await make_ds()
     await _enable_provider(ds, "echo")
-    r = await ds.client.get(
-        "/-/echo-auth/finish?uid=does-not-exist&mode=json"
-    )
+    r = await ds.client.get("/-/echo-auth/finish?uid=does-not-exist&mode=json")
     assert r.status_code == 403
     assert r.json()["ok"] is False
     assert await _session_count(ds) == 0
