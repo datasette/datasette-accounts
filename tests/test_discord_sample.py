@@ -60,7 +60,9 @@ class _FakeAsyncClient:
 
     async def post(self, url, data=None, **kwargs):
         self.posts.append((url, data))
-        return _FakeResponse({"access_token": "fake-access-token", "token_type": "Bearer"})
+        return _FakeResponse(
+            {"access_token": "fake-access-token", "token_type": "Bearer"}
+        )
 
     async def get(self, url, headers=None, **kwargs):
         self.gets.append((url, headers))
@@ -175,6 +177,7 @@ async def test_start_configured_redirects_to_discord(monkeypatch):
     assert q["client_id"] == ["client-abc"]
     assert q["response_type"] == ["code"]
     assert q["scope"] == ["identify"]
+    assert q["prompt"] == ["none"]  # skip re-consent for already-granted scopes
     assert q["redirect_uri"][0].endswith("/-/discord-auth/callback")
     # The state is core-minted: it round-trips through the state cookie.
     state_cookie = r.cookies.get(STATE_COOKIE)
@@ -246,7 +249,5 @@ async def test_callback_without_code_fails(monkeypatch):
     await _enable(ds, signups="auto")
     state, cookies = await _drive_start(ds)
     # Valid state but Discord returned no code (e.g. user denied) → 400.
-    r = await ds.client.get(
-        f"/-/discord-auth/callback?state={state}", cookies=cookies
-    )
+    r = await ds.client.get(f"/-/discord-auth/callback?state={state}", cookies=cookies)
     assert r.status_code == 400

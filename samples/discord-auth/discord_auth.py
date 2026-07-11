@@ -120,6 +120,11 @@ async def start(datasette: Datasette, request: Request) -> Response:
                 "redirect_uri": _redirect_uri(datasette, request),
                 "scope": "identify",
                 "state": state,
+                # Discord defaults to prompt=consent, which re-shows the
+                # "wants to access your account" screen on EVERY login.
+                # prompt=none skips it once the user has authorized these
+                # scopes; first-time users still see the consent screen.
+                "prompt": "none",
             }
         )
     )
@@ -153,9 +158,7 @@ async def callback(datasette: Datasette, request: Request) -> Response:
         token_resp.raise_for_status()
         me_resp = await client.get(
             ME_URL,
-            headers={
-                "Authorization": "Bearer " + token_resp.json()["access_token"]
-            },
+            headers={"Authorization": "Bearer " + token_resp.json()["access_token"]},
         )
         me_resp.raise_for_status()
     me = me_resp.json()
