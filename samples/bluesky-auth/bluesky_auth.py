@@ -32,7 +32,11 @@ Setup:
    - Local dev: export ``DATASETTE_BLUESKY_DEV_LOOPBACK=1`` instead. Uses
      atproto's "loopback client" (``client_id = "http://localhost?..."``) —
      no metadata hosting needed; real auth servers (bsky.social) special-case
-     this form.
+     this form. Browse via ``http://127.0.0.1:8006``, not ``localhost`` — the
+     redirect_uri host is fixed to the literal IP ``127.0.0.1``, and the
+     session cookie set during ``start`` is host-scoped, so a ``localhost``
+     tab won't carry it back on the ``127.0.0.1`` callback (README.md has the
+     full explanation).
    - Neither set -> ``configured()`` is False: core hides the login button
      (and link/step-up targets), and ``start`` answers a 503 explainer — the
      same inert-when-unconfigured contract as the other OAuth samples.
@@ -42,7 +46,8 @@ Setup:
 
 There is no client secret to export: atproto is a public-client protocol —
 the client-metadata document IS the client's registration, not a bearer
-secret. See README.md (ticket 05) for the full protocol walkthrough.
+secret. See README.md for the full walkthrough (production setup, local dev,
+entry points, security notes, and the deliberate simplifications).
 """
 
 from __future__ import annotations
