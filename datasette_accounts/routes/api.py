@@ -55,6 +55,7 @@ from ..providers import (
     get_registry,
     make_state,
     mint_session,
+    provider_start_path,
     to_identity_rows,
 )
 from ..providers import password
@@ -396,7 +397,7 @@ def _link_start_response(
         actor_id=actor_id,
         step_up=step_up,
     )
-    start = datasette.urls.path(f"/-/login/provider/{start_provider}/start")
+    start = provider_start_path(datasette, start_provider)
     response.body = json.dumps(
         {"ok": True, "start_url": f"{start}?state={quote(value)}"}
     )

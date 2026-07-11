@@ -22,12 +22,12 @@ from .sessions import token_sha256
 pm.add_hookspecs(_provider_hookspecs)
 
 # Import route modules to register their handlers on the shared router.
-from .routes import api, pages, providers as provider_routes  # noqa: E402
+from .routes import api, pages  # noqa: E402
 
 # Re-exported so pluggy discovers the hookimpl on this plugin module (M6).
 from .seeds import datasette_user_profile_seeds  # noqa: E402,F401
 
-_ = (api, pages, provider_routes)
+_ = (api, pages)
 
 
 @hookimpl
@@ -206,6 +206,15 @@ def startup(datasette):
                 raise RuntimeError(f"Invalid auth provider key: {provider.key!r}")
             if provider.key in registry:
                 raise RuntimeError(f"Duplicate auth provider key: {provider.key!r}")
+            # Providers own their routes now (design D3b): start_path is where the
+            # login button + link/step-up forwards point, so it must be a real
+            # absolute path. A misconfigured descriptor fails startup loudly.
+            start_path = getattr(provider, "start_path", None)
+            if not start_path or not start_path.startswith("/"):
+                raise RuntimeError(
+                    f"Auth provider {provider.key!r} has an invalid "
+                    f"start_path: {start_path!r}"
+                )
             registry[provider.key] = provider
         setattr(datasette, providers_mod.REGISTRY_ATTR, registry)
 

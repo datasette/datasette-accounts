@@ -39,9 +39,12 @@ reset, promote, or delete existing ones:
   first-password-change, audit logging, and retention/pruning.
 - **Pluggable sign-in providers** — the built-in username/password login is one
   provider; other packages add GitHub / OIDC / Discord / … through the
-  `datasette_accounts_auth_providers` hookspec, and every provider inherits the
-  same account gates, approval queue, session list, and audit. Admins choose
-  which providers are valid at runtime.
+  `datasette_accounts_auth_providers` hookspec. A provider is a small descriptor
+  (`key`/`label`/`start_path`) that registers its own routes under `/-/{plugin}/…`
+  and ends every flow at core's `finish_login`, so every provider inherits the
+  same account gates, approval queue, session list, and audit — and a disabled
+  provider can never mint a session (`finish_login` re-checks the enabled bit).
+  Admins choose which providers are valid at runtime.
 - **A Svelte/TS frontend** for the login, account, and admin pages.
 - **Integrates with `datasette-user-profiles`** (a required dependency) — emits a
   stable actor `id` and seeds the profiles directory, so every account can view

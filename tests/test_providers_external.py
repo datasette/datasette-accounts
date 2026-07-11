@@ -25,6 +25,7 @@ from datasette_accounts.providers import (
     AuthProvider,
     ExternalIdentity,
     finish_login,
+    provider_gate,
 )
 from datasette_accounts.security import COOKIE_NAME
 
@@ -39,8 +40,9 @@ JSON = {"content-type": "application/json"}
 class ExtProvider(AuthProvider):
     key = "echo"
     label = "Echo"
+    start_path = "/-/echo-auth/start"
 
-    async def handle(self, datasette, request, subpath):
+    async def serve(self, datasette, request):
         args = request.args
         identity = ExternalIdentity(
             provider="echo",
@@ -62,6 +64,9 @@ class ExtProvider(AuthProvider):
 
 @pytest.fixture
 def register_provider():
+    """Register an auth provider AND its own routes (design D3b): the provider
+    owns ``/-/{key}-auth/...`` via a normal ``register_routes`` hook, each route
+    wrapped in ``provider_gate`` for the enabled-404 + CSRF gate."""
     names = []
 
     def _register(provider, name=None):
@@ -72,7 +77,16 @@ def register_provider():
         def datasette_accounts_auth_providers(datasette):
             return [provider]
 
+        @provider_gate(provider.key)
+        async def _view(datasette, request):
+            return await provider.serve(datasette, request)
+
+        @hookimpl
+        def register_routes():
+            return [(rf"/-/{provider.key}-auth/(?P<rest>.*)$", _view)]
+
         mod.datasette_accounts_auth_providers = datasette_accounts_auth_providers
+        mod.register_routes = register_routes
         pm.register(mod, name=name)
         names.append(name)
         return provider
@@ -149,7 +163,7 @@ async def _last_audit(ds):
 
 async def _ext(ds, subject, **args):
     qs = "&".join(f"{k}={v}" for k, v in {"subject": subject, **args}.items())
-    return await ds.client.get(f"/-/login/provider/echo/ext?{qs}")
+    return await ds.client.get(f"/-/echo-auth/ext?{qs}")
 
 
 async def _link(ds, uid, subject, **kw):

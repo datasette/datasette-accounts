@@ -1,11 +1,14 @@
 """Pluggable sign-in providers: the contract, signed state, and finish_login.
 
 Providers authenticate; datasette-accounts owns identity, policy, and sessions
-(plans/auth-providers/02-design.md §§1–4). A provider's `handle()` serves its
-own URL surface under `/-/login/provider/{key}/*` and ends every flow by
-returning `await finish_login(...)` — the single termination point that runs
-the account gates and mints the session. Core owns the signed OAuth `state` so
-no provider hand-rolls it.
+(plans/auth-providers/02-design.md §§1–4). A provider registers its own routes
+under ``/-/{plugin}/...`` (the ordinary Datasette ``register_routes`` hook, the
+datasette-paper model) and ends every flow by returning ``await finish_login(...)``
+— the single termination point that runs the account gates, re-checks the
+provider's enabled bit, and mints the session. Core owns the signed OAuth
+``state`` (``make_state`` / ``read_state``) so no provider hand-rolls it, and
+offers the optional ``provider_gate`` decorator that gives any provider route the
+enabled-404 + CSRF-on-POST + method-gate behaviour in one line.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from typing import TYPE_CHECKING, Any, TypedDict
 from urllib.parse import quote
 
@@ -29,8 +33,15 @@ if TYPE_CHECKING:
     # reason the runtime code uses lazy imports — see providers/password.py).
     # `from __future__ import annotations` makes every annotation a string, so
     # these names are never evaluated at runtime.
+    from collections.abc import Awaitable, Callable
+
     from datasette.app import Datasette
     from datasette.utils.asgi import Request
+
+    # A provider-owned route handler as Datasette's register_routes calls it:
+    # keyword-injected ``datasette`` + ``request`` (any URL captures ride in
+    # ``request.url_vars``), returning a Response.
+    RouteHandler = Callable[[Datasette, Request], Awaitable[Response]]
 
 # Provider keys: lowercase slug, must start with an alphanumeric. "password" is
 # reserved for the built-in provider; it matches KEY_RE like any other key, so
@@ -49,25 +60,72 @@ GENERIC_FLOW_ERROR = "Unable to sign in"
 
 
 class AuthProvider:
-    """Base class for a sign-in provider (see design §2).
+    """Descriptor for a sign-in provider (see design §2/§3).
 
-    Subclasses set ``key`` (KEY_RE; unique; "password" reserved for the
-    built-in) and ``label`` (e.g. "GitHub", rendered as "Continue with
-    {label}") and implement ``handle``.
+    A provider is a small descriptor plus its own routes — it does **not**
+    implement a dispatch method. Subclasses set three attributes:
+
+    ``key``
+        KEY_RE slug; unique; "password" is reserved for the built-in provider.
+    ``label``
+        Human name, e.g. "GitHub", rendered as "Continue with {label}".
+    ``start_path``
+        Absolute path (leading "/") to the provider's own *start* route, e.g.
+        ``"/-/discord-auth/start"``; the built-in password provider's is
+        ``"/-/login"``. The login-page button and the link/step-up forwards
+        point the visitor here (threading a validated ``?next=`` / ``?state=``).
+        Startup validates it is non-empty and starts with "/".
+
+    Providers own their URL surface via the ordinary Datasette
+    ``register_routes`` hook and terminate every flow by returning
+    ``await finish_login(...)``. Wrapping each route handler in
+    ``@provider_gate(key)`` is recommended (enabled-404 + CSRF-on-POST + method
+    gate), but is not load-bearing for security: ``finish_login`` re-checks the
+    enabled bit and refuses a disabled provider even for an ungated route.
     """
 
     key: str
     label: str
+    start_path: str
 
-    async def handle(
-        self, datasette: Datasette, request: Request, subpath: str
-    ) -> Response:
-        """Serve one request under /-/login/provider/{key}/{subpath}.
 
-        Conventional subpaths: "start" (begin the flow) and "callback".
-        A flow ends by returning ``await finish_login(...)``.
-        """
-        raise NotImplementedError
+def provider_gate(key: str) -> Callable[[RouteHandler], RouteHandler]:
+    """Decorator for a provider-owned route handler (optional but recommended).
+
+    Reproduces, per route, exactly what the old core mount did in front of every
+    provider request (design §3):
+
+    * **404** — byte-identical body to an uninstalled provider — when the
+      provider is disabled: a disabled provider's whole URL surface is dead and
+      we never reveal which providers are installed but off.
+    * **CSRF gate** on POST (``security.csrf_error``, the same 403-wrapping as
+      ``router._gate_mutation``): form / OAuth providers that POST get the core
+      CSRF check for free.
+    * **405** on any method other than GET / HEAD / POST.
+
+    Skipping this decorator cannot yield a session: ``finish_login`` re-checks
+    the enabled bit before any mint / provision / link, so an ungated route on a
+    disabled provider still authenticates nobody. The gate is defence in depth
+    and surface hygiene, not the load-bearing control.
+    """
+
+    def decorator(handler: RouteHandler) -> RouteHandler:
+        @wraps(handler)
+        async def wrapper(datasette: Datasette, request: Request) -> Response:
+            internal = datasette.get_internal_database()
+            if not await db.get_provider_enabled(internal, key):
+                return Response.text("Not found", status=404)
+            if request.method == "POST":
+                problem = security.csrf_error(request)
+                if problem:
+                    return Response.text(problem, status=403)
+            elif request.method not in ("GET", "HEAD"):
+                return Response.text("Method not allowed", status=405)
+            return await handler(datasette, request)
+
+        return wrapper
+
+    return decorator
 
 
 @dataclass(frozen=True)
@@ -230,6 +288,17 @@ def provider_source(provider: AuthProvider) -> str:
     third-party plugin's distribution package for an external provider). Shown in
     the Configuration providers table and the CLI `providers` listing."""
     return (type(provider).__module__ or "").split(".")[0]
+
+
+def provider_start_path(datasette: Datasette, key: str) -> str:
+    """The base_url-prefixed URL of a provider's own start route, read from its
+    descriptor's ``start_path``. Used to point the login button and the
+    link/step-up forwards at the target provider's route (the own-routes
+    replacement for the old core mount path). Falls back to a conventional path
+    if the descriptor is somehow absent — callers always pass a live key."""
+    descriptor = get_registry(datasette).get(key)
+    start = descriptor.start_path if descriptor is not None else f"/-/{key}/start"
+    return datasette.urls.path(start)
 
 
 def external_provider_keys(datasette: Datasette) -> list[str]:
@@ -419,9 +488,11 @@ async def _finish_external(
     internal = datasette.get_internal_database()
     ip = security.client_ip(datasette, request)
 
-    # Defense in depth: the mount already checked the enabled bit, but a
-    # provider could call finish_login from anywhere. A disabled provider can
-    # never mint.
+    # PRIMARY enabled gate (design D3b): providers now own their routes, so this
+    # re-check — not any core mount — is the load-bearing guarantee that a
+    # disabled provider can never mint / provision / link. It holds even when a
+    # provider forgets to wrap a route in provider_gate, and for any code path
+    # that reaches finish_login from anywhere.
     if not await db.get_provider_enabled(internal, provider_key):
         await db.record_login_attempt(
             internal, None, ip, False, "provider_disabled", provider=provider_key
@@ -554,7 +625,7 @@ async def _finish_step_up(
         actor_id=actor_id,
         step_up={"provider": provider_key, "at": db.now_iso()},
     )
-    start = datasette.urls.path(f"/-/login/provider/{target}/start")
+    start = provider_start_path(datasette, target)
     # Response.redirect wrote the "Location" header (capital L); overwrite that
     # exact key so we don't emit a second, lowercase location header.
     response.headers["Location"] = f"{start}?state={quote(value)}"

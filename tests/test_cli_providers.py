@@ -13,7 +13,7 @@ import json
 import types
 
 import pytest
-from datasette import Response, hookimpl
+from datasette import hookimpl
 from datasette.plugins import pm
 
 from cli_util import make_admin, query, run
@@ -26,9 +26,7 @@ JSON_HEADERS = {"content-type": "application/json"}
 class ExternProvider(AuthProvider):
     key = "extern"
     label = "Extern IdP"
-
-    async def handle(self, datasette, request, subpath):  # pragma: no cover
-        return Response.json({"ok": True})
+    start_path = "/-/extern-auth/start"
 
 
 @pytest.fixture

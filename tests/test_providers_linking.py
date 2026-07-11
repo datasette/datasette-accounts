@@ -29,6 +29,7 @@ from datasette_accounts.providers import (
     AuthProvider,
     ExternalIdentity,
     finish_login,
+    provider_gate,
     read_state,
 )
 from datasette_accounts.security import COOKIE_NAME, SIGN_NAMESPACE
@@ -47,8 +48,9 @@ class LinkProvider(AuthProvider):
     def __init__(self, key, label):
         self.key = key
         self.label = label
+        self.start_path = f"/-/{key}-auth/start"
 
-    async def handle(self, datasette, request, subpath):
+    async def serve(self, datasette, request):
         state = read_state(datasette, request, provider=self.key)
         if state is None:
             return Response.text("bad state", status=400)
@@ -69,6 +71,9 @@ class LinkProvider(AuthProvider):
 
 @pytest.fixture
 def register_providers():
+    """Register the provider descriptors AND their own routes (design D3b): each
+    provider owns ``/-/{key}-auth/...`` via a normal ``register_routes`` hook,
+    every route wrapped in ``provider_gate`` for the enabled-404 + CSRF gate."""
     names = []
 
     def _register(providers):
@@ -79,7 +84,22 @@ def register_providers():
         def datasette_accounts_auth_providers(datasette):
             return list(providers)
 
+        def _make_view(provider):
+            @provider_gate(provider.key)
+            async def _view(datasette, request):
+                return await provider.serve(datasette, request)
+
+            return _view
+
+        @hookimpl
+        def register_routes():
+            return [
+                (rf"/-/{p.key}-auth/(?P<rest>.*)$", _make_view(p))
+                for p in providers
+            ]
+
         mod.datasette_accounts_auth_providers = datasette_accounts_auth_providers
+        mod.register_routes = register_routes
         pm.register(mod, name=name)
         names.append(name)
 
@@ -206,7 +226,7 @@ async def test_link_happy_path_password_account(register_providers):
     body = r.json()
     assert body["ok"] is True
     start_url = body["start_url"]
-    assert start_url.startswith("/-/login/provider/echo/start?state=")
+    assert start_url.startswith("/-/echo-auth/start?state=")
     state_cookie = _state_cookie_from(r)
     assert state_cookie
 
@@ -322,7 +342,7 @@ async def test_password_less_step_up_links_target(register_providers):
     )
     assert r.status_code == 200
     start_url = r.json()["start_url"]
-    assert start_url.startswith("/-/login/provider/echo/start?state=")
+    assert start_url.startswith("/-/echo-auth/start?state=")
     step_state = _state_cookie_from(r)
 
     # 2. Re-complete the echo flow (subject matches the linked identity) →
@@ -333,7 +353,7 @@ async def test_password_less_step_up_links_target(register_providers):
     )
     assert r2.status_code == 302
     forward = r2.headers["location"]
-    assert forward.startswith("/-/login/provider/echo2/start?state=")
+    assert forward.startswith("/-/echo2-auth/start?state=")
     assert not r2.cookies.get(COOKIE_NAME)  # no session minted at step-up
     fwd_state = _state_cookie_from(r2)
 
@@ -430,7 +450,7 @@ async def test_expired_step_up_proof_refused(register_providers):
         ds, provider="echo2", actor_id=uid, step_up={"provider": "echo", "at": stale}
     )
     r = await ds.client.get(
-        f"/-/login/provider/echo2/start?state={value}&subject=new",
+        f"/-/echo2-auth/start?state={value}&subject=new",
         cookies={COOKIE_NAME: sess, STATE_COOKIE: cookie},
     )
     assert r.status_code == 403
@@ -498,7 +518,7 @@ async def test_forged_actor_id_link_refused(register_providers):
         ds, provider="echo", actor_id=user_a, step_up=None
     )
     r = await ds.client.get(
-        f"/-/login/provider/echo/start?state={value}&subject=fresh",
+        f"/-/echo-auth/start?state={value}&subject=fresh",
         cookies={COOKIE_NAME: b_sess, STATE_COOKIE: cookie},
     )
     assert r.status_code == 403
@@ -704,7 +724,7 @@ async def test_link_completion_while_signed_out_refused(register_providers):
     )
     # No COOKIE_NAME (session) cookie — the visitor is fully signed out.
     r = await ds.client.get(
-        f"/-/login/provider/echo/start?state={value}&subject=fresh",
+        f"/-/echo-auth/start?state={value}&subject=fresh",
         cookies={STATE_COOKIE: cookie},
     )
     assert r.status_code == 403
@@ -733,7 +753,7 @@ async def test_step_up_state_missing_target_refused(register_providers):
         ds, provider="echo", actor_id=uid, step_up={}
     )
     r = await ds.client.get(
-        f"/-/login/provider/echo/start?state={value}&subject=mine",
+        f"/-/echo-auth/start?state={value}&subject=mine",
         cookies={COOKIE_NAME: sess, STATE_COOKIE: cookie},
     )
     assert r.status_code == 403
@@ -799,14 +819,14 @@ async def test_step_up_state_replayed_against_target_is_bad_state(register_provi
         headers=JSON,
         cookies={COOKIE_NAME: sess},
     )
-    start_url = r.json()["start_url"]  # /-/login/provider/echo/start?state=VALUE
+    start_url = r.json()["start_url"]  # /-/echo-auth/start?state=VALUE
     step_state = _state_cookie_from(r)
     state_value = start_url.split("state=", 1)[1]
 
     # Replay that echo-bound state against echo2's start: read_state(provider=echo2)
     # sees payload p="echo" and returns None → LinkProvider's "bad state" 400.
     r2 = await ds.client.get(
-        f"/-/login/provider/echo2/start?state={state_value}&subject=mine",
+        f"/-/echo2-auth/start?state={state_value}&subject=mine",
         cookies={COOKIE_NAME: sess, STATE_COOKIE: step_state},
     )
     assert r2.status_code == 400

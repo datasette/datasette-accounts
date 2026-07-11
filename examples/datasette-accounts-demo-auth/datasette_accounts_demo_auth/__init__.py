@@ -8,11 +8,13 @@ out-of-tree package and (b) serve as copy-paste scaffolding for a real OAuth /
 OIDC provider. It must NEVER be installed on a real deployment.
 
 The whole file is intentionally tiny and touches zero security machinery:
-datasette-accounts owns the signed ``state``, CSRF gating of provider POSTs,
-``?next=`` validation, the enabled-bit check in front of the mount, the account
-gates, provisioning policy, session mint, and the cookie. A provider's only job
-is to prove control of some external identity and hand core an
-``ExternalIdentity``. See the README for the full contract + security checklist.
+datasette-accounts owns the signed ``state``, the account gates, provisioning
+policy, session mint, and the cookie, and re-checks the provider's enabled bit
+inside ``finish_login``. The provider owns its own routes (the ordinary
+Datasette ``register_routes`` hook) and wraps each one in ``@provider_gate`` for
+the enabled-404 + CSRF-on-POST + ``?next=`` validation lives in ``make_state``.
+A provider's only job is to prove control of some external identity and hand core
+an ``ExternalIdentity``. See the README for the full contract + security checklist.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from datasette_accounts.providers import (
     ExternalIdentity,
     finish_login,
     make_state,
+    provider_gate,
     read_state,
 )
 
@@ -87,69 +90,85 @@ _IDP_FORM_HTML = """<!doctype html>
 class DemoProvider(AuthProvider):
     """Fake IdP for development. AUTHENTICATES NOBODY — never enable in
     production. Exercises the exact start → redirect → callback → finish_login
-    sequence a real OAuth provider uses."""
+    sequence a real OAuth provider uses. Its routes are registered below via the
+    ordinary ``register_routes`` hook; ``start_path`` is where the login button
+    and link/step-up forwards point."""
 
     key = "demo"
     label = "Demo (dev only)"
+    start_path = "/-/demo-auth/start"
 
-    async def handle(
-        self, datasette: Datasette, request: Request, subpath: str
-    ) -> Response:
-        if subpath == "start":
-            # A link / step-up flow reaches `start` with a signed state already
-            # minted by datasette-accounts (intent + actor_id ride in that
-            # cookie) — we must carry it through untouched, never re-mint. A
-            # fresh login has no state, so we mint a login-intent one. Either
-            # way we redirect the visitor to our pretend IdP page, like a real
-            # provider redirects to its authorize URL.
-            idp = datasette.urls.path("/-/login/provider/demo/idp")
-            existing = read_state(datasette, request, provider="demo")
-            if existing is not None:
-                state = request.args.get("state", "")
-                return Response.redirect(f"{idp}?state={quote(state)}")
-            response = Response.redirect(idp)
-            state = make_state(
-                datasette,
-                request,
-                response,
-                provider="demo",
-                next=request.args.get("next"),
-                intent=request.args.get("intent", "login"),
-            )
-            # Response.redirect wrote the "Location" header (capital L); append
-            # the state to that exact key so we don't emit a second header.
-            response.headers["Location"] = f"{idp}?state={quote(state)}"
-            return response
 
-        if subpath == "idp":
-            # The pretend IdP: a form carrying the state param through, with a
-            # loud dev-only banner.
-            callback = datasette.urls.path("/-/login/provider/demo/callback")
-            return Response.html(
-                _IDP_FORM_HTML.format(
-                    callback=callback,
-                    state=quote(request.args.get("state", "")),
-                )
-            )
+@provider_gate("demo")
+async def start(datasette: Datasette, request: Request) -> Response:
+    # A link / step-up flow reaches `start` with a signed state already minted by
+    # datasette-accounts (intent + actor_id ride in that cookie) — we must carry
+    # it through untouched, never re-mint. A fresh login has no state, so we mint
+    # a login-intent one. Either way we redirect the visitor to our pretend IdP
+    # page, like a real provider redirects to its authorize URL.
+    idp = datasette.urls.path("/-/demo-auth/idp")
+    existing = read_state(datasette, request, provider="demo")
+    if existing is not None:
+        state = request.args.get("state", "")
+        return Response.redirect(f"{idp}?state={quote(state)}")
+    response = Response.redirect(idp)
+    state = make_state(
+        datasette,
+        request,
+        response,
+        provider="demo",
+        next=request.args.get("next"),
+        intent=request.args.get("intent", "login"),
+    )
+    # Response.redirect wrote the "Location" header (capital L); append the state
+    # to that exact key so we don't emit a second header.
+    response.headers["Location"] = f"{idp}?state={quote(state)}"
+    return response
 
-        if subpath == "callback":
-            state = read_state(datasette, request, provider="demo")
-            if state is None:
-                return Response.text("Sign-in failed — start over.", status=400)
-            return await finish_login(
-                datasette,
-                request,
-                ExternalIdentity(
-                    provider="demo",
-                    subject=request.args["subject"],
-                    username_hint=request.args.get("username") or None,
-                    display_name=request.args.get("name") or None,
-                ),
-                provider_key="demo",
-                state=state,
-            )
 
-        return Response.text("Not found", status=404)
+@provider_gate("demo")
+async def idp(datasette: Datasette, request: Request) -> Response:
+    # The pretend IdP: a form carrying the state param through, with a loud
+    # dev-only banner.
+    callback = datasette.urls.path("/-/demo-auth/callback")
+    return Response.html(
+        _IDP_FORM_HTML.format(
+            callback=callback,
+            state=quote(request.args.get("state", "")),
+        )
+    )
+
+
+@provider_gate("demo")
+async def callback(datasette: Datasette, request: Request) -> Response:
+    state = read_state(datasette, request, provider="demo")
+    if state is None:
+        return Response.text("Sign-in failed — start over.", status=400)
+    return await finish_login(
+        datasette,
+        request,
+        ExternalIdentity(
+            provider="demo",
+            subject=request.args["subject"],
+            username_hint=request.args.get("username") or None,
+            display_name=request.args.get("name") or None,
+        ),
+        provider_key="demo",
+        state=state,
+    )
+
+
+@hookimpl
+def register_routes():
+    # The provider owns its URL surface under /-/demo-auth/... (design D3b). Each
+    # handler is wrapped in @provider_gate("demo") above, so a disabled demo
+    # provider 404s here and POSTs are CSRF-gated — the same guarantees the old
+    # core mount gave, now the provider's own responsibility.
+    return [
+        (r"/-/demo-auth/start$", start),
+        (r"/-/demo-auth/idp$", idp),
+        (r"/-/demo-auth/callback$", callback),
+    ]
 
 
 @hookimpl

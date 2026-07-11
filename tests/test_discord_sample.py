@@ -91,8 +91,16 @@ def _mock_httpx(ds, monkeypatch):
     the fake AsyncClient. Patching the global ``httpx.AsyncClient`` would break
     Datasette's own httpx-based test client, so we target the module globals of
     the loaded provider (a loose plugins_dir file, absent from sys.modules under
-    an importable name) via its handler's ``__globals__``."""
-    module_globals = type(get_registry(ds)["discord"]).handle.__globals__
+    an importable name) via its ``callback`` route handler's ``__globals__`` —
+    the provider now owns its routes (design D3b), so the handler is a
+    module-level function, not the old dispatch method."""
+    from datasette.plugins import pm
+
+    module = pm.get_plugin("discord_auth.py")  # the loose plugins_dir module
+    # ``callback`` is wrapped by @provider_gate, whose wrapper lives in the core
+    # providers module; ``__wrapped__`` is the sample's own handler, so its
+    # ``__globals__`` is the discord_auth module namespace where ``httpx`` lives.
+    module_globals = module.callback.__wrapped__.__globals__
     monkeypatch.setitem(
         module_globals, "httpx", types.SimpleNamespace(AsyncClient=_FakeAsyncClient)
     )
@@ -133,7 +141,7 @@ async def test_discord_discovered_via_plugins_dir():
 async def test_disabled_by_default_mount_404s():
     ds = await _make_ds()  # loaded but never enabled
     for sub in ("start", "callback"):
-        r = await ds.client.get(f"/-/login/provider/discord/{sub}")
+        r = await ds.client.get(f"/-/discord-auth/{sub}")
         assert r.status_code == 404, sub
 
 
@@ -148,7 +156,7 @@ async def test_start_unconfigured_returns_503(monkeypatch):
     monkeypatch.delenv("DATASETTE_DISCORD_CLIENT_SECRET", raising=False)
     ds = await _make_ds()
     await _enable(ds, signups="auto")
-    r = await ds.client.get("/-/login/provider/discord/start")
+    r = await ds.client.get("/-/discord-auth/start")
     assert r.status_code == 503
     assert "not configured" in r.text
 
@@ -159,7 +167,7 @@ async def test_start_configured_redirects_to_discord(monkeypatch):
     ds = await _make_ds()
     await _enable(ds, signups="auto")
 
-    r = await ds.client.get("/-/login/provider/discord/start?next=/-/account")
+    r = await ds.client.get("/-/discord-auth/start?next=/-/account")
     assert r.status_code == 302
     location = r.headers["location"]
     assert location.startswith("https://discord.com/oauth2/authorize?")
@@ -167,7 +175,7 @@ async def test_start_configured_redirects_to_discord(monkeypatch):
     assert q["client_id"] == ["client-abc"]
     assert q["response_type"] == ["code"]
     assert q["scope"] == ["identify"]
-    assert q["redirect_uri"][0].endswith("/-/login/provider/discord/callback")
+    assert q["redirect_uri"][0].endswith("/-/discord-auth/callback")
     # The state is core-minted: it round-trips through the state cookie.
     state_cookie = r.cookies.get(STATE_COOKIE)
     assert state_cookie
@@ -181,7 +189,7 @@ async def test_start_configured_redirects_to_discord(monkeypatch):
 
 async def _drive_start(ds):
     """Drive start → return (state_value, cookies) for a callback."""
-    r = await ds.client.get("/-/login/provider/discord/start")
+    r = await ds.client.get("/-/discord-auth/start")
     assert r.status_code == 302
     state = parse_qs(urlparse(r.headers["location"]).query)["state"][0]
     return state, {STATE_COOKIE: r.cookies.get(STATE_COOKIE)}
@@ -197,7 +205,7 @@ async def test_callback_auto_provisions_and_mints(monkeypatch):
 
     state, cookies = await _drive_start(ds)
     r = await ds.client.get(
-        f"/-/login/provider/discord/callback?state={state}&code=oauth-code",
+        f"/-/discord-auth/callback?state={state}&code=oauth-code",
         cookies=cookies,
     )
     assert r.status_code == 302
@@ -226,7 +234,7 @@ async def test_callback_without_state_fails(monkeypatch):
     _mock_httpx(ds, monkeypatch)
     await _enable(ds, signups="auto")
     # No state cookie / query arg → read_state guard trips before any HTTP call.
-    r = await ds.client.get("/-/login/provider/discord/callback?code=x")
+    r = await ds.client.get("/-/discord-auth/callback?code=x")
     assert r.status_code == 400
 
 
@@ -239,6 +247,6 @@ async def test_callback_without_code_fails(monkeypatch):
     state, cookies = await _drive_start(ds)
     # Valid state but Discord returned no code (e.g. user denied) → 400.
     r = await ds.client.get(
-        f"/-/login/provider/discord/callback?state={state}", cookies=cookies
+        f"/-/discord-auth/callback?state={state}", cookies=cookies
     )
     assert r.status_code == 400

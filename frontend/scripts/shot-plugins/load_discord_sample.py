@@ -30,3 +30,11 @@ _spec.loader.exec_module(_module)
 @hookimpl
 def datasette_accounts_auth_providers(datasette):
     return _module.datasette_accounts_auth_providers(datasette)
+
+
+@hookimpl
+def register_routes():
+    # The sample now owns its routes (design D3b) — re-export them so the shots
+    # harness serves /-/discord-auth/... exactly as `just dev` does, driven by the
+    # same sample code.
+    return _module.register_routes()

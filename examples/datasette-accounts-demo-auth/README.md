@@ -37,22 +37,40 @@ Then the login page shows a **Continue with Demo (dev only)** button.
 
 ## The contract
 
-A provider is an `AuthProvider` subclass with a `key`, a `label`, and one async
-method:
+A provider is a small **descriptor** — an `AuthProvider` subclass with three
+attributes — plus its **own routes**:
 
 ```python
-async def handle(self, datasette: Datasette, request: Request, subpath: str) -> Response
+class DemoProvider(AuthProvider):
+    key = "demo"                    # KEY_RE slug, unique
+    label = "Demo (dev only)"       # rendered as "Continue with {label}"
+    start_path = "/-/demo-auth/start"  # absolute path to your start route
 ```
 
-Core mounts it at `/-/login/provider/{key}/*` and calls `handle` with the
-trailing `subpath`. You choose the subpaths; the conventional pair is `start`
-(begin the flow — a redirect to the real IdP, or a form for form-shaped
-providers) and `callback` (the IdP sends the user back here). A publish-side
-hookimpl returns your instances:
+You register your routes with the ordinary Datasette `register_routes` hook,
+under your own `/-/{plugin}/...` prefix (the datasette-paper model — plugins own
+their routes). The conventional handlers are `start` (begin the flow — a redirect
+to the real IdP, or a form for form-shaped providers) and `callback` (the IdP
+sends the user back here). `start_path` is where the login button and the
+link/step-up flows point the visitor. Two hookimpls publish the provider and its
+routes:
 
 ```python
-from datasette import hookimpl
-from datasette_accounts.providers import AuthProvider
+from datasette import Response, hookimpl
+from datasette_accounts.providers import AuthProvider, provider_gate
+
+@provider_gate("demo")
+async def start(datasette, request) -> Response: ...
+
+@provider_gate("demo")
+async def callback(datasette, request) -> Response: ...
+
+@hookimpl
+def register_routes():
+    return [
+        (r"/-/demo-auth/start$", start),
+        (r"/-/demo-auth/callback$", callback),
+    ]
 
 @hookimpl
 def datasette_accounts_auth_providers(datasette) -> list[AuthProvider]:
@@ -64,12 +82,18 @@ discovered when installed (see this package's `pyproject.toml`).
 
 ### What core does for you
 
-You never touch any of this — it is enforced *in front of* your `handle`:
+You own your routes, but core still owns every dangerous part:
 
-- **Mount + routing** — one route dispatches every subpath to you.
-- **Enabled gating** — a disabled provider's entire URL surface 404s, including
-  mid-flight callbacks. Admins choose which providers are valid at runtime.
-- **CSRF** — POSTs to your mount pass core's CSRF gate before your code runs.
+- **`@provider_gate(key)`** — wrap each route in this one-line decorator to get
+  the guarantees the old core mount gave: a disabled provider's whole URL surface
+  **404s** (including mid-flight callbacks), **POSTs are CSRF-gated** before your
+  code runs, and non-GET/HEAD/POST methods **405**. It is optional but
+  recommended (see the security checklist).
+- **Enabled gating is enforced regardless** — `finish_login` re-checks the
+  provider's enabled bit before any mint / provision / link, so even a route you
+  forgot to wrap in `provider_gate` cannot sign anyone in while the provider is
+  disabled. `provider_gate` is defence in depth; `finish_login` is the
+  load-bearing control.
 - **Signed `state`** — `make_state` / `read_state` mint and validate the signed,
   cookie-backed OAuth `state` (double-submit, TTL, provider-bound). You never
   hand-roll `state`.
@@ -117,13 +141,17 @@ table, applies the signups policy for a first-seen identity, and mints (or
 routes to the approval queue). A **link / step-up** flow reaches your `start`
 with a signed state already minted by core — carry it through untouched rather
 than re-minting (see this package's `start` handler). The demo package handles
-both login and linking through the same two subpaths.
+both login and linking through the same routes.
 
 ## Security checklist
 
 The provider contract is deliberately narrow so a provider *cannot* get the
 dangerous parts wrong. The rules that remain your responsibility:
 
+- **Wrap every route in `@provider_gate(key)`.** It gives each route the
+  enabled-404 + CSRF-on-POST + method gate the old core mount enforced centrally.
+  Even if you forget, `finish_login` refuses a disabled provider — but a forgotten
+  gate leaves a live URL surface on a disabled provider, so wrap them all.
 - **Never match accounts by email.** Map only by the IdP's **stable subject id**
   (`ExternalIdentity.subject`). Emails change owners and are spoofable; core
   never uses them for matching, and neither should you. Pass `email` only as
@@ -144,11 +172,11 @@ dangerous parts wrong. The rules that remain your responsibility:
 
 ## How the demo flow runs
 
-1. Login page → **Continue with Demo** → `GET /-/login/provider/demo/start`.
-2. `start` mints a login-intent `state`, redirects to
-   `/-/login/provider/demo/idp` (the local "pretend IdP") carrying the state.
+1. Login page → **Continue with Demo** → `GET /-/demo-auth/start`.
+2. `start` mints a login-intent `state`, redirects to `/-/demo-auth/idp` (the
+   local "pretend IdP") carrying the state.
 3. The IdP page (loud dev-only banner) posts the typed `subject` back to
-   `GET /-/login/provider/demo/callback?state=…&subject=…`.
+   `GET /-/demo-auth/callback?state=…&subject=…`.
 4. `callback` validates the state, builds an `ExternalIdentity`, and calls
    `finish_login` — which provisions/approves/mints per the admin's `demo`
    signups setting.

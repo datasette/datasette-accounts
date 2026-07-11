@@ -15,7 +15,7 @@ import types
 from urllib.parse import quote
 
 import pytest
-from datasette import Response, hookimpl
+from datasette import hookimpl
 from datasette.app import Datasette
 from datasette.plugins import pm
 
@@ -40,9 +40,9 @@ class DummyProvider(AuthProvider):
     def __init__(self, key, label):
         self.key = key
         self.label = label
-
-    async def handle(self, datasette, request, subpath):  # pragma: no cover
-        return Response.text("ok")
+        # Own-routes descriptor (D3b): the login button reads start_path. This
+        # page-data test never drives a flow, so no routes are registered.
+        self.start_path = f"/-/{key}-auth/start"
 
 
 @pytest.fixture
@@ -140,7 +140,7 @@ async def test_login_page_provider_buttons_thread_next(register_providers):
     assert button["label"] == "Acme"
     # The validated `next` is threaded into the redirect-based start_url.
     assert button["start_url"] == (
-        "/-/login/provider/acme/start?next=" + quote("/reports")
+        "/-/acme-auth/start?next=" + quote("/reports")
     )
 
 
@@ -158,7 +158,7 @@ async def test_login_page_password_disabled_buttons_only(register_providers):
     assert data["password_enabled"] is False
     assert [p["key"] for p in data["providers"]] == ["okta"]
     assert data["providers"][0]["start_url"].startswith(
-        "/-/login/provider/okta/start?next="
+        "/-/okta-auth/start?next="
     )
 
 

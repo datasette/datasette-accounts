@@ -38,17 +38,23 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
 - `hookspecs.py` — the `datasette_accounts_auth_providers(datasette)` hookspec,
   added to core's `pm` at import time so other packages can add sign-in methods.
 - `providers/` — the pluggable sign-in provider layer (plans/auth-providers/).
-  `__init__.py` = the `AuthProvider` contract, `Local`/`ExternalIdentity`,
-  core-owned signed state (`make_state`/`read_state`), the registry, and
-  `finish_login` — the single termination point every sign-in (password, invite/
-  reset, external) funnels through: account gates → per-provider signups policy →
-  the one `db.create_session` mint. `password.py` = the built-in username/
-  password provider (login/register/set-password minting moved here, zero
-  behavior change; canonical `/-/login…` URLs unchanged). External identities map
-  to accounts only by `(provider, subject)`, never by email.
-- `routes/providers.py` — the mount: one route dispatching
-  `/-/login/provider/{key}/*`, with the enabled-bit check + CSRF gate in front of
-  `provider.handle` (a disabled provider's whole URL surface 404s).
+  `__init__.py` = the `AuthProvider` descriptor contract (`key`/`label`/
+  `start_path`, no dispatch method — providers own their routes, D3b),
+  `Local`/`ExternalIdentity`, core-owned signed state (`make_state`/`read_state`),
+  the registry, the optional `provider_gate(key)` decorator (enabled-404 +
+  CSRF-on-POST + method gate for a provider's own routes), and `finish_login` —
+  the single termination point every sign-in (password, invite/reset, external)
+  funnels through: enabled re-check (the load-bearing kill switch) → account
+  gates → per-provider signups policy → the one `db.create_session` mint.
+  `password.py` = the built-in username/password provider (login/register/
+  set-password minting moved here, zero behavior change; `start_path` = the
+  canonical `/-/login`, its URLs unchanged). External identities map to accounts
+  only by `(provider, subject)`, never by email.
+- No provider mount: sign-in providers (demo, discord, and third-party plugins)
+  register their own routes under `/-/{plugin}/...` via the ordinary Datasette
+  `register_routes` hook, wrapping each handler in `provider_gate`. A disabled
+  provider can never mint because `finish_login` re-checks the enabled bit, not
+  because of any central mount.
 - `routes/api.py`, `routes/pages.py` — endpoints and HTML shells.
 - `grantable.py` — which global actions are grantable + principal gating +
   config-grant display; `db.py` `capability_grants` table + grant/revoke/list.

@@ -16,7 +16,6 @@ that module keeps those assertions valid after the move.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
 
 from datasette import NotFound, Response
 
@@ -45,24 +44,17 @@ GENERIC_LOGIN_ERROR = "Invalid username or password"
 class PasswordProvider(AuthProvider):
     """Built-in username/password provider — always first in the registry.
 
-    The canonical ``/-/login`` / ``/-/register`` / ``/-/set-password`` routes are
-    the real, documented password surface; the mounted path exists only for
-    uniformity (design §8) and bounces to ``/-/login`` (preserving a validated
-    ``?next=``).
+    Its ``start_path`` is the canonical ``/-/login`` page itself: the built-in
+    provider owns the real, documented password surface (``/-/login`` /
+    ``/-/register`` / ``/-/set-password`` and their APIs in ``routes/``), so it
+    needs no separate start route. The login-page code never renders a button
+    for the password provider (it renders the form), so ``start_path`` is only a
+    truthful descriptor value here.
     """
 
     key = "password"
     label = "Username & password"
-
-    async def handle(
-        self, datasette: Datasette, request: Request, subpath: str
-    ) -> Response:
-        base_url = datasette.setting("base_url") or "/"
-        next_value = security.validate_next(request.args.get("next"), base_url)
-        target = datasette.urls.path("/-/login")
-        if next_value and next_value != base_url:
-            target += "?next=" + quote(next_value, safe="/")
-        return Response.redirect(target)
+    start_path = "/-/login"
 
 
 async def verify_credentials(

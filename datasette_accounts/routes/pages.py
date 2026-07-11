@@ -31,6 +31,7 @@ from ..providers import (
     get_registry,
     provider_label,
     provider_source,
+    provider_start_path,
     to_identity_rows,
 )
 from ..router import require_admin_page, router
@@ -60,14 +61,15 @@ async def login_page(datasette, request):
     internal = datasette.get_internal_database()
     help_text = await db.get_site_message(internal, "login_help") or ""
     # One "Continue with …" button per ENABLED external provider (registry
-    # order). The validated `next` rides along as a query arg; the mount's start
-    # handler folds it into the signed state so the post-login redirect honours
-    # it. The whole surface is redirect-based (full-page navigation, not fetch).
+    # order). The validated `next` rides along as a query arg; the provider's own
+    # start route folds it into the signed state so the post-login redirect
+    # honours it. The whole surface is redirect-based (full-page navigation, not
+    # fetch). `start_url` comes from each descriptor's own `start_path` (D3b).
     registry = get_registry(datasette)
     providers = []
     for key in external_provider_keys(datasette):
         if await db.get_provider_enabled(internal, key):
-            start = datasette.urls.path(f"/-/login/provider/{key}/start")
+            start = provider_start_path(datasette, key)
             providers.append(
                 ProviderButton(
                     key=key,

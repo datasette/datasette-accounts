@@ -9,14 +9,16 @@ this one really authenticates people.
 
 It is a single loose module (`discord_auth.py`) that Datasette's `--plugins-dir`
 imports directly — no packaging. `just dev` loads it, so the dev login page can
-show a "Continue with Discord" button.
+show a "Continue with Discord" button. The module owns its routes under
+`/-/discord-auth/...` via the ordinary `register_routes` hook (the datasette-paper
+model), each wrapped in `@provider_gate("discord")`.
 
 ## Setup
 
 1. Create a Discord application at <https://discord.com/developers/applications>.
    Under **OAuth2**, add the redirect URI
-   `{base_url}/-/login/provider/discord/callback` (e.g.
-   `http://localhost:8006/-/login/provider/discord/callback` in dev).
+   `{base_url}/-/discord-auth/callback` (e.g.
+   `http://localhost:8006/-/discord-auth/callback` in dev).
 2. Export the app's credentials before starting Datasette:
 
    ```bash
@@ -42,7 +44,9 @@ session can ever be minted.
 `start` redirects to Discord's authorize URL carrying the core-minted signed
 `state`; `callback` exchanges the returned code for a token, reads the Discord
 user, and hands core an `ExternalIdentity` keyed on the account's **snowflake id**
-(never the username or email — those are mutable). Everything else — signed
-state, CSRF, `?next=` validation, the enabled gate, account policy, session mint
+(never the username or email — those are mutable). The provider owns these two
+routes and wraps each in `@provider_gate("discord")` for the enabled-404 +
+CSRF-on-POST gate. Everything else — signed state, `?next=` validation, the
+load-bearing enabled re-check inside `finish_login`, account policy, session mint
 — is core's job; see the demo package's README for the full provider contract and
 security checklist.

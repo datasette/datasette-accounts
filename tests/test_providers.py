@@ -23,6 +23,7 @@ from datasette_accounts.providers import (
     LocalIdentity,
     finish_login,
     make_state,
+    provider_gate,
     read_state,
 )
 from datasette_accounts.security import COOKIE_NAME
@@ -84,18 +85,17 @@ async def insert_user(
 class EchoProvider(AuthProvider):
     key = "echo"
     label = "Echo"
+    start_path = "/-/echo-auth/start"
 
     def __init__(self):
         self.calls = []
 
-    async def handle(self, datasette, request, subpath):
+    async def serve(self, datasette, request, subpath):
         from datasette import Response
 
         self.calls.append((request.method, subpath))
         if subpath == "start":
-            resp = Response.redirect(
-                datasette.urls.path("/-/login/provider/echo/callback")
-            )
+            resp = Response.redirect(datasette.urls.path("/-/echo-auth/callback"))
             value = make_state(
                 datasette, request, resp, provider="echo", next=request.args.get("next")
             )
@@ -118,20 +118,21 @@ class EchoProvider(AuthProvider):
 
 
 class _KeyProvider(AuthProvider):
-    """A provider whose key is set per-test; handle() must never run."""
+    """A provider whose key is set per-test; startup rejects it before routing."""
 
     label = "Bad"
+    start_path = "/-/bad-auth/start"
 
     def __init__(self, key):
         self.key = key
 
-    async def handle(self, datasette, request, subpath):  # pragma: no cover
-        raise AssertionError("handle should never run for a rejected key")
-
 
 @pytest.fixture
 def register_provider():
-    """Register auth-provider plugins through pluggy; unregister on teardown."""
+    """Register an auth provider AND its own routes (design D3b): the provider
+    owns ``/-/{key}-auth/...`` via a normal ``register_routes`` hook, each route
+    wrapped in ``provider_gate`` for the enabled-404 + CSRF gate. Unregister on
+    teardown."""
     names = []
 
     def _register(provider, name=None):
@@ -142,7 +143,16 @@ def register_provider():
         def datasette_accounts_auth_providers(datasette):
             return [provider]
 
+        @provider_gate(provider.key)
+        async def _view(datasette, request):
+            return await provider.serve(datasette, request, request.url_vars["rest"])
+
+        @hookimpl
+        def register_routes():
+            return [(rf"/-/{provider.key}-auth/(?P<rest>.*)$", _view)]
+
         mod.datasette_accounts_auth_providers = datasette_accounts_auth_providers
+        mod.register_routes = register_routes
         pm.register(mod, name=name)
         names.append(name)
         return provider
@@ -209,21 +219,24 @@ async def test_invalid_key_fails_startup(register_provider):
 
 
 # --------------------------------------------------------------------------
-# Mount — resolution, enabled-bit, CSRF, method gate
+# provider_gate — the per-route enabled-bit / CSRF / method gate (D3b)
+#
+# Providers own their routes now; there is no core mount. provider_gate is the
+# one-line decorator a provider wraps each route in to get the same three
+# guarantees the old mount enforced centrally. "Unknown provider 404s" is gone:
+# an unregistered path is now Datasette's ordinary 404.
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_unknown_and_disabled_providers_404_identically(register_provider):
+async def test_disabled_provider_route_404s(register_provider):
     register_provider(EchoProvider())
     ds = await make_ds()  # echo installed but NOT enabled
-    unknown = await ds.client.get("/-/login/provider/nope/start")
-    disabled = await ds.client.get("/-/login/provider/echo/start")
-    assert unknown.status_code == 404
+    disabled = await ds.client.get("/-/echo-auth/start")
     assert disabled.status_code == 404
-    # Identical body — a disabled provider must be indistinguishable from an
-    # uninstalled one.
-    assert disabled.text == unknown.text
+    # Same body the old mount used, so a disabled provider is indistinguishable
+    # from an uninstalled one.
+    assert disabled.text == "Not found"
 
 
 @pytest.mark.asyncio
@@ -231,28 +244,29 @@ async def test_enabled_provider_response_comes_back(register_provider):
     register_provider(EchoProvider())
     ds = await make_ds()
     await _enable_provider(ds, "echo")
-    r = await ds.client.get("/-/login/provider/echo/ping")
+    r = await ds.client.get("/-/echo-auth/ping")
     assert r.status_code == 200
     assert r.json() == {"ok": True, "subpath": "ping", "method": "GET"}
 
 
 @pytest.mark.asyncio
-async def test_post_without_csrf_rejected_before_handle(register_provider):
+async def test_post_without_csrf_rejected_before_handler(register_provider):
     provider = register_provider(EchoProvider())
     ds = await make_ds()
     await _enable_provider(ds, "echo")
-    # No application/json content-type → CSRF gate trips before handle runs.
-    r = await ds.client.post("/-/login/provider/echo/boom", content="{}")
+    # No application/json content-type → provider_gate's CSRF gate trips before
+    # the handler runs.
+    r = await ds.client.post("/-/echo-auth/boom", content="{}")
     assert r.status_code == 403
     assert provider.calls == []
 
 
 @pytest.mark.asyncio
-async def test_post_with_csrf_reaches_handle(register_provider):
+async def test_post_with_csrf_reaches_handler(register_provider):
     provider = register_provider(EchoProvider())
     ds = await make_ds()
     await _enable_provider(ds, "echo")
-    r = await ds.client.post("/-/login/provider/echo/boom", content="{}", headers=JSON)
+    r = await ds.client.post("/-/echo-auth/boom", content="{}", headers=JSON)
     assert r.status_code == 200
     assert provider.calls == [("POST", "boom")]
 
@@ -262,8 +276,69 @@ async def test_other_methods_405(register_provider):
     register_provider(EchoProvider())
     ds = await make_ds()
     await _enable_provider(ds, "echo")
-    r = await ds.client.put("/-/login/provider/echo/ping", content="{}", headers=JSON)
+    r = await ds.client.put("/-/echo-auth/ping", content="{}", headers=JSON)
     assert r.status_code == 405
+
+
+@pytest.mark.asyncio
+async def test_ungated_route_on_disabled_provider_cannot_mint():
+    """CRITICAL regression (D3b): provider_gate is optional, so a provider could
+    forget it. finish_login's enabled re-check — NOT the (now-removed) mount — is
+    the load-bearing control: a disabled provider whose route SKIPS provider_gate
+    still cannot mint. The ungated handler RUNS (no 404), but finish_login refuses
+    with a 403, writes provider_disabled, and mints no session."""
+    from datasette import Response  # noqa: F401  (kept parallel with other tests)
+    from datasette_accounts.providers import ExternalIdentity
+
+    class UngatedProvider(AuthProvider):
+        key = "ungated"
+        label = "Ungated"
+        start_path = "/-/ungated-auth/start"
+
+    provider = UngatedProvider()
+    mod = types.ModuleType("ungated-provider")
+
+    @hookimpl
+    def datasette_accounts_auth_providers(datasette):
+        return [provider]
+
+    async def _ungated_view(datasette, request):
+        # Deliberately NOT wrapped in @provider_gate: hand an external identity
+        # straight to finish_login and let the core gate decide.
+        return await finish_login(
+            datasette,
+            request,
+            ExternalIdentity(provider="ungated", subject="s-1"),
+            provider_key="ungated",
+            response_mode="json",
+        )
+
+    @hookimpl
+    def register_routes():
+        return [(r"/-/ungated-auth/(?P<rest>.*)$", _ungated_view)]
+
+    mod.datasette_accounts_auth_providers = datasette_accounts_auth_providers
+    mod.register_routes = register_routes
+    pm.register(mod, name="ungated-provider")
+    try:
+        ds = await make_ds()  # ungated provider installed but NOT enabled
+        # Even a genuinely-linked identity must be refused while disabled.
+        uid = await insert_user(ds, "alice")
+        internal = ds.get_internal_database()
+        await internal.execute_write(
+            f"INSERT INTO {db.IDENTITIES} (provider, subject, user_id, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ["ungated", "s-1", uid, db.now_iso()],
+        )
+        # The ungated route RUNS — a provider_gate would have 404'd here...
+        r = await ds.client.get("/-/ungated-auth/callback")
+        # ...but finish_login's enabled re-check refuses: 403, no session.
+        assert r.status_code == 403
+        assert await _session_count(ds) == 0
+        assert await _last_audit_reason(ds) == "provider_disabled"
+    finally:
+        if pm.get_plugin("ungated-provider") is not None:
+            pm.unregister(name="ungated-provider")
 
 
 # --------------------------------------------------------------------------
@@ -367,7 +442,7 @@ async def test_finish_login_local_happy_path(register_provider):
     ds = await make_ds()
     await _enable_provider(ds, "echo")
     uid = await insert_user(ds, "alice")
-    r = await ds.client.get(f"/-/login/provider/echo/finish?uid={uid}&mode=json")
+    r = await ds.client.get(f"/-/echo-auth/finish?uid={uid}&mode=json")
     assert r.status_code == 200
     # Response shape is exactly what authenticate() returns today.
     assert r.json() == {"ok": True, "redirect": "/", "must_change_password": False}
@@ -381,7 +456,7 @@ async def test_finish_login_local_redirect_mode(register_provider):
     ds = await make_ds()
     await _enable_provider(ds, "echo")
     uid = await insert_user(ds, "alice")
-    r = await ds.client.get(f"/-/login/provider/echo/finish?uid={uid}&mode=redirect")
+    r = await ds.client.get(f"/-/echo-auth/finish?uid={uid}&mode=redirect")
     assert r.status_code == 302
     assert r.headers["location"] == "/"
     assert r.cookies.get(COOKIE_NAME)
@@ -408,7 +483,7 @@ async def test_finish_login_local_gates_refuse(
         await internal.execute_write(
             f"UPDATE {db.USERS} SET pending_approval = 1 WHERE id = ?", [uid]
         )
-    r = await ds.client.get(f"/-/login/provider/echo/finish?uid={uid}&mode=json")
+    r = await ds.client.get(f"/-/echo-auth/finish?uid={uid}&mode=json")
     assert r.status_code == 403
     assert r.json()["ok"] is False
     assert await _session_count(ds) == 0
@@ -455,10 +530,6 @@ async def test_password_disabled_takes_login_surface_offline():
     )
     assert r.status_code == 404
     assert not r.cookies.get(COOKIE_NAME)
-
-    # The uniformity mount for password is dead too (same 404 as any disabled).
-    mount = await ds.client.get("/-/login/provider/password/start")
-    assert mount.status_code == 404
 
     # Registration is closed even though the signups toggle is on: a disabled
     # password provider means no password signups at all.
@@ -546,7 +617,7 @@ async def test_finish_login_nonexistent_user_refuses(register_provider):
     ds = await make_ds()
     await _enable_provider(ds, "echo")
     r = await ds.client.get(
-        "/-/login/provider/echo/finish?uid=does-not-exist&mode=json"
+        "/-/echo-auth/finish?uid=does-not-exist&mode=json"
     )
     assert r.status_code == 403
     assert r.json()["ok"] is False
@@ -625,7 +696,7 @@ async def test_head_request_dispatches_to_provider(register_provider):
     provider = register_provider(EchoProvider())
     ds = await make_ds()
     await _enable_provider(ds, "echo")
-    r = await ds.client.head("/-/login/provider/echo/ping")
+    r = await ds.client.head("/-/echo-auth/ping")
     assert r.status_code == 200
     assert provider.calls == [("HEAD", "ping")]
 
@@ -663,18 +734,18 @@ async def test_set_provider_enables_and_takes_effect_next_request(register_provi
     cookies = await _admin_cookies(ds)
 
     # Disabled at first: the mount 404s.
-    assert (await ds.client.get("/-/login/provider/echo/ping")).status_code == 404
+    assert (await ds.client.get("/-/echo-auth/ping")).status_code == 404
 
     on = await _set_provider(ds, cookies, key="echo", enabled=True)
     assert on.status_code == 200
     assert on.json() == {"ok": True, "enabled": True, "signups": "off"}
 
     # Live on the very next request — no restart.
-    assert (await ds.client.get("/-/login/provider/echo/ping")).status_code == 200
+    assert (await ds.client.get("/-/echo-auth/ping")).status_code == 200
 
     off = await _set_provider(ds, cookies, key="echo", enabled=False)
     assert off.json()["enabled"] is False
-    assert (await ds.client.get("/-/login/provider/echo/ping")).status_code == 404
+    assert (await ds.client.get("/-/echo-auth/ping")).status_code == 404
 
 
 @pytest.mark.asyncio

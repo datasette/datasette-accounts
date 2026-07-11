@@ -93,10 +93,10 @@ async def _drive_login(ds, subject, *, username=None, name=None, session=None):
         cookies[COOKIE_NAME] = session
 
     # 1. start → 302 to the pretend IdP, carrying the state, setting the cookie.
-    r1 = await ds.client.get("/-/login/provider/demo/start", cookies=cookies)
+    r1 = await ds.client.get("/-/demo-auth/start", cookies=cookies)
     assert r1.status_code == 302
     idp_url = r1.headers["location"]
-    assert idp_url.startswith("/-/login/provider/demo/idp?state=")
+    assert idp_url.startswith("/-/demo-auth/idp?state=")
     state_cookie = r1.cookies.get(STATE_COOKIE)
     assert state_cookie
     cookies[STATE_COOKIE] = state_cookie
@@ -106,7 +106,7 @@ async def _drive_login(ds, subject, *, username=None, name=None, session=None):
     r2 = await ds.client.get(idp_url, cookies=cookies)
     assert r2.status_code == 200
     assert "authenticates" in r2.text and "nobody" in r2.text  # dev-only banner
-    assert "/-/login/provider/demo/callback" in r2.text
+    assert "/-/demo-auth/callback" in r2.text
 
     # 3. the callback: the IdP hands back the typed subject + hints.
     qs = f"state={state}&subject={subject}"
@@ -114,7 +114,7 @@ async def _drive_login(ds, subject, *, username=None, name=None, session=None):
         qs += f"&username={username}"
     if name is not None:
         qs += f"&name={name}"
-    return await ds.client.get(f"/-/login/provider/demo/callback?{qs}", cookies=cookies)
+    return await ds.client.get(f"/-/demo-auth/callback?{qs}", cookies=cookies)
 
 
 # ==========================================================================
@@ -138,7 +138,7 @@ async def test_demo_provider_discovered_via_entry_point():
 async def test_disabled_by_default_mount_404s():
     ds = await make_ds()  # installed but never enabled
     for sub in ("start", "idp", "callback"):
-        r = await ds.client.get(f"/-/login/provider/demo/{sub}")
+        r = await ds.client.get(f"/-/demo-auth/{sub}")
         assert r.status_code == 404, sub
 
 
@@ -247,7 +247,7 @@ async def test_link_flow_end_to_end():
     )
     assert ls.status_code == 200
     start_url = ls.json()["start_url"]
-    assert start_url.startswith("/-/login/provider/demo/start?state=")
+    assert start_url.startswith("/-/demo-auth/start?state=")
     state_cookie = ls.cookies.get(STATE_COOKIE)
     assert state_cookie
 
@@ -257,12 +257,12 @@ async def test_link_flow_end_to_end():
     r1 = await ds.client.get(start_url, cookies=cookies)
     assert r1.status_code == 302
     idp_url = r1.headers["location"]
-    assert idp_url.startswith("/-/login/provider/demo/idp?state=")
+    assert idp_url.startswith("/-/demo-auth/idp?state=")
     state = _state_value(idp_url)
 
     # The IdP hands back a fresh subject → callback links it, never mints.
     r2 = await ds.client.get(
-        f"/-/login/provider/demo/callback?state={state}&subject=gh-carol",
+        f"/-/demo-auth/callback?state={state}&subject=gh-carol",
         cookies=cookies,
     )
     assert r2.status_code == 302
@@ -299,5 +299,5 @@ async def test_callback_without_state_fails():
     ds = await make_ds()
     await _enable(ds, "demo", signups="auto")
     # No state cookie, no state query arg → the provider's read_state guard trips.
-    r = await ds.client.get("/-/login/provider/demo/callback?subject=x")
+    r = await ds.client.get("/-/demo-auth/callback?subject=x")
     assert r.status_code == 400
