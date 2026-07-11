@@ -12,6 +12,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from datasette import Response
 
@@ -163,6 +164,45 @@ def read_state(datasette, request, *, provider):
 
 def clear_state_cookie(response):
     response.set_cookie(STATE_COOKIE, "", max_age=0, path="/", expires=0)
+
+
+# --------------------------------------------------------------------------
+# Registry access + presentation helpers
+# --------------------------------------------------------------------------
+
+
+def get_registry(datasette):
+    """The provider registry dict {key: AuthProvider} built at startup (§3)."""
+    return getattr(datasette, REGISTRY_ATTR, {})
+
+
+def provider_label(datasette, key):
+    """Display label for a provider key, falling back to the key when the
+    provider package is no longer installed (a linked identity outliving its
+    provider still renders)."""
+    provider = get_registry(datasette).get(key)
+    return provider.label if provider is not None else key
+
+
+def external_provider_keys(datasette):
+    """Every installed external provider key (registry order, `password`
+    excluded) — the universe the account page filters to 'linkable'."""
+    return [k for k in get_registry(datasette) if k != "password"]
+
+
+def to_identity_rows(datasette, raw_identities):
+    """Map db identity dicts → IdentityRow-shaped dicts, resolving the display
+    label from the live registry. Shared by the account + admin surfaces."""
+    return [
+        {
+            "provider": i["provider"],
+            "label": provider_label(datasette, i["provider"]),
+            "subject": i["subject"],
+            "created_at": i["created_at"],
+            "last_login_at": i.get("last_login_at"),
+        }
+        for i in raw_identities
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -329,6 +369,26 @@ async def _finish_external(
         return _refuse(response_mode)
 
     existing = await db.get_identity(internal, provider_key, identity.subject)
+    intent = (state or {}).get("i") or "login"
+
+    # Linking intents (design §6) are handled BEFORE the login mint: a link /
+    # step-up flow must NEVER mint a session for the identity's owner — the user
+    # is already signed in throughout linking, and treating a link callback as a
+    # login would let an attacker who completes a link flow with a *victim's*
+    # already-linked identity be signed in as that victim. The found/not-found
+    # split is delegated so each intent decides explicitly.
+    if intent == "step-up":
+        return await _finish_step_up(
+            datasette, request, identity, existing,
+            provider_key=provider_key, response_mode=response_mode, state=state,
+        )
+    if intent == "link":
+        return await _finish_link(
+            datasette, request, identity, existing,
+            provider_key=provider_key, response_mode=response_mode, state=state,
+        )
+
+    # intent == "login" from here down.
     if existing is not None:
         # Linked → load the account, run the same gates as a password login.
         user = await db.get_user_by_id(internal, existing["user_id"])
@@ -353,12 +413,7 @@ async def _finish_external(
             state=state,
         )
 
-    # Unmatched identity. Linking (link / step-up intents) is ticket 04.
-    intent = (state or {}).get("i") or "login"
-    if intent in ("link", "step-up"):
-        raise NotImplementedError("identity linking is implemented in ticket 04")
-
-    # intent == "login": consult the provider's signups policy.
+    # Unmatched identity, intent == "login": consult the provider's signups policy.
     signups = await db.get_provider_signups(internal, provider_key)
     if signups == "off":
         # Generic — identical wording whether signups are off or the identity is
@@ -386,6 +441,115 @@ async def _finish_external(
         response_mode=response_mode,
         state=state,
     )
+
+
+# --------------------------------------------------------------------------
+# Linking + step-up (design §6) — reached only for link / step-up intents,
+# which never mint a session (the user is already signed in throughout linking).
+# --------------------------------------------------------------------------
+
+
+async def _finish_step_up(
+    datasette, request, identity, existing, *, provider_key, response_mode, state
+):
+    """Step-up proof: the acting user re-completed an ALREADY-linked provider's
+    flow (the password-less step-up path, design D8). The presented identity must
+    be found AND owned by the state's bound actor. On success we do NOT mint —
+    we 302 into the *target* provider's start with a fresh ``intent="link"`` state
+    carrying the step-up proof (``step_up={provider, at}``, honored ≤ TTL).
+    """
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+    actor_id = (state or {}).get("a")
+    target = ((state or {}).get("u") or {}).get("target")
+    # The identity must belong to the acting account (proof of control of an
+    # existing method), and the state must name a target to link into.
+    if existing is None or existing["user_id"] != actor_id or not target:
+        await db.record_login_attempt(
+            internal, None, ip, False, "provider_state_invalid", provider=provider_key
+        )
+        return _refuse(response_mode)
+    # Redirect into the target provider's start, minting the link-intent state.
+    response = Response.redirect(datasette.setting("base_url") or "/")
+    value = make_state(
+        datasette,
+        request,
+        response,
+        provider=target,
+        next="/-/account",
+        intent="link",
+        actor_id=actor_id,
+        step_up={"provider": provider_key, "at": db.now_iso()},
+    )
+    start = datasette.urls.path(f"/-/login/provider/{target}/start")
+    # Response.redirect wrote the "Location" header (capital L); overwrite that
+    # exact key so we don't emit a second, lowercase location header.
+    response.headers["Location"] = f"{start}?state={quote(value)}"
+    return response
+
+
+async def _finish_link(
+    datasette, request, identity, existing, *, provider_key, response_mode, state
+):
+    """Complete a link: attach ``identity`` to the state's bound actor, provided
+    that actor still matches the LIVE session (a stolen/forged state built for
+    user A cannot be redeemed under user B's session) and — for password-less
+    origins — the step-up proof is within TTL. An identity already linked to
+    ANYONE (including this account) yields a generic "already in use" page: a
+    link callback must never mint, so completing it with a victim's identity can
+    never sign the attacker in as the victim.
+    """
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+
+    if existing is not None:
+        # Already claimed (by this account or another) — generic, no disclosure,
+        # no session. This is the branch that defeats "link a victim's identity
+        # to get signed in as them": we return a 409 page, never a mint.
+        return _error_page(
+            response_mode, "That identity is already in use.", status=409
+        )
+
+    actor_id = (state or {}).get("a")
+    # The state's bound actor must equal the live session's actor. resolve_actor
+    # rebuilds identity straight from the session cookie (lazy import: __init__
+    # imports this module before resolve_actor is defined).
+    from .. import resolve_actor
+
+    live = await resolve_actor(datasette, request)
+    if not actor_id or live is None or live["id"] != actor_id:
+        await db.record_login_attempt(
+            internal, None, ip, False, "provider_state_invalid", provider=provider_key
+        )
+        return _refuse(response_mode)
+
+    # Password-less origin: the link state carries a step-up proof, honored only
+    # within provider_state_ttl_minutes of the step-up completion.
+    step_up = (state or {}).get("u") or {}
+    if step_up.get("at") is not None or step_up.get("provider") is not None:
+        ttl = security.config(datasette, "provider_state_ttl_minutes")
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=ttl)
+        ).isoformat(timespec="milliseconds")
+        at = step_up.get("at")
+        if not at or at <= cutoff:
+            await db.record_login_attempt(
+                internal, None, ip, False, "provider_state_invalid",
+                provider=provider_key,
+            )
+            return _refuse(response_mode)
+
+    try:
+        await db.link_identity(internal, actor_id, actor_id, identity)
+    except db.AlreadyLinkedError:
+        # Lost the race to another writer (PK backstop) — same generic outcome.
+        return _error_page(
+            response_mode, "That identity is already in use.", status=409
+        )
+
+    response = Response.redirect(datasette.urls.path("/-/account"))
+    clear_state_cookie(response)
+    return response
 
 
 async def _provision_pending(datasette, request, identity, *, provider_key, response_mode):

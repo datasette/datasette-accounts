@@ -19,11 +19,12 @@ from ..page_data import (
     LoginPageData,
     RegisterPageData,
     SetPasswordPageData,
-    UserRow,
 )
+from ..passwords import UNUSABLE_PASSWORD
+from ..providers import external_provider_keys, to_identity_rows
 from ..router import require_admin_page, router
 from ..sessions import list_own_sessions, token_sha256
-from .api import audit_entries
+from .api import _user_row, audit_entries
 
 
 async def _render(datasette, request, entrypoint, page_title, page_data):
@@ -130,17 +131,33 @@ async def account_page(datasette, request):
     actor = request.actor
     must_change_password = bool(actor.get("must_change_password"))
     # During the forced-change state the page renders password-only, so skip
-    # the sessions read entirely rather than assembling data nobody sees.
+    # the sessions + sign-in-methods reads entirely rather than assembling data
+    # nobody sees.
     sessions = []
+    identities = []
+    linkable = []
+    has_password = True
     if not must_change_password:
         internal = datasette.get_internal_database()
         sessions = await list_own_sessions(datasette, request, internal, actor["id"])
+        user = await db.get_user_by_id(internal, actor["id"])
+        has_password = bool(user) and user["password_hash"] != UNUSABLE_PASSWORD
+        raw_identities = await db.list_identities(internal, actor["id"])
+        identities = to_identity_rows(datasette, raw_identities)
+        linked_keys = {i["provider"] for i in raw_identities}
+        # Linkable = installed external providers, enabled, not already linked.
+        for key in external_provider_keys(datasette):
+            if key not in linked_keys and await db.get_provider_enabled(internal, key):
+                linkable.append(key)
     page_data = AccountPageData(
         id=actor["id"],
         username=actor.get("username", ""),
         is_admin=bool(actor.get("is_admin")),
         must_change_password=must_change_password,
         sessions=sessions,
+        identities=identities,
+        linkable_providers=linkable,
+        has_password=has_password,
     ).model_dump()
     return await _render(
         datasette, request, "src/pages/account/index.ts", "Your account", page_data
@@ -152,7 +169,7 @@ async def account_page(datasette, request):
 async def admin_page(datasette, request):
     internal = datasette.get_internal_database()
     rows = await db.list_user_rows(internal)
-    users = [UserRow(**r) for r in rows]
+    users = [_user_row(datasette, r) for r in rows]
     page_data = AdminPageData(users=users, viewer_id=request.actor["id"]).model_dump()
     return await _render(
         datasette, request, "src/pages/admin/index.ts", "Accounts", page_data

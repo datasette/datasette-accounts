@@ -294,6 +294,12 @@ FROM datasette_accounts_identities
 WHERE user_id = $user_id::text
 ORDER BY created_at;
 
+-- Count of an account's linked identities — the unlink strand guard reads this
+-- inside its write tx (refusing to strip the last sign-in method of a
+-- password-less account). Sibling of countOtherEnabledAdmins.
+-- name: countIdentitiesForUser :value
+SELECT COUNT(*) FROM datasette_accounts_identities WHERE user_id = $user_id::text;
+
 -- Link a (provider, subject) to an account. last_login_at is NULL until the
 -- first sign-in *through* the link (touchIdentityLastLogin stamps it); a link
 -- created during a login mints the session and stamps it in the same flow.

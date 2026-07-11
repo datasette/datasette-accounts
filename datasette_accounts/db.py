@@ -19,6 +19,7 @@ import datetime
 import json as jsonlib
 import re
 import secrets
+import sqlite3
 
 from ulid import ULID
 
@@ -90,6 +91,23 @@ class InvalidExpiryError(Exception):
 class NotPendingError(Exception):
     """Raised when rejecting an account that is not awaiting approval — a
     mis-aimed reject must never delete an active user."""
+
+
+class AlreadyLinkedError(Exception):
+    """Raised when linking a (provider, subject) already linked to some account
+    (this one or another). The caller shows a generic "already in use" page — no
+    account disclosure (design §6)."""
+
+
+class IdentityNotFoundError(Exception):
+    """Raised when unlinking a (provider, subject) that isn't linked to the
+    named target account (unknown, or belongs to someone else)."""
+
+
+class StrandedAccountError(Exception):
+    """Raised when unlinking would strand an account: no usable password AND the
+    identity being removed is its only one. The in-tx sibling of the last-admin
+    guard — the account would lose every way to sign in (design §6)."""
 
 
 def now_iso() -> str:
@@ -194,6 +212,13 @@ async def list_user_rows(db):
                     "link_created_by": (
                         (m.created_by_username or m.created_by) if m else None
                     ),
+                    # Raw identity dicts (no display label — that's resolved from
+                    # the provider registry in the route layer, which db.py can't
+                    # see). Empty for a password-only account.
+                    "identities": [
+                        dataclasses.asdict(i)
+                        for i in gen.list_identities_for_user(conn, user_id=u.id)
+                    ],
                 }
             )
         return rows
@@ -1127,16 +1152,26 @@ def derive_username(hint, provider_key, taken):
     append ``-2``, ``-3``, … on collision, bounded; if even that can't find a
     gap, use the random fallback. ``taken`` is a ``set``/container of existing
     usernames or a ``callable(name) -> bool``.
+
+    Invariant: the result ALWAYS passes ``validate_username``. A near-max-length
+    slug that collides gets its base trimmed so ``base + "-N"`` stays within the
+    64-char limit (and the suffixed candidate is re-validated), so the ``-N``
+    tail can never push it past the length cap.
     """
     is_taken = taken if callable(taken) else (lambda name: name in taken)
     base = _slugify_username(hint)
     if security.validate_username(base) is not None:
         base = f"{provider_key}-{secrets.token_hex(4)}"
-    candidate = base
+    if not is_taken(base):
+        return base
     for i in range(2, 50):
-        if not is_taken(candidate):
+        suffix = f"-{i}"
+        # Trim the base so the suffixed name fits the length cap, then re-validate
+        # (a trim only shortens, so the alnum-first-char rule still holds).
+        trimmed = base[: security.USERNAME_MAX_LENGTH - len(suffix)]
+        candidate = f"{trimmed}{suffix}"
+        if security.validate_username(candidate) is None and not is_taken(candidate):
             return candidate
-        candidate = f"{base}-{i}"
     return f"{provider_key}-{secrets.token_hex(4)}"
 
 
@@ -1172,23 +1207,69 @@ async def link_identity(db, actor_id, user_id, identity):
     ``identity`` is an ``providers.ExternalIdentity``. Ticket 04's linking routes
     call this; it is the single insert point for a new ``(provider, subject)``
     row on an already-existing account.
+
+    The already-linked check runs inside the write tx (raising
+    ``AlreadyLinkedError`` when the pair is already claimed by anyone, including
+    this same account) so a concurrent link can't slip past a check-then-insert
+    race; the PRIMARY KEY on (provider, subject) is the backstop.
     """
 
     def write(conn):
-        gen.insert_identity(
-            conn,
-            provider=identity.provider,
-            subject=identity.subject,
-            user_id=user_id,
-            email=identity.email,
-            display_name=identity.display_name,
-        )
+        if gen.select_identity(
+            conn, provider=identity.provider, subject=identity.subject
+        ) is not None:
+            raise AlreadyLinkedError()
+        try:
+            gen.insert_identity(
+                conn,
+                provider=identity.provider,
+                subject=identity.subject,
+                user_id=user_id,
+                email=identity.email,
+                display_name=identity.display_name,
+            )
+        except sqlite3.IntegrityError as e:
+            # PK backstop: a racing writer inserted the same pair between the
+            # SELECT above and this INSERT. Still "already in use", never a 500.
+            raise AlreadyLinkedError() from e
         _audit(
             conn,
             "link-identity",
             actor_id,
             user_id,
             {"provider": identity.provider, "subject": identity.subject},
+        )
+
+    await db.execute_write_fn(write)
+
+
+async def unlink_identity(db, actor_id, target_user_id, provider, subject, *, admin):
+    """Remove one ``(provider, subject)`` link from ``target_user_id`` (one write
+    tx + audit), enforcing the strand guard atomically.
+
+    ``admin`` selects the audit op (``admin-unlink-identity`` vs
+    ``unlink-identity``) — the same call serves both the self and admin routes.
+    Refuses (``IdentityNotFoundError``) when the pair isn't linked to that
+    account, and (``StrandedAccountError``) when the account has no usable
+    password and this is its only identity — the in-tx sibling of
+    ``_guard_last_admin`` (count + delete are atomic, no strand-by-race).
+    """
+
+    def write(conn):
+        ident = gen.select_identity(conn, provider=provider, subject=subject)
+        if ident is None or ident.user_id != target_user_id:
+            raise IdentityNotFoundError()
+        user = gen.select_user_by_id(conn, user_id=target_user_id)
+        only_one = (gen.count_identities_for_user(conn, user_id=target_user_id) or 0) <= 1
+        if user is not None and user.password_hash == UNUSABLE_PASSWORD and only_one:
+            raise StrandedAccountError()
+        gen.delete_identity(conn, provider=provider, subject=subject)
+        _audit(
+            conn,
+            "admin-unlink-identity" if admin else "unlink-identity",
+            actor_id,
+            target_user_id,
+            {"provider": provider, "subject": subject},
         )
 
     await db.execute_write_fn(write)

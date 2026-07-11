@@ -573,6 +573,14 @@ ORDER BY created_at;
     return [IdentityRow(*row) for row in cursor.fetchall()]
 
 
+def count_identities_for_user(conn: sqlite3.Connection, user_id: str) -> Any | None:
+    sql = "SELECT COUNT(*) FROM datasette_accounts_identities WHERE user_id = $user_id::text;"
+    params = {"user_id::text": user_id}
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
 def insert_identity(
     conn: sqlite3.Connection,
     provider: str,

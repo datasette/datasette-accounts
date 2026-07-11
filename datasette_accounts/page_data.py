@@ -10,6 +10,18 @@ from pydantic import BaseModel
 # --------------------------------------------------------------------------
 
 
+class IdentityRow(BaseModel):
+    # One external sign-in identity linked to an account (design §6). `subject`
+    # is the IdP's stable id (never an email); `label` is the provider's display
+    # label resolved from the live registry (falls back to the provider key when
+    # the provider package is no longer installed).
+    provider: str
+    label: str
+    subject: str
+    created_at: str
+    last_login_at: Optional[str] = None
+
+
 class LoginPageData(BaseModel):
     next: str = "/"
     # Optional admin-authored help/contact note (plain text), "" when unset.
@@ -50,6 +62,10 @@ class UserRow(BaseModel):
     # Minting admin's username, falling back to the raw actor id for synthetic
     # actors ("root", "cli:$USER") or a since-deleted account.
     link_created_by: Optional[str] = None
+    # External sign-in identities linked to this account (empty for a
+    # password-only account). Populated on the admin surfaces (design §6) so an
+    # admin can see and unlink an account's SSO methods.
+    identities: List[IdentityRow] = []
     created_at: str
     # None until the first successful sign-in — the account is still "pending".
     last_login_at: Optional[str] = None
@@ -89,6 +105,15 @@ class AccountPageData(BaseModel):
     # Omitted (stays []) during the forced-password-change state — the account
     # page renders password-only until the account is in its normal state.
     sessions: List[OwnSessionRow] = []
+    # The account's linked external sign-in methods (design §6, "Sign-in
+    # methods"). Empty for a password-only account or during forced change.
+    identities: List[IdentityRow] = []
+    # Keys of the enabled external providers this account has NOT yet linked —
+    # the "Link…" buttons to offer. Empty during forced change.
+    linkable_providers: List[str] = []
+    # False when the account has no usable password (SSO-only). Drives whether
+    # linking asks for a password (step-up) or names an already-linked provider.
+    has_password: bool = True
 
 
 # --- Capabilities (F1) ---
@@ -402,6 +427,41 @@ class RegisterRequest(BaseModel):
 
 class SetRegistrationRequest(BaseModel):
     enabled: bool
+
+
+# --- Identity linking / unlinking (see plans/auth-providers §6) ---
+
+
+class LinkStartRequest(BaseModel):
+    # Target external provider to link to the signed-in account.
+    provider: str
+    # Step-up proof for a password account: the account's current password.
+    password: Optional[str] = None
+    # Step-up proof for a password-less account: the key of an already-linked
+    # provider whose flow the user re-completes.
+    step_up_provider: Optional[str] = None
+
+
+class LinkStartResponse(BaseModel):
+    ok: bool
+    # The URL to send the browser to next: the target provider's start (direct
+    # password link) or the step-up provider's start (password-less). Present
+    # only on success.
+    start_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class UnlinkRequest(BaseModel):
+    # The (provider, subject) to unlink from the signed-in account.
+    provider: str
+    subject: str
+
+
+class AdminUnlinkRequest(BaseModel):
+    # Same as UnlinkRequest plus the account whose identity is being unlinked.
+    target_id: str
+    provider: str
+    subject: str
 
 
 class AdminAuditRequest(BaseModel):
