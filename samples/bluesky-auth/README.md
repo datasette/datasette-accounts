@@ -36,33 +36,86 @@ login page can show a "Continue with Bluesky" button. The module owns its
 routes under `/-/bluesky-auth/...` via the ordinary `register_routes` hook,
 each wrapped in `@provider_gate("bluesky")`.
 
-## Production setup
+## Production setup (hosting at `https://data.example.com`)
 
-1. Set this instance's public HTTPS origin:
+There is no client secret to export and nothing to register on Bluesky's
+side — atproto is a public-client protocol, and the metadata document this
+sample serves at `/-/bluesky-auth/client-metadata.json` **is** the
+registration (auth servers fetch it anonymously during PAR). One env var
+plus ordinary HTTPS deployment hygiene:
+
+1. **Install the pieces.** `datasette-accounts` plus `authlib` (a dev-only
+   dependency in this repo — a production venv must install it explicitly;
+   `httpx` ships with Datasette). Copy `bluesky_auth.py` somewhere and point
+   `--plugins-dir` at its directory.
+
+2. **Set the public HTTPS origin and run:**
 
    ```bash
-   export DATASETTE_BLUESKY_PUBLIC_URL=https://data.example.com
+   DATASETTE_SECRET=<long random value, stable across restarts> \
+   DATASETTE_BLUESKY_PUBLIC_URL=https://data.example.com \
+   datasette mydata.db --internal accounts.db \
+     --plugins-dir /srv/datasette/plugins/bluesky-auth \
+     -h 127.0.0.1 -p 8006
    ```
 
-   An auth server must be able to fetch
-   `{DATASETTE_BLUESKY_PUBLIC_URL}/-/bluesky-auth/client-metadata.json`
-   anonymously during PAR — make sure there's no auth wall in front of it.
+   The provider derives everything from `DATASETTE_BLUESKY_PUBLIC_URL`:
+   `client_id` becomes
+   `https://data.example.com/-/bluesky-auth/client-metadata.json` and
+   `redirect_uri` becomes `https://data.example.com/-/bluesky-auth/callback`
+   (a `base_url` subpath, if configured, is honored in both). Two hard
+   requirements: valid TLS, and **no auth wall in front of the
+   client-metadata path** — if the instance sits behind basic auth or an
+   access proxy, exempt `/-/bluesky-auth/client-metadata.json` or PAR fails
+   when the auth server can't fetch it. A stable `DATASETTE_SECRET` matters
+   too: state and session cookies are signed with it, so an ephemeral secret
+   logs everyone out (and kills mid-flight sign-ins) on every restart.
 
-2. Load the module and enable the provider (external providers are
-   **disabled by default** — installing the module changes nothing until an
-   admin enables it):
+3. **Behind a TLS-terminating proxy** (nginx/Caddy), Datasette sees plain
+   HTTP, and datasette-accounts decides the cookies' `Secure` flag from the
+   request scheme. Either have the proxy send `X-Forwarded-Proto: https` and
+   set, in `datasette.yaml`:
+
+   ```yaml
+   plugins:
+     datasette-accounts:
+       trust_proxy_headers: true   # also fixes client-IP audit/rate caps
+   ```
+
+   or force it with `secure_cookie: true`. The OAuth URLs themselves never
+   depend on proxy headers — public mode builds them from
+   `DATASETTE_BLUESKY_PUBLIC_URL` directly, which is why that env var exists
+   instead of deriving the origin from the request.
+
+4. **Enable the provider** (external providers are **disabled by default** —
+   installing the module changes nothing until an admin enables it):
 
    ```bash
-   datasette --plugins-dir samples/bluesky-auth --internal accounts.db …
    datasette accounts enable-provider bluesky -i accounts.db
    datasette accounts set-signups bluesky auto -i accounts.db   # or: approval
    ```
 
-There is no client secret to export — atproto is a public-client protocol;
-the metadata document itself is the registration. As with the other
-samples, `configured()` returning False (neither env var set) keeps the
-button off the login page even if `bluesky` has been enabled, and `start`
-503s as defense in depth if hit directly.
+5. **Verify** before trying a sign-in:
+
+   ```bash
+   curl -s https://data.example.com/-/bluesky-auth/client-metadata.json
+   ```
+
+   The `client_id` field must equal that exact URL.
+
+As with the other samples, `configured()` returning False (neither env var
+set) keeps the button off the login page even if `bluesky` has been enabled,
+and `start` 503s as defense in depth if hit directly.
+
+**Sign-in UX to expect**: bsky.social's OAuth pages keep their own session —
+being signed into the bsky.app web app does not carry over (it uses the
+legacy `createSession` API, not OAuth), so first sign-in always shows
+bsky.social's authenticate page; its "remember this account" option removes
+the password step on later flows. The consent ("Grant access") screen shows
+on every sign-in for this sample: per the atproto OAuth spec, silent
+sign-in (auto-approving a previously-granted client) is reserved for
+**confidential** clients, and this sample is deliberately a plain public
+client (see Deliberate simplifications).
 
 ## Local dev walkthrough (the loopback client)
 
@@ -100,11 +153,16 @@ account and its handle (e.g. `alice.example.com` — dots are kept as-is
 through username derivation, so that's also what your local username would
 be).
 
-> **Verified: not yet.** Everything above is checked against the source
-> (`bluesky_auth.py`) and this sample's test suite, but nobody has run this
-> walkthrough end-to-end against a real `bsky.social` account yet — do that
-> once on a clean `accounts.db` and update this note with the result (or
-> file what broke, if the loopback client is rejected).
+> **Verified: 2026-07-11**, end-to-end against production `bsky.social` with
+> a real account (custom-domain handle), via the loopback client. The first
+> attempt caught one real bug — the no-handle default treated `bsky.social`
+> as a PDS, but it is the *entryway authorization server* and 404s
+> `/.well-known/oauth-protected-resource` (accounts' PDSes are
+> `*.host.bsky.network` hosts) — fixed by using it as the issuer directly.
+> Expected UX quirks observed: bsky.social always asks you to authenticate
+> (its OAuth session is separate from the bsky.app web app's) and always
+> shows the consent screen (loopback/public clients don't qualify for the
+> spec's confidential-client-only silent sign-in).
 
 ## Entry points
 
