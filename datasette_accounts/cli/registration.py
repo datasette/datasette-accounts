@@ -1,4 +1,5 @@
-"""``datasette accounts registration`` — the runtime self-registration toggle."""
+"""``datasette accounts registration`` — a documented alias for the password
+provider's signups policy (decision D5)."""
 
 import click
 
@@ -28,10 +29,12 @@ from .base import (
 def registration(state, as_json, yes, internal, metadata, actor):
     """Open, close, or inspect self-registration (default: status).
 
-    The shell counterpart to the admin UI's header switch — the same audited
-    runtime toggle in the internal DB, effective on the next request, no
-    restart. While on, anyone can request an account at /-/register; requests
-    land in the pending-approval queue (see approve / reject).
+    A documented alias for the password provider's signups policy (decision
+    D5): ``on`` == ``set-signups password approval``, ``off`` == ``set-signups
+    password off``. Kept because scripts reference it. The same audited runtime
+    setting in the internal DB, effective on the next request, no restart. While
+    on, anyone can request an account at /-/register; requests land in the
+    pending-approval queue (see approve / reject).
     """
 
     async def go():
@@ -71,12 +74,14 @@ def registration(state, as_json, yes, internal, metadata, actor):
             summary = "Disable self-registration?"
         _confirm(summary, yes)
         enabled = await db.set_registration_enabled(db_, _actor_id(actor), target)
-        _emit(
-            {"ok": True, "enabled": enabled},
-            as_json,
-            lambda: click.echo(
-                f"{'Enabled' if enabled else 'Disabled'} self-registration."
-            ),
-        )
+
+        def human():
+            click.echo(f"{'Enabled' if enabled else 'Disabled'} self-registration.")
+            click.echo(
+                "Tip: this is an alias for "
+                f"'accounts set-signups password {'approval' if enabled else 'off'}'."
+            )
+
+        _emit({"ok": True, "enabled": enabled}, as_json, human)
 
     _run(go())

@@ -18,7 +18,9 @@ from . import (  # noqa: E402,F401
     delete,
     demote,
     disable,
+    disable_provider,
     enable,
+    enable_provider,
     expire,
     hash_password,
     invite,
@@ -26,10 +28,12 @@ from . import (  # noqa: E402,F401
     login_attempts,
     logout,
     promote,
+    providers,
     registration,
     reject,
     reset_link,
     reset_password,
+    set_signups,
     unlock,
 )
 

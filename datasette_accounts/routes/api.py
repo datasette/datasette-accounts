@@ -4,7 +4,7 @@ import json
 from typing import Annotated
 from urllib.parse import quote
 
-from datasette import Response
+from datasette import NotFound, Response
 from datasette_plugin_router import Body
 
 from .. import db, grantable, messages, security
@@ -28,6 +28,7 @@ from ..page_data import (
     RevokeSessionRequest,
     SessionRow,
     SetExpiryRequest,
+    SetProviderRequest,
     SetRegistrationRequest,
     SetSiteMessageRequest,
     TargetRequest,
@@ -75,6 +76,11 @@ async def authenticate(
 ):
     # Thin wrapper (design §8): the password provider owns the verify half; the
     # single mint chokepoint (finish_login) owns the success half. Path unchanged.
+    # A disabled password provider takes the whole canonical login surface
+    # offline (404, same as the mount) before any DB/KDF work runs.
+    internal = datasette.get_internal_database()
+    if not await db.get_provider_enabled(internal, "password"):
+        raise NotFound("Not found")
     result = await password.verify_credentials(
         datasette, request, body.username, body.password
     )
@@ -946,3 +952,52 @@ async def admin_set_registration(
         internal, request.actor["id"], body.enabled
     )
     return Response.json({"ok": True, "enabled": enabled})
+
+
+# --------------------------------------------------------------------------
+# Sign-in provider settings (enable/disable + signups — see plans/auth-providers)
+# --------------------------------------------------------------------------
+
+
+@router.POST("/-/admin/api/set-provider$")
+@require_admin
+async def admin_set_provider(
+    datasette, request, body: Annotated[SetProviderRequest, Body()]
+):
+    """Enable/disable a provider and/or set its signups policy (design §9).
+
+    ``key`` must be in the registry (an unknown key → 400). Either or both of
+    ``enabled`` / ``signups`` may be sent; a ``None`` field is left unchanged.
+    The last-provider guard surfaces as a 400 with its message. The write takes
+    effect on the very next request (nothing about it is cached)."""
+    registry = get_registry(datasette)
+    if body.key not in registry:
+        return Response.json({"ok": False, "error": "Unknown provider"}, status=400)
+    if body.signups is not None and body.signups not in ("off", "approval", "auto"):
+        return Response.json({"ok": False, "error": "Invalid signups mode"}, status=400)
+    internal = datasette.get_internal_database()
+    try:
+        if body.enabled is not None:
+            await db.set_provider_enabled(
+                internal,
+                request.actor["id"],
+                body.key,
+                body.enabled,
+                installed_keys=list(registry),
+            )
+        if body.signups is not None:
+            await db.set_provider_signups(
+                internal, request.actor["id"], body.key, body.signups
+            )
+    except db.LastProviderError:
+        return Response.json(
+            {"ok": False, "error": "Cannot disable the last sign-in provider."},
+            status=400,
+        )
+    return Response.json(
+        {
+            "ok": True,
+            "enabled": await db.get_provider_enabled(internal, body.key),
+            "signups": await db.get_provider_signups(internal, body.key),
+        }
+    )
