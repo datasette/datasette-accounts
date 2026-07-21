@@ -1,0 +1,25 @@
+[project]
+name = "datasette-accounts-demo-auth"
+version = "0.0.1"
+description = "Development-only demo sign-in provider for datasette-accounts (plaintext 4-digit PINs, deliberately insecure)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "datasette>=1.0a23",
+    "datasette-accounts",
+]
+
+# The datasette entry point is exactly the shape the root package uses
+# (pyproject.toml `[project.entry-points.datasette]`) — this is what makes the
+# provider discoverable via a real installed distribution rather than a test
+# fixture.
+[project.entry-points.datasette]
+accounts_demo_auth = "datasette_accounts_demo_auth"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["datasette_accounts_demo_auth*"]

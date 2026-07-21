@@ -35,6 +35,27 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
   wrappers (KDF runs off the event loop) + DUMMY_HASH + length bounds.
 - `security.py` — CSRF gates, `?next=` validation, secure-cookie + IP-trust.
 - `router.py` — shared Router + POST-only/CSRF/admin decorators.
+- `sessions.py` — session token mint/hash (`mint_token`, `token_sha256`).
+- `hookspecs.py` — the `datasette_accounts_auth_providers(datasette)` hookspec,
+  added to core's `pm` at import time so other packages can add sign-in methods.
+- `providers/` — the pluggable sign-in provider layer (plans/auth2/).
+  `__init__.py` = the `AuthProvider` descriptor contract (`key`/`label`/
+  `start_path`, optional `icon`/`brand_color`/`configured()`, no dispatch method
+  — providers own their routes, D3b), `Local`/`ExternalIdentity`, core-owned
+  signed state (`make_state`/`read_state` + `STATE_COOKIE`), the registry
+  (`get_registry`/`provider_source`), the optional `provider_gate(key)`
+  decorator (enabled-404 + CSRF-on-POST + method gate for a provider's own
+  routes), and `finish_login` — the single termination point every sign-in
+  (password, invite/reset, external) funnels through: enabled re-check (the
+  load-bearing kill switch) → account gates → per-provider signups policy → the
+  one `mint_session` call. `password.py` = the built-in username/password
+  provider (`start_path` = the canonical `/-/login`). External identities map to
+  accounts only by `(provider, subject)`, never by email.
+- No provider mount: sign-in providers (the demo example + third-party plugins)
+  register their own routes under `/-/{plugin}/...` via the ordinary Datasette
+  `register_routes` hook, wrapping each handler in `provider_gate`. A disabled
+  provider can never mint because `finish_login` re-checks the enabled bit, not
+  because of any central mount.
 - `routes/api.py`, `routes/pages.py` — endpoints and HTML shells.
 - `grantable.py` — which global actions are grantable + principal gating +
   config-grant display; `db.py` `capability_grants` table + grant/revoke/list.
@@ -42,6 +63,29 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
   the acl-admin bridge (F2); `datasette_acl_valid_actors` exposes accounts (F3).
   Frontend: `frontend/src/pages/capabilities`. datasette-paper is a dev dep used
   as the worked example (`datasette-paper-create`) in tests + screenshots.
+- `examples/datasette-accounts-demo-auth/` — a dev-only installable demo sign-in
+  provider (`demo`: subject + plaintext 4-digit PIN claimed on first use,
+  deliberately insecure, own `demo_auth_pins` table via `startup`) + its
+  README-as-tutorial (the
+  provider-author docs: contract, `configured()`, `provider_gate`, signed state,
+  token-hygiene patterns, security checklist). Wired as an editable path source
+  in the dev group (`[tool.uv.sources]`), so it is discovered via a real entry
+  point on every instance — `tests/test_demo_provider.py` drives the full
+  external path through it (rather than the pluggy fixture the other provider
+  tests use). Because it is installed, a disabled `demo` provider shows up in the
+  registry during the whole test suite; a couple of registry-exact assertions
+  filter it out. Screenshots (`just shots`) enable it to render the provider
+  button + external-identity rows; no other provider is a screenshot dependency.
+- Real sign-in providers live in sibling repos (`../datasette-accounts-{github,
+  discord,bluesky}`, plans/auth2/ + wiki/auth2/repos.md): packaged plugins,
+  editable uv path source on this checkout, that import only the public provider
+  contract (`AuthProvider`, `ExternalIdentity`, `finish_login`, `make_state`/
+  `read_state`, `provider_gate`, `security`). That surface plus the
+  testing-blessed `get_registry`/`provider_source`/`STATE_COOKIE` +
+  `security.COOKIE_NAME`/`SIGN_NAMESPACE` is load-bearing — keep it stable.
+  `db`/`passwords`/`sessions` helpers are NOT part of that contract (plugin tests
+  should set up state via public routes/CLI). authlib is a bluesky-repo runtime
+  dep, not a core dep.
 
 ## Gotchas discovered during build
 - datasette-plugin-router does **not** dispatch by HTTP method: identical paths

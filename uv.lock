@@ -173,6 +173,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "datasette-accounts-demo-auth" },
     { name = "datasette-acl" },
     { name = "datasette-acl-share" },
     { name = "datasette-paper" },
@@ -196,6 +197,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "datasette-accounts-demo-auth", editable = "examples/datasette-accounts-demo-auth" },
     { name = "datasette-acl" },
     { name = "datasette-acl-share" },
     { name = "datasette-paper" },
@@ -203,6 +205,21 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff", specifier = ">=0.15.0" },
     { name = "solite", specifier = ">=0.0.1a36" },
+]
+
+[[package]]
+name = "datasette-accounts-demo-auth"
+version = "0.0.1"
+source = { editable = "examples/datasette-accounts-demo-auth" }
+dependencies = [
+    { name = "datasette" },
+    { name = "datasette-accounts" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "datasette", specifier = ">=1.0a23" },
+    { name = "datasette-accounts" },
 ]
 
 [[package]]

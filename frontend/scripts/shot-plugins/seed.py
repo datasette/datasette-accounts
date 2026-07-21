@@ -124,8 +124,60 @@ def startup(datasette):
         await internal.execute_write_fn(seed_messages)
         await internal.execute_write_fn(seed_login_attempts)
         await internal.execute_write_fn(seed_admin_audit)
+        await internal.execute_write_fn(seed_providers)
+        await internal.execute_write_fn(seed_identities)
 
     return inner
+
+
+# Enable the installed demo provider (examples/datasette-accounts-demo-auth,
+# discovered via its entry point) so the login page shows a "Continue with Demo
+# (dev only)" button, the Configuration page shows an enabled external-provider
+# row, and the account page can offer / list a linked identity. auth2 ships no
+# `samples/` — the demo provider is the only external provider the shots harness
+# relies on. Mirrors db.set_provider_enabled's row shape (explicit '1', absence
+# = disabled).
+def seed_providers(conn):
+    """Seed the demo provider's enabled + signups settings (idempotent)."""
+    db = Database(conn)
+    settings = db[accounts_db.SETTINGS]
+    for key, value in (
+        ("provider:demo:enabled", "1"),
+        ("provider:demo:signups", "auto"),
+    ):
+        # replace=True keeps this idempotent (the settings PK is `key`).
+        settings.insert(
+            {
+                "key": key,
+                "value": value,
+                "updated_at": _CREATED,
+                "updated_by": "u-admin",
+            },
+            pk="key",
+            replace=True,
+        )
+
+
+# A demo external identity linked to alice, so her account page's "Sign-in
+# methods" section shows a real linked-identity row (label resolved from the
+# live registry → "Demo (dev only)") alongside the password method.
+def seed_identities(conn):
+    """Seed one linked demo identity for alice (idempotent)."""
+    db = Database(conn)
+    identities = db[accounts_db.IDENTITIES]
+    if identities.exists() and identities.count > 0:
+        return  # already seeded
+    identities.insert(
+        {
+            "provider": "demo",
+            "subject": "demo-user-1",
+            "user_id": "u-alice",
+            "email": None,
+            "display_name": "Demo User",
+            "created_at": _CREATED,
+            "last_login_at": _LAST_SEEN,
+        }
+    )
 
 
 # Demo login-audit rows for the Login attempts admin page. A spread of outcomes
