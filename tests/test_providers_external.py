@@ -489,28 +489,29 @@ async def test_signups_auto_activates_and_mints(register_provider):
 
 
 # ==========================================================================
-# Link / step-up intents refuse until core-04 (unmatched identity)
+# Link / step-up intents never provision or mint (unmatched identity)
 # ==========================================================================
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("intent", ["link", "step-up"])
-async def test_link_intents_deferred_to_core04(register_provider, intent):
+async def test_link_intents_never_provision_or_mint(register_provider, intent):
     register_provider(ExtProvider())
     ds = await make_ds()
     await _enable(ds, "echo")
     await _signups(ds, "echo", "auto")  # would otherwise auto-provision
     # An unmatched identity under a link/step-up intent must NOT provision or
-    # mint here — those flows land in core-04. Nothing is created.
-    with pytest.raises(NotImplementedError):
-        await finish_login(
-            ds,
-            _FakeRequest(),
-            ExternalIdentity(provider="echo", subject="linksubj", username_hint="l"),
-            provider_key="echo",
-            response_mode="json",
-            state={"i": intent, "n": None},
-        )
+    # mint — the linking flows (core-04) refuse it (no live session / no owned
+    # identity), never fall through to the signups policy. Nothing is created.
+    resp = await finish_login(
+        ds,
+        _FakeRequest(),
+        ExternalIdentity(provider="echo", subject="linksubj", username_hint="l"),
+        provider_key="echo",
+        response_mode="json",
+        state={"i": intent, "n": None},
+    )
+    assert resp.status == 403
     internal = ds.get_internal_database()
     assert await db.get_identity(internal, "echo", "linksubj") is None
     assert await _session_count(ds) == 0
