@@ -31,10 +31,13 @@ def make_pending(db_path, username="applicant", password="password123"):
 
 
 def registration_setting(db_path):
+    # Self-registration migrated to the password provider's signups policy
+    # (auth-providers m009 / D5): the legacy 'registration_enabled' row became
+    # 'provider:password:signups', with 'approval' standing in for the old '1'.
     rows = query(
         db_path,
         "SELECT value FROM datasette_accounts_settings "
-        "WHERE key = 'registration_enabled'",
+        "WHERE key = 'provider:password:signups'",
     )
     return rows[0]["value"] if rows else None
 
@@ -88,7 +91,7 @@ def test_registration_on_off_flip_audit_and_liveness(tmp_path):
     result = run("registration", "on", "-y", "-i", db)
     assert result.exit_code == 0
     assert "Enabled self-registration." in result.output
-    assert registration_setting(db) == "1"
+    assert registration_setting(db) == "approval"
     assert "Self-registration is on." in run("registration", "status", "-i", db).output
 
     # The toggle is live: the register endpoint accepts a request end to end.
