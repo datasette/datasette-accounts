@@ -944,6 +944,24 @@ async def set_registration_enabled(db, actor_id, enabled):
     return await db.execute_write_fn(write)
 
 
+async def get_provider_enabled(db, key):
+    """Whether the auth provider ``key`` is currently enabled.
+
+    Settings key ``provider:{key}:enabled`` ('1' / '0'). An absent row means the
+    built-in password provider is enabled and every external provider is
+    disabled — installing a provider package changes nothing until an admin
+    flips it (plans/auth-providers/02-design.md §7). Read per-request by
+    ``providers.provider_gate`` (and, in core-03, by ``finish_login``'s external
+    re-check), a single-row PK lookup like the other runtime settings.
+    """
+    value = await db.execute_fn(
+        lambda conn: gen.select_setting(conn, key=f"provider:{key}:enabled")
+    )
+    if value is None:
+        return key == "password"
+    return value == "1"
+
+
 async def register_user(db, username, password_hash, ip):
     """Self-service registration: insert a pending account + audit row.
 
