@@ -38,23 +38,12 @@ from ..passwords import (
     check_password_length,
     generate_password,
 )
+from ..providers import clear_stale_core_actor_cookie, mint_session
 from ..router import require_actor, require_admin, require_csrf, router
-from ..security import COOKIE_NAME, SIGN_NAMESPACE
+from ..security import COOKIE_NAME
 from ..sessions import current_token_sha, list_own_sessions, mint_token, token_sha256
 
 GENERIC_LOGIN_ERROR = "Invalid username or password"
-
-
-def _set_session_cookie(datasette, request, response, raw_token):
-    response.set_cookie(
-        COOKIE_NAME,
-        datasette.sign(raw_token, SIGN_NAMESPACE),
-        max_age=security.config(datasette, "session_ttl_days") * 86400,
-        path="/",
-        httponly=True,
-        samesite="lax",
-        secure=security.should_secure_cookie(datasette, request),
-    )
 
 
 # --------------------------------------------------------------------------
@@ -117,26 +106,8 @@ async def authenticate(
             await db.register_failed_attempt(internal, user["id"], threshold, minutes)
         return Response.json({"ok": False, "error": GENERIC_LOGIN_ERROR}, status=401)
 
-    # Success.
-    await db.record_login_success(internal, user["id"])
-    raw_token = mint_token()
-    await db.create_session(
-        internal,
-        user["id"],
-        token_sha256(raw_token),
-        security.config(datasette, "session_ttl_days"),
-        request.headers.get("user-agent"),
-        ip,
-    )
-    await db.delete_expired_sessions(internal)
-    await db.purge_expired_password_tokens(internal)
-    await db.purge_login_audit(
-        internal, security.config(datasette, "audit_retention_days")
-    )
-    await db.purge_admin_audit(
-        internal, security.config(datasette, "admin_audit_retention_days")
-    )
-
+    # Success: mint through the shared chokepoint, then the periodic
+    # housekeeping.
     base_url = datasette.setting("base_url") or "/"
     redirect = security.validate_next(body.next, base_url)
     response = Response.json(
@@ -146,19 +117,16 @@ async def authenticate(
             "must_change_password": bool(user["must_change_password"]),
         }
     )
-    _set_session_cookie(datasette, request, response, raw_token)
-    _clear_stale_core_actor_cookie(request, response)
+    await mint_session(datasette, request, response, user)
+    await db.delete_expired_sessions(internal)
+    await db.purge_expired_password_tokens(internal)
+    await db.purge_login_audit(
+        internal, security.config(datasette, "audit_retention_days")
+    )
+    await db.purge_admin_audit(
+        internal, security.config(datasette, "admin_audit_retention_days")
+    )
     return response
-
-
-def _clear_stale_core_actor_cookie(request, response):
-    # This plugin owns auth via its own session cookie, but a leftover core
-    # `ds_actor` cookie (e.g. an old root login) makes Datasette's base
-    # template render its own Log out button next to ours. Signing in or out
-    # through our flows asserts accounts-based identity, so drop the stale
-    # core cookie whenever it is present.
-    if "ds_actor" in request.cookies:
-        response.set_cookie("ds_actor", "", max_age=0, path="/", expires=0)
 
 
 @router.POST("/-/logout/perform$")
@@ -170,7 +138,7 @@ async def logout(datasette, request):
         await db.delete_session(internal, token_sha)
     response = Response.json({"ok": True, "redirect": "/"})
     response.set_cookie(COOKIE_NAME, "", max_age=0, path="/", expires=0)
-    _clear_stale_core_actor_cookie(request, response)
+    clear_stale_core_actor_cookie(request, response)
     return response
 
 
@@ -284,19 +252,8 @@ async def set_password_complete(
 
     # Otherwise: the link just proved control of the account — sign them in
     # exactly like a successful authenticate() call.
-    await db.record_login_success(internal, user["id"])
-    raw_token = mint_token()
-    await db.create_session(
-        internal,
-        user["id"],
-        token_sha256(raw_token),
-        security.config(datasette, "session_ttl_days"),
-        request.headers.get("user-agent"),
-        ip,
-    )
     response = Response.json({"ok": True, "redirect": "/"})
-    _set_session_cookie(datasette, request, response, raw_token)
-    _clear_stale_core_actor_cookie(request, response)
+    await mint_session(datasette, request, response, user)
     return response
 
 
