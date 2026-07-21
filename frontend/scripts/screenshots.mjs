@@ -340,9 +340,7 @@ function buildShots(browser) {
       await page
         .getByRole("heading", { name: "Configuration" })
         .waitFor({ timeout: 15_000 });
-      await page
-        .getByRole("heading", { name: "Self-registration" })
-        .waitFor();
+      await page.getByRole("heading", { name: "Self-registration" }).waitFor();
       await page
         .getByRole("heading", { name: "Homepage sign-in prompt" })
         .waitFor();

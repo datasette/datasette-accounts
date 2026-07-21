@@ -240,7 +240,7 @@ def seed_admin_audit(conn):
 # banner, and the login page shows the help/contact note.
 _MESSAGES = {
     "homepage_signed_out": (
-        'Sign in to browse the internal datasets. Need access? '
+        "Sign in to browse the internal datasets. Need access? "
         '<a href="mailto:data-team@example.com">Email the data team</a>.'
     ),
     "login_help": (
@@ -303,7 +303,9 @@ def seed_capabilities(conn):
     # Ensure datasette-acl's tables exist regardless of plugin startup order
     # (so the seeded group grant is deterministic), when acl is installed.
     try:
-        from datasette_acl.internal_migrations import internal_migrations as acl_migrations
+        from datasette_acl.internal_migrations import (
+            internal_migrations as acl_migrations,
+        )
 
         acl_migrations.apply(db)
     except ImportError:

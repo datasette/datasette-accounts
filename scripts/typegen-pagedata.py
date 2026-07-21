@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Export Pydantic page-data models as JSON Schema for TypeScript generation."""
+
 import json
 from pathlib import Path
 
