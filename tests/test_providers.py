@@ -611,18 +611,6 @@ async def test_refuse_clears_state_but_not_session():
     assert not any(h.startswith(COOKIE_NAME + "=") for h in resp._set_cookie_headers)
 
 
-@pytest.mark.asyncio
-async def test_finish_login_external_identity_not_implemented_yet():
-    # core-01 declares the ExternalIdentity shape for signature stability but the
-    # external login path arrives in core-03.
-    from datasette_accounts.providers import ExternalIdentity
-
-    ds = await make_ds()
-    with pytest.raises(NotImplementedError):
-        await finish_login(
-            ds,
-            _FakeRequest(),
-            ExternalIdentity(provider="echo", subject="s-1"),
-            provider_key="echo",
-            response_mode="json",
-        )
+# The ExternalIdentity termination (mapping, provisioning, signups policy, and
+# the enabled re-check) is exercised end-to-end in tests/test_providers_external.py
+# (core-03); core-01/02 here cover only the LocalIdentity path.
