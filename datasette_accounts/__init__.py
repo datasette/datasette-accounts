@@ -5,10 +5,11 @@ import click
 import markupsafe
 from datasette import hookimpl
 from datasette.permissions import Action, PermissionSQL
+from datasette.plugins import pm
 from datasette_vite import vite_entry
 from sqlite_utils import Database as SqliteUtilsDatabase
 
-from . import db, messages, security
+from . import db, hookspecs as _provider_hookspecs, messages, security
 from .internal_migrations import internal_migrations
 from .passwords import hash_password
 from .router import ADMIN_ACTION, router
@@ -22,6 +23,11 @@ from .routes import api, pages  # noqa: E402
 from .seeds import datasette_user_profile_seeds  # noqa: E402,F401
 
 _ = (api, pages)
+
+# Publish the auth-provider hookspec at import time so provider plugins can
+# implement it (the datasette-user-profiles pattern). Runs once per process
+# (module import is cached), mirroring datasette-user-profiles.
+pm.add_hookspecs(_provider_hookspecs)
 
 
 @hookimpl
@@ -180,7 +186,51 @@ def startup(datasette):
             internal, security.config(datasette, "admin_audit_retention_days")
         )
 
+        await _build_provider_registry(datasette)
+
     return inner
+
+
+async def _build_provider_registry(datasette):
+    """Collect + validate the auth-provider registry once at startup (design §3).
+
+    The built-in password provider is always first, then any provider plugins
+    contribute via the ``datasette_accounts_auth_providers`` hook. Duplicate or
+    invalid keys / start_paths / branding fail startup loudly — a misconfigured
+    auth surface must not boot half-working. Stored on the datasette object for
+    per-request readers (``providers.get_registry``).
+    """
+    from . import providers as providers_mod
+    from .providers.password import PasswordProvider
+
+    collected = []
+    for result in pm.hook.datasette_accounts_auth_providers(datasette=datasette):
+        # A provider hook may return a list of AuthProviders or an awaitable of
+        # one (per the hookspec) — resolve the awaitable before extending.
+        if callable(getattr(result, "__await__", None)):
+            result = await result
+        collected.extend(result or [])
+    registry = {}
+    for provider in [PasswordProvider(), *collected]:
+        # "password" matches KEY_RE like any other key, so it is validated the
+        # same way; the duplicate check below still protects the built-in.
+        if not providers_mod.KEY_RE.match(provider.key):
+            raise RuntimeError(f"Invalid auth provider key: {provider.key!r}")
+        if provider.key in registry:
+            raise RuntimeError(f"Duplicate auth provider key: {provider.key!r}")
+        # Providers own their routes (design D3b): start_path is where the login
+        # button + link forwards point, so it must be a real absolute path.
+        start_path = getattr(provider, "start_path", None)
+        if not start_path or not start_path.startswith("/"):
+            raise RuntimeError(
+                f"Auth provider {provider.key!r} has an invalid "
+                f"start_path: {start_path!r}"
+            )
+        # Optional login-button branding (icon SVG / hex brand_color) — malformed
+        # values fail startup just like a bad start_path.
+        providers_mod.validate_branding(provider)
+        registry[provider.key] = provider
+    setattr(datasette, providers_mod.REGISTRY_ATTR, registry)
 
 
 async def resolve_actor(datasette, request):
