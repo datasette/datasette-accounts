@@ -1,0 +1,25 @@
+[project]
+name = "accounts-providers-fly"
+version = "0.1.0"
+description = "Datasette + datasette-accounts (branch wheel) with discord/github/bluesky sign-in samples, on Fly.io"
+requires-python = ">=3.13"
+dependencies = [
+    "datasette>=1.0a23",
+    # Built from the local datasette-accounts checkout by scripts/sync.sh —
+    # the filename below must match the version in that checkout's pyproject.
+    "datasette-accounts",
+    # bluesky-auth sample needs authlib (DPoP JWTs); discord/github only httpx,
+    # which datasette already depends on.
+    "authlib>=1.3",
+    "datasette-paper>=0.0.2a5",
+    # ACL UI for per-user/group database visibility under --default-deny;
+    # accounts admins get acl-admin via the plugin's grant_acl_admin bridge.
+    "datasette-acl",
+]
+
+[tool.uv]
+package = false
+prerelease = "allow"
+
+[tool.uv.sources]
+datasette-accounts = { path = "wheels/datasette_accounts-0.0.1a2-py3-none-any.whl" }

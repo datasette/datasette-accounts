@@ -387,12 +387,44 @@ def get_registry(datasette: Datasette) -> dict[str, AuthProvider]:
     return getattr(datasette, REGISTRY_ATTR, {})
 
 
+def provider_label(datasette: Datasette, key: str) -> str:
+    """Display label for a provider key, falling back to the key when the
+    provider package is no longer installed (a linked identity outliving its
+    provider still renders)."""
+    provider = get_registry(datasette).get(key)
+    return provider.label if provider is not None else key
+
+
 def provider_source(provider: AuthProvider) -> str:
     """The provider's source package — the top-level package of its class's
     module (e.g. "datasette_accounts" for the built-in password provider, or the
     third-party plugin's distribution package for an external provider). Shown in
     the CLI `providers` listing."""
     return (type(provider).__module__ or "").split(".")[0]
+
+
+def external_provider_keys(datasette: Datasette) -> list[str]:
+    """Every installed external provider key (registry order, `password`
+    excluded) — the universe the account + login surfaces filter to their
+    'enabled' / 'linkable' subsets."""
+    return [k for k in get_registry(datasette) if k != "password"]
+
+
+def to_identity_rows(
+    datasette: Datasette, raw_identities: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Map db identity dicts → IdentityRow-shaped dicts, resolving the display
+    label from the live registry. Shared by the account + admin surfaces."""
+    return [
+        {
+            "provider": i["provider"],
+            "label": provider_label(datasette, i["provider"]),
+            "subject": i["subject"],
+            "created_at": i["created_at"],
+            "last_login_at": i.get("last_login_at"),
+        }
+        for i in raw_identities
+    ]
 
 
 def provider_start_path(datasette: Datasette, key: str) -> str:

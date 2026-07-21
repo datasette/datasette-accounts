@@ -924,3 +924,32 @@ async def test_link_start_password_less_unlinked_step_up_400(register_providers)
     assert r.status_code == 400
     assert "start_url" not in r.json()
     assert not _state_cookie_from(r)
+
+
+# ==========================================================================
+# Admin list API surfaces linked identities (core-06 presentation backend)
+# ==========================================================================
+
+
+@pytest.mark.asyncio
+async def test_admin_list_includes_identities(register_providers):
+    register_providers([LinkProvider("echo", "Echo")])
+    ds = await make_ds()
+    await _enable(ds, "echo")
+    uid = await insert_user(ds, "alice")
+    await _link(ds, uid, "echo", "gh-1")
+    admin_id = await make_admin(ds, "admin")
+    admin_sess = await _session_cookie(ds, admin_id)
+
+    r = await ds.client.post(
+        "/-/admin/api/list",
+        content="{}",
+        headers=JSON,
+        cookies={COOKIE_NAME: admin_sess},
+    )
+    users = {u["username"]: u for u in r.json()["users"]}
+    # alice's linked identity is present, with the registry-resolved label.
+    assert [i["subject"] for i in users["alice"]["identities"]] == ["gh-1"]
+    assert users["alice"]["identities"][0]["label"] == "Echo"
+    # A password-only account carries an empty identities list.
+    assert users["admin"]["identities"] == []

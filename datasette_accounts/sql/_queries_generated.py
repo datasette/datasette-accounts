@@ -43,6 +43,7 @@ class SessionRow:
     last_seen_at: str
     user_agent: str | None
     ip: str | None
+    provider: str
 
 
 @dataclass
@@ -54,6 +55,12 @@ class IdentityRow:
     display_name: str | None
     created_at: str
     last_login_at: str | None
+
+
+@dataclass
+class CountIdentitiesByProviderRow:
+    provider: str
+    n: Any
 
 
 @dataclass
@@ -432,7 +439,8 @@ WHERE id = $user_id::text;
 
 def select_session(conn: sqlite3.Connection, token_sha256: str) -> SessionRow | None:
     sql = """\
-SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip
+SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip,
+       provider
 FROM datasette_accounts_sessions
 WHERE token_sha256 = $token_sha256::text;
 """
@@ -444,7 +452,8 @@ WHERE token_sha256 = $token_sha256::text;
 
 def list_sessions_for_user(conn: sqlite3.Connection, actor_id: str) -> list[SessionRow]:
     sql = """\
-SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip
+SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip,
+       provider
 FROM datasette_accounts_sessions
 WHERE actor_id = $actor_id::text
 ORDER BY last_seen_at DESC;
@@ -579,6 +588,19 @@ def count_identities_for_user(conn: sqlite3.Connection, user_id: str) -> Any | N
     cursor = conn.execute(sql, params)
     row = cursor.fetchone()
     return row[0] if row is not None else None
+
+
+def count_identities_by_provider(
+    conn: sqlite3.Connection,
+) -> list[CountIdentitiesByProviderRow]:
+    sql = """\
+SELECT provider, COUNT(*) AS n
+FROM datasette_accounts_identities
+GROUP BY provider;
+"""
+    params: dict[str, Any] = {}
+    cursor = conn.execute(sql, params)
+    return [CountIdentitiesByProviderRow(*row) for row in cursor.fetchall()]
 
 
 def insert_identity(

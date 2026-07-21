@@ -257,6 +257,43 @@
     resetCred = null;
   }
 
+  // Sign-in methods (identities) modal — admin view + unlink (design §6). The
+  // provenance badge on the approval queue reuses the same identity data:
+  // a pending account's linked identity, or "password" when it self-registered.
+  type Identity = NonNullable<User["identities"]>[number];
+  let identityTarget = $state<User | null>(null);
+  let identityError = $state("");
+
+  function identityLabel(u: User): string {
+    const first = (u.identities ?? [])[0];
+    return first ? first.label : "password";
+  }
+  function viaPassword(u: User): boolean {
+    return (u.identities ?? []).length === 0;
+  }
+
+  function openIdentities(u: User) {
+    identityTarget = u;
+    identityError = "";
+  }
+
+  async function unlinkIdentity(u: User, i: Identity) {
+    if (!window.confirm(`Unlink ${i.label} from “${u.username}”?`)) return;
+    identityError = "";
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(
+      "/-/admin/api/unlink-identity",
+      { target_id: u.id, provider: i.provider, subject: i.subject },
+    );
+    if (!ok || !data.ok) {
+      // Render the strand-guard 400 verbatim ("Reset their password first.").
+      identityError = data.error || "Could not unlink.";
+      return;
+    }
+    await refresh();
+    // Re-point the open modal at the refreshed user so its list updates.
+    identityTarget = users.find((x) => x.id === u.id) ?? null;
+  }
+
   // Set-expiry modal (row-menu "Set expiry…"): quick relative presets or an
   // exact local date-time; "Clear expiry" when a deadline is set.
   let expiryTarget = $state<User | null>(null);
@@ -347,7 +384,14 @@
         {#each pending as u (u.id)}
           <li>
             <div class="req">
-              <span class="uname">{u.username}</span>
+              <span class="uname">
+                {u.username}
+                {#if viaPassword(u)}
+                  <span class="badge badge-pw">password</span>
+                {:else}
+                  <span class="badge badge-provider">{identityLabel(u)}</span>
+                {/if}
+              </span>
               <span class="requested">Requested {fmtDate(u.created_at)}</span>
             </div>
             <div class="verdict">
@@ -457,6 +501,9 @@
                       <button role="menuitem" onclick={() => pick(() => mintLink(u, "reset"))}>Reset link…</button>
                     {/if}
                     <button role="menuitem" onclick={() => pick(() => openReset(u))}>Reset password…</button>
+                    {#if (u.identities ?? []).length > 0}
+                      <button role="menuitem" onclick={() => pick(() => openIdentities(u))}>Sign-in methods…</button>
+                    {/if}
                     <button role="menuitem" onclick={() => pick(() => openSessions(u))}>Active sessions…</button>
                     <a role="menuitem" href="/-/admin/login-attempts?username={encodeURIComponent(u.username)}">Login attempts…</a>
                     <a role="menuitem" href="/-/admin/audit?username={encodeURIComponent(u.username)}">History…</a>
@@ -712,12 +759,55 @@
   {/if}
 </Modal>
 
+<!-- Sign-in methods (admin identity view + unlink) -->
+<Modal
+  open={identityTarget !== null}
+  onclose={() => (identityTarget = null)}
+  title="Sign-in methods"
+>
+  <p class="lead"><strong>{identityTarget?.username}</strong></p>
+  {#if identityError}<p class="msg msg-error">{identityError}</p>{/if}
+  {#if (identityTarget?.identities ?? []).length === 0}
+    <p class="muted">No linked external sign-in methods.</p>
+  {:else}
+    <ul class="sessions">
+      {#each identityTarget?.identities ?? [] as i (i.provider + i.subject)}
+        <li>
+          <div class="sinfo">
+            <div class="stime">
+              <span class="badge badge-provider">{i.label}</span>
+              subject <code>{i.subject}</code>
+            </div>
+            <div class="smeta">linked {fmtDate(i.created_at)}</div>
+          </div>
+          <button
+            class="btn-sm btn-danger"
+            onclick={() => identityTarget && unlinkIdentity(identityTarget, i)}
+          >
+            Unlink
+          </button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</Modal>
+
 <style>
   .bar {
     margin-bottom: 1rem;
   }
   .bar h1 {
     margin: 0;
+  }
+  .badge-pw {
+    color: var(--ok);
+  }
+  .badge-provider {
+    color: var(--acc);
+  }
+  .uname .badge {
+    margin-left: 0.5rem;
+    font-weight: 600;
   }
 
   /* Awaiting-approval queue — pinned above the main table with a warn accent

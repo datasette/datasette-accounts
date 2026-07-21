@@ -227,12 +227,14 @@ WHERE id = $user_id::text;
 -- ============================================================================
 
 -- name: selectSession :row -> SessionRow
-SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip
+SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip,
+       provider
 FROM datasette_accounts_sessions
 WHERE token_sha256 = $token_sha256::text;
 
 -- name: listSessionsForUser :rows -> SessionRow
-SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip
+SELECT token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip,
+       provider
 FROM datasette_accounts_sessions
 WHERE actor_id = $actor_id::text
 ORDER BY last_seen_at DESC;
@@ -300,6 +302,15 @@ ORDER BY created_at;
 -- password-less account). Sibling of countOtherEnabledAdmins.
 -- name: countIdentitiesForUser :value
 SELECT COUNT(*) FROM datasette_accounts_identities WHERE user_id = $user_id::text;
+
+-- Linked-identity count per provider, for the Configuration page's "Sign-in
+-- providers" table. Providers with no linked identities (including the built-in
+-- password provider, which has no identities rows — D4) are simply absent from
+-- the result; the caller defaults them to 0.
+-- name: countIdentitiesByProvider :rows
+SELECT provider, COUNT(*) AS n
+FROM datasette_accounts_identities
+GROUP BY provider;
 
 -- Link a (provider, subject) to an account. last_login_at is NULL until the
 -- first sign-in *through* the link (touchIdentityLastLogin stamps it); a link

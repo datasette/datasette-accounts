@@ -57,6 +57,7 @@ from ..providers import (
     mint_session,
     provider_configured,
     provider_start_path,
+    to_identity_rows,
 )
 from ..providers import password
 from ..router import require_actor, require_admin, require_csrf, router
@@ -461,12 +462,22 @@ def _resolve_password(datasette, provided, generate):
     return provided, False, None
 
 
+def _user_row(datasette, row):
+    """Build a UserRow from a db.list_user_rows dict, resolving each linked
+    identity's display label from the live provider registry. The single
+    assembly point shared by the admin page shell and the list API so they
+    can't drift (mirrors db.list_user_rows' role for the rest of the row)."""
+    row = dict(row)
+    idents = to_identity_rows(datasette, row.pop("identities", []))
+    return UserRow(**row, identities=idents)
+
+
 @router.POST("/-/admin/api/list$")
 @require_admin
 async def admin_list(datasette, request):
     internal = datasette.get_internal_database()
     rows = await db.list_user_rows(internal)
-    users = [UserRow(**r).model_dump() for r in rows]
+    users = [_user_row(datasette, r).model_dump() for r in rows]
     return Response.json({"ok": True, "users": users})
 
 
