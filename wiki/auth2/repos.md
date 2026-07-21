@@ -8,15 +8,14 @@ reference branches (diff-verified at review).
 
 | Repo | Commit | Port source | Suite status |
 |------|--------|-------------|--------------|
-| ../datasette-accounts-github | `38d90d8` | bluesky-auth:samples/github-auth | not yet run |
-| ../datasette-accounts-discord | `5545c5c` | bluesky-auth:samples/discord-auth | not yet run |
-| ../datasette-accounts-bluesky | `c03466b` | bluesky-auth:samples/bluesky-auth | not yet run |
+| ../datasette-accounts-github | `38d90d8` | bluesky-auth:samples/github-auth | **10 passed** (2026-07-21, vs core @ b96b020) |
+| ../datasette-accounts-discord | `5545c5c` | bluesky-auth:samples/discord-auth | **13 passed** (same) |
+| ../datasette-accounts-bluesky | `c03466b` | bluesky-auth:samples/bluesky-auth | **38 passed** (same; authlib pre-2.0 deprecation warning — watch on authlib bumps) |
 
-**Suites are runnable once core-06 lands** (imports need ≤ core-05's
-surface: `set_provider_enabled`/`set_provider_signups` + `provider_source`
-arrived in core-05; the editable dep reads this checkout live, so don't run
-them while a train agent is mid-edit). First green run = the phase-2
-integration check; record results here.
+**First green run done 2026-07-21** against the train @ core-06 — the
+phase-2 integration check passed on the first attempt, incl. bluesky's
+native entry-point `startup`. The editable dep reads this checkout live, so
+never re-run suites while a train agent is mid-edit.
 
 ## API-pressure lists (imports beyond the public provider contract)
 

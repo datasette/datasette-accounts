@@ -192,7 +192,9 @@ async function loginContext(browser, username, nextPath, viewport = VIEWPORT) {
 // selector (never a bare sleep for load), then screenshots.
 function buildShots(browser) {
   return {
-    // The login form (unauthenticated).
+    // The login form (unauthenticated), including the enabled demo provider's
+    // "Continue with Demo (dev only)" button (seed.py enables the installed demo
+    // provider).
     login: async () => {
       const ctx = await makeContext(browser);
       const page = await ctx.newPage();
@@ -201,6 +203,8 @@ function buildShots(browser) {
         .getByRole("heading", { name: "Log in" })
         .waitFor({ timeout: 15_000 });
       await page.getByLabel("Username").waitFor();
+      // The external-provider sign-in button (demo provider, enabled in seed.py).
+      await page.getByText("Continue with Demo (dev only)").waitFor();
       // The admin-authored login help/contact note (seeded in seed.py).
       await page.getByText("Trouble signing in?").waitFor();
       await freezeVolatile(page);
@@ -328,11 +332,11 @@ function buildShots(browser) {
       await ctx.close();
     },
 
-    // The Configuration admin page: the self-registration toggle + the
-    // admin-editable site messages (homepage sign-in prompt + login
-    // help/contact), seeded with demo copy. Only the built-in password provider
-    // is installed in the shots harness — external provider rows land with the
-    // demo provider (core-07) / the real sample providers.
+    // The Configuration admin page: the Sign-in providers section (the built-in
+    // password provider + the enabled demo provider row, seeded in seed.py) and
+    // the admin-editable site messages (homepage sign-in prompt + login
+    // help/contact), seeded with demo copy. auth2 ships no `samples/`; the
+    // installed demo provider is the only external provider the harness enables.
     config: async () => {
       const { ctx, page } = await loginContext(
         browser,
@@ -403,8 +407,11 @@ function buildShots(browser) {
       await ctx.close();
     },
 
-    // The account page's Sessions tab (hash-routed): the user's own sessions
-    // with per-session revoke + log-out-others.
+    // The account page's "Sign-in methods" tab (hash-routed #sessions): the
+    // user's own sessions (per-session revoke + log-out-others) plus the linked
+    // external identities and the providers still available to link — alice has
+    // one linked demo identity seeded, and the enabled demo provider is offered
+    // as a link target.
     "account-sessions": async () => {
       const { ctx, page } = await loginContext(
         browser,
@@ -412,6 +419,8 @@ function buildShots(browser) {
         "/-/account#sessions",
       );
       await page.getByText("This device").waitFor({ timeout: 15_000 });
+      // The seeded linked demo identity row.
+      await page.getByText("Demo (dev only)").first().waitFor();
       await freezeVolatile(page);
       await shotClipped(page, out("account-sessions"));
       await ctx.close();

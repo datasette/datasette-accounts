@@ -4,17 +4,10 @@ Update as items complete; move done items to the bottom with their commit.
 
 ## Now / next (blocking the train)
 
-1. **core-06** — building (background agent). Then: review (frontend +
-   page-data), commit, run `just shots` state check.
-2. **First plugin-suite run** (github/discord/bluesky) — right after
-   core-06 commits; record results in repos.md. Don't run mid-agent-edit.
-3. **core-07** — demo package + provider-author docs; resolves the
-   API-pressure lists (repos.md) into promote/bless/rework decisions.
-   Dispatchable in parallel with the hardening agents (different dirs).
-4. **repo-05 hardening batch** — per plans/auth2/tickets/repo-05-hardening.md;
-   bluesky SSRF guard first; each repo re-tested.
-5. **Push 05/06/07, open PRs #16–18** (bases: #15's branch, then chain).
-6. **GHA pass**: `gh pr checks` on all seven; fix failures; rebase train
+1. **core-07** — building (background agent): demo package +
+   provider-author docs; resolves the API-pressure lists (repos.md) into
+   promote/bless/rework decisions. Then review, commit, push, PR #18.
+2. **GHA pass**: `gh pr checks` on all seven; fix failures; rebase train
    with `--update-refs`; force-push all branches together. (User asked for
    this explicitly once all drafts are in.)
 
@@ -41,6 +34,8 @@ store for bluesky (enables posting, silent re-sign-in, revocation).
 ## Done
 
 - Plugin repos scaffolded + committed (38d90d8 / 5545c5c / c03466b)
-- core-01…05 committed (12020ce / 72f24b4 / 3011abf / 20065db / 9e0c63d)
-- PRs #12–15 opened; #10/#11 closed w/ pointers; origin/main pushed
-- Platform research ×3 → hardening ticket
+- core-01…06 committed (12020ce / 72f24b4 / 3011abf / 20065db / 9e0c63d /
+  b96b020); PRs #12–17 opened; #10/#11 closed w/ pointers; origin/main pushed
+- First plugin-suite run: ALL GREEN vs core @ b96b020 (10/13/38)
+- Platform research ×3 → repo-05 hardening COMPLETE: bluesky 711a057
+  (SSRF guard, 70 tests), github 10f655e (13), discord 90566b4 (17)
