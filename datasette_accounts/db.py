@@ -216,6 +216,13 @@ async def list_user_rows(db):
                     "link_created_by": (
                         (m.created_by_username or m.created_by) if m else None
                     ),
+                    # Raw identity dicts (no display label — that's resolved from
+                    # the provider registry in the route layer, which db.py can't
+                    # see). Empty for a password-only account.
+                    "identities": [
+                        dataclasses.asdict(i)
+                        for i in gen.list_identities_for_user(conn, user_id=u.id)
+                    ],
                 }
             )
         return rows
@@ -1268,6 +1275,15 @@ async def list_identities(db, user_id):
         lambda conn: gen.list_identities_for_user(conn, user_id=user_id)
     )
     return [dataclasses.asdict(r) for r in rows]
+
+
+async def count_identities_by_provider(db):
+    """Map of provider key → count of linked identities, for the Configuration
+    providers table. Providers with no linked identities (including the built-in
+    password provider, which has no identities rows — D4) are simply absent; the
+    caller defaults them to 0."""
+    rows = await db.execute_fn(gen.count_identities_by_provider)
+    return {r.provider: r.n for r in rows}
 
 
 async def touch_identity_login(db, provider, subject):

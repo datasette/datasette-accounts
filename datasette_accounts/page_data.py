@@ -10,6 +10,35 @@ from pydantic import BaseModel
 # --------------------------------------------------------------------------
 
 
+class IdentityRow(BaseModel):
+    # One external sign-in identity linked to an account (design §6). `subject`
+    # is the IdP's stable id (never an email); `label` is the provider's display
+    # label resolved from the live registry (falls back to the provider key when
+    # the provider package is no longer installed).
+    provider: str
+    label: str
+    subject: str
+    created_at: str
+    last_login_at: Optional[str] = None
+
+
+class ProviderButton(BaseModel):
+    # One enabled external sign-in provider, rendered on the login page as a
+    # "Continue with {label}" button (design §9). `start_url` is a full-page
+    # navigation target (the redirect-based flow's entry), already carrying the
+    # page's validated `next`. Descriptors only (D10) — the optional branding
+    # below is declarative data from the descriptor, not provider-owned HTML.
+    key: str
+    label: str
+    start_url: str
+    # Inline <svg> element (startup-validated shape), rendered inside the
+    # button; None → text-only button.
+    icon: Optional[str] = None
+    # Hex colour (startup-validated) for the button background (white text);
+    # None → the neutral default button style.
+    brand_color: Optional[str] = None
+
+
 class LoginPageData(BaseModel):
     next: str = "/"
     # Optional admin-authored help/contact note (plain text), "" when unset.
@@ -17,6 +46,13 @@ class LoginPageData(BaseModel):
     # True while self-registration is open (the runtime DB toggle) — shows the
     # "Request an account" link under the form. See plans/self-registration.
     allow_register: bool = False
+    # True while the built-in password provider is enabled (the runtime DB
+    # toggle). When false, the page renders no username/password form — see
+    # plans/auth-providers. Enabled by default (absent settings row).
+    password_enabled: bool = True
+    # Enabled external providers, in registry order — the "Continue with …"
+    # buttons below the form (or the whole page when password is disabled).
+    providers: List[ProviderButton] = []
 
 
 class RegisterPageData(BaseModel):
@@ -46,6 +82,10 @@ class UserRow(BaseModel):
     # Minting admin's username, falling back to the raw actor id for synthetic
     # actors ("root", "cli:$USER") or a since-deleted account.
     link_created_by: Optional[str] = None
+    # External sign-in identities linked to this account (empty for a
+    # password-only account). Populated on the admin surfaces (design §6) so an
+    # admin can see and unlink an account's SSO methods.
+    identities: List[IdentityRow] = []
     created_at: str
     # None until the first successful sign-in — the account is still "pending".
     last_login_at: Optional[str] = None
@@ -72,9 +112,22 @@ class OwnSessionRow(BaseModel):
     last_seen_at: str
     user_agent: Optional[str] = None
     ip: Optional[str] = None
+    # Which sign-in provider minted this session (provenance, design §7):
+    # "password" for the built-in flow, else the external provider's key.
+    # Rendered as a small "Signed in via" badge in the sessions table.
+    provider: str = "password"
     # True for the session the viewer is currently browsing with (computed
     # server-side by comparing token_sha256 against the request's own cookie).
     current: bool = False
+
+
+class LinkableProvider(BaseModel):
+    # An enabled external provider the account has NOT yet linked — offered as a
+    # "Link…" button in the account's Sign-in methods section (design §6). Both
+    # the key (sent to the link-start API) and the display label are carried so
+    # the button can read "Link Okta…" without a second registry round-trip.
+    key: str
+    label: str
 
 
 class AccountPageData(BaseModel):
@@ -85,6 +138,15 @@ class AccountPageData(BaseModel):
     # Omitted (stays []) during the forced-password-change state — the account
     # page renders password-only until the account is in its normal state.
     sessions: List[OwnSessionRow] = []
+    # The account's linked external sign-in methods (design §6, "Sign-in
+    # methods"). Empty for a password-only account or during forced change.
+    identities: List[IdentityRow] = []
+    # Enabled external providers this account has NOT yet linked — the "Link…"
+    # buttons to offer ({key, label}). Empty during forced change.
+    linkable_providers: List[LinkableProvider] = []
+    # False when the account has no usable password (SSO-only). Drives whether
+    # linking asks for a password (step-up) or names an already-linked provider.
+    has_password: bool = True
 
 
 # --- Capabilities (F1) ---
@@ -143,13 +205,42 @@ class SiteMessageSlot(BaseModel):
     body: str = ""
 
 
+class ProviderAdminRow(BaseModel):
+    # One installed sign-in provider, as shown in the Configuration page's
+    # "Sign-in providers" section (design §9). See plans/auth-providers.
+    key: str
+    label: str
+    # Provider package name — the top-level package of the provider class's
+    # module (e.g. "datasette_accounts" for the built-in password provider).
+    source: str
+    # True for the built-in password provider (key == "password").
+    builtin: bool
+    # Runtime enabled bit (design §7): password defaults enabled, external
+    # providers default disabled until an admin flips them on.
+    enabled: bool
+    # Deployment state: is the provider ready to authenticate (credentials/config
+    # present)? Distinct from `enabled` — an admin may pre-enable before deploying
+    # creds. False here → the login button + link targets hide it, and the admin
+    # table shows a "not configured" warning chip. Default True (most providers
+    # need no external config). See plans/auth-providers, AuthProvider.configured.
+    configured: bool = True
+    # Signups policy: "off" | "approval" | "auto".
+    signups: str
+    # Count of external identities linked through this provider (0 for password,
+    # which has no identities rows — D4).
+    linked_count: int
+
+
 class ConfigPageData(BaseModel):
-    """The /-/admin/config page: site messages + the self-registration toggle."""
+    """The /-/admin/config page: site messages + self-registration + providers."""
 
     slots: List[SiteMessageSlot]
     # Current state of the runtime self-registration toggle, so the switch
     # renders with the live value. See plans/self-registration.
     registration_enabled: bool = False
+    # One row per installed sign-in provider, for the "Sign-in providers"
+    # section (design §9). See plans/auth-providers.
+    providers: List[ProviderAdminRow] = []
 
 
 # --- Login attempts (admin audit view) ---
@@ -330,6 +421,9 @@ class SessionRow(BaseModel):
     last_seen_at: str
     user_agent: Optional[str] = None
     ip: Optional[str] = None
+    # Which sign-in provider minted this session (provenance, design §7);
+    # "password" for the built-in flow, else the external provider's key.
+    provider: str = "password"
 
 
 class SessionListResponse(BaseModel):
