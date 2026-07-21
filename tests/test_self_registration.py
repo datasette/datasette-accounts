@@ -197,14 +197,20 @@ async def test_toggle_audits_both_ways_and_noops_on_repeat():
     assert await db.set_registration_enabled(internal, "root", False) is False
     assert await db.set_registration_enabled(internal, "root", False) is False
 
+    # Self-registration is now the password provider's signups policy (D5): the
+    # toggle writes one audit vocabulary — set-provider-signups — with the mode
+    # in the detail, superseding the retired enable/disable-registration ops.
     rows = (
         await internal.execute(
-            f"SELECT operation FROM {db.ADMIN_AUDIT} "
-            "WHERE operation IN ('enable-registration', 'disable-registration') "
-            "ORDER BY id"
+            f"SELECT operation, detail FROM {db.ADMIN_AUDIT} "
+            "WHERE operation = 'set-provider-signups' ORDER BY id"
         )
     ).rows
-    assert [r[0] for r in rows] == ["enable-registration", "disable-registration"]
+    assert [r[0] for r in rows] == ["set-provider-signups", "set-provider-signups"]
+    assert [json.loads(r[1]) for r in rows] == [
+        {"provider": "password", "mode": "approval"},
+        {"provider": "password", "mode": "off"},
+    ]
 
 
 # --------------------------------------------------------------------------

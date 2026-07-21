@@ -134,9 +134,14 @@ async def register(
     """Self-registration submit (moved verbatim from register_submit)."""
     internal = datasette.get_internal_database()
     # Re-checked here, not just on the GET page — the toggle can flip between
-    # page load and submit. No audit row for this refusal: an unauthenticated
-    # probe against a closed endpoint isn't a registration attempt.
-    if not await db.get_registration_enabled(internal):
+    # page load and submit. A disabled password provider means no password
+    # signups at all, regardless of the signups toggle — so refuse (404) when
+    # either is off (design §8). No audit row for this refusal: an
+    # unauthenticated probe against a closed endpoint isn't a registration
+    # attempt.
+    if not await db.get_provider_enabled(
+        internal, "password"
+    ) or not await db.get_registration_enabled(internal):
         raise NotFound("Not found")
 
     ip = security.client_ip(datasette, request)

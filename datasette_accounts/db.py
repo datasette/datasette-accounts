@@ -40,10 +40,6 @@ PASSWORD_TOKENS = "datasette_accounts_password_tokens"
 SETTINGS = "datasette_accounts_settings"
 IDENTITIES = "datasette_accounts_identities"
 
-# Self-registration is now the password provider's signups setting (decision
-# D5 / m009): the legacy 'registration_enabled' row is migrated to this key.
-PASSWORD_SIGNUPS_KEY = "provider:password:signups"
-
 # datasette-acl tables we reference (softly) for the "group" principal. We never
 # write them — acl owns them — but we join them to resolve group membership +
 # names when acl is installed. Absent → the group principal is simply disabled.
@@ -72,6 +68,14 @@ LAST_SEEN_THROTTLE_SECONDS = 60
 
 class LastAdminError(Exception):
     """Raised when an operation would remove the final enabled admin."""
+
+
+class LastProviderError(Exception):
+    """Raised when disabling a provider would leave no enabled sign-in provider.
+
+    The auth-surface sibling of ``LastAdminError`` (design D9): an instance must
+    always retain at least one enabled provider, or nobody could ever sign in.
+    Enforced in the same write tx as the disable so there is no last-two race."""
 
 
 class UsernameTakenError(Exception):
@@ -963,33 +967,110 @@ async def get_registration_enabled(db):
     return await get_provider_signups(db, "password") != "off"
 
 
-async def set_registration_enabled(db, actor_id, enabled):
-    """Flip the self-registration toggle. Returns the new (bool) state.
+def _provider_enabled_in_conn(conn, key):
+    """In-tx read of ``provider:{key}:enabled`` with the absence default (design
+    §7): an absent row means the built-in password provider is enabled and every
+    external provider is disabled."""
+    raw = gen.select_setting(conn, key=f"provider:{key}:enabled")
+    if raw is None:
+        return key == "password"
+    return raw == "1"
 
-    One write tx over the migrated ``provider:password:signups`` key (decision
-    D5): upsert ``'approval'`` to turn on, delete the row to turn off (absence =
-    off, matching the blank-clears convention used by site messages). No-op — no
-    audit row — when the setting is already in the requested state, so repeat
-    flips from the UI don't spam the audit trail.
+
+def _guard_last_provider(conn, disabling_key, installed_keys):
+    """Raise LastProviderError if disabling ``disabling_key`` would leave no
+    other enabled provider.
+
+    Counts, among the *other* installed keys, any that would remain enabled — an
+    explicit ``'1'`` row, or no row AND ``key == "password"`` (the built-in's
+    absence default). Runs inside the caller's write tx so count + write are
+    atomic (sibling of ``_guard_last_admin``)."""
+    for other in installed_keys:
+        if other == disabling_key:
+            continue
+        if _provider_enabled_in_conn(conn, other):
+            return
+    raise LastProviderError()
+
+
+async def set_provider_enabled(db, actor_id, key, enabled, *, installed_keys):
+    """Enable or disable auth provider ``key``. Returns the new (bool) state.
+
+    One write tx. Writes an explicit ``'1'`` / ``'0'`` row both ways (never a
+    row-delete) so an admin's deliberate choice survives regardless of the key's
+    absence default and the audit trail reads unambiguously. No-op — no audit
+    row — when already in the requested state. Disabling runs the last-provider
+    guard (``LastProviderError``) in the same tx; ``installed_keys`` is the
+    registry key list, passed in because ``db.py`` must not import ``__init__``.
+    Audit ops ``enable-provider`` / ``disable-provider``, detail ``{provider}``.
     """
+    enabled_key = f"provider:{key}:enabled"
 
     def write(conn):
-        # Signups are "on" when the policy is anything other than off/absent
-        # (e.g. an 'auto' value set later by the CLI still counts as enabled).
-        current = (gen.select_setting(conn, key=PASSWORD_SIGNUPS_KEY) or "off") != "off"
+        current = _provider_enabled_in_conn(conn, key)
         if bool(enabled) == current:
             return current
-        if enabled:
-            gen.upsert_setting(
-                conn, key=PASSWORD_SIGNUPS_KEY, value="approval", updated_by=actor_id
-            )
-            _audit(conn, "enable-registration", actor_id, None)
-        else:
-            gen.delete_setting(conn, key=PASSWORD_SIGNUPS_KEY)
-            _audit(conn, "disable-registration", actor_id, None)
+        if not enabled:
+            _guard_last_provider(conn, key, installed_keys)
+        gen.upsert_setting(
+            conn, key=enabled_key, value="1" if enabled else "0", updated_by=actor_id
+        )
+        _audit(
+            conn,
+            "enable-provider" if enabled else "disable-provider",
+            actor_id,
+            None,
+            {"provider": key},
+        )
         return bool(enabled)
 
     return await db.execute_write_fn(write)
+
+
+async def set_provider_signups(db, actor_id, key, mode):
+    """Set provider ``key``'s signups policy (``off`` / ``approval`` / ``auto``).
+    Returns the new mode string.
+
+    One write tx: ``off`` deletes the row (absence = off), the others upsert.
+    No-op — no audit row — when already in the requested mode. Audit op
+    ``set-provider-signups``, detail ``{provider, mode}``."""
+    if mode not in ("off", "approval", "auto"):
+        raise ValueError(f"Invalid signups mode: {mode!r}")
+    signups_key = f"provider:{key}:signups"
+
+    def write(conn):
+        current = gen.select_setting(conn, key=signups_key) or "off"
+        if mode == current:
+            return current
+        if mode == "off":
+            gen.delete_setting(conn, key=signups_key)
+        else:
+            gen.upsert_setting(conn, key=signups_key, value=mode, updated_by=actor_id)
+        _audit(
+            conn,
+            "set-provider-signups",
+            actor_id,
+            None,
+            {"provider": key, "mode": mode},
+        )
+        return mode
+
+    return await db.execute_write_fn(write)
+
+
+async def set_registration_enabled(db, actor_id, enabled):
+    """Flip the self-registration toggle. Returns the new (bool) state.
+
+    Compatibility shim over the one write path (decision D5): self-registration
+    is the password provider's signups policy, so ``on`` maps to
+    ``set_provider_signups(..., "password", "approval")`` and ``off`` to
+    ``"off"``. All the audit/no-op discipline lives in ``set_provider_signups``
+    (op ``set-provider-signups``); the old ``enable-registration`` /
+    ``disable-registration`` ops are retired."""
+    mode = await set_provider_signups(
+        db, actor_id, "password", "approval" if enabled else "off"
+    )
+    return mode != "off"
 
 
 async def get_provider_enabled(db, key):

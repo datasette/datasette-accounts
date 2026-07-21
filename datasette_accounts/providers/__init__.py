@@ -387,6 +387,14 @@ def get_registry(datasette: Datasette) -> dict[str, AuthProvider]:
     return getattr(datasette, REGISTRY_ATTR, {})
 
 
+def provider_source(provider: AuthProvider) -> str:
+    """The provider's source package — the top-level package of its class's
+    module (e.g. "datasette_accounts" for the built-in password provider, or the
+    third-party plugin's distribution package for an external provider). Shown in
+    the CLI `providers` listing."""
+    return (type(provider).__module__ or "").split(".")[0]
+
+
 def provider_start_path(datasette: Datasette, key: str) -> str:
     """The base_url-prefixed URL of a provider's own start route, read from its
     descriptor's ``start_path``. Used to point the link/step-up forwards at the
