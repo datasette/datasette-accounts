@@ -6,6 +6,9 @@ test needs to set up state — the ``register_provider`` fixture that mounts a
 throwaway provider lives in ``conftest.py``.
 """
 
+import json
+import re
+
 from datasette.app import Datasette
 
 from datasette_accounts import db
@@ -134,3 +137,12 @@ class FakeResponse:
 
     def set_cookie(self, name, value="", **kw):
         self.cookies[name] = (value, kw)
+
+
+def page_data_of(r):
+    """Parse the embedded #pageData JSON out of a rendered page shell."""
+    m = re.search(
+        r'<script type="application/json" id="pageData">(.*?)</script>', r.text, re.S
+    )
+    assert m, "no #pageData script tag in the page"
+    return json.loads(m.group(1))
