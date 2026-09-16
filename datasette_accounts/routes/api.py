@@ -1,6 +1,8 @@
 """JSON API endpoints: authenticate, logout, change-password, admin operations."""
 
+import json
 from typing import Annotated
+from urllib.parse import quote
 
 from datasette import NotFound, Response
 from datasette_plugin_router import Body
@@ -9,12 +11,14 @@ from .. import db, grantable, messages, security
 from ..page_data import (
     AdminAuditRequest,
     AdminAuditRow,
+    AdminUnlinkRequest,
     AuthenticateRequest,
     ChangePasswordRequest,
     CompleteSetPasswordRequest,
     CreateUserRequest,
     GrantCapabilityRequest,
     InviteRequest,
+    LinkStartRequest,
     LoginAttemptRow,
     LoginAttemptsRequest,
     RegisterRequest,
@@ -27,9 +31,11 @@ from ..page_data import (
     SetRegistrationRequest,
     SetSiteMessageRequest,
     TargetRequest,
+    UnlinkRequest,
     UserRow,
 )
 from ..passwords import (
+    UNUSABLE_PASSWORD,
     PasswordLengthError,
     ahash_password,
     averify_password,
@@ -37,7 +43,16 @@ from ..passwords import (
     generate_password,
 )
 
-from ..providers import LocalIdentity, clear_stale_core_actor_cookie, finish_login
+from ..providers import (
+    STRANDED_ACCOUNT_MESSAGE,
+    LocalIdentity,
+    clear_stale_core_actor_cookie,
+    finish_login,
+    get_registry,
+    make_state,
+    provider_configured,
+    provider_start_path,
+)
 from ..providers import password
 from ..router import require_actor, require_admin, require_csrf, router
 from ..security import COOKIE_NAME
@@ -263,6 +278,229 @@ async def account_logout_others(datasette, request):
         )
     internal = datasette.get_internal_database()
     await db.logout_other_sessions(internal, request.actor["id"], token_sha)
+    return Response.json({"ok": True})
+
+
+# --------------------------------------------------------------------------
+# Identity linking / unlinking (self-service; design §6)
+# --------------------------------------------------------------------------
+
+
+def _linkable_target(datasette, target, linked_keys):
+    """Validate a link target key: must be an installed external provider (not
+    `password`) that isn't already linked. Returns the AuthProvider, or None when
+    it isn't a valid target."""
+    provider = get_registry(datasette).get(target)
+    if provider is None or target == "password" or target in linked_keys:
+        return None
+    return provider
+
+
+@router.POST("/-/account/api/link-start$")
+@require_actor
+async def link_start(datasette, request, body: Annotated[LinkStartRequest, Body()]):
+    """Begin linking an external provider to the signed-in account (design §6).
+
+    Linking always requires fresh proof of an existing sign-in method (D7/D8):
+    a password account re-enters its password here; a password-less account
+    names an already-linked provider to re-complete. On success we return a
+    ``start_url`` into the appropriate provider flow, with the intent + acting
+    actor bound in the signed state cookie set on this response.
+    """
+    internal = datasette.get_internal_database()
+    actor_id = request.actor["id"]
+    linked = await db.list_identities(internal, actor_id)
+    linked_keys = {r["provider"] for r in linked}
+
+    target = body.provider
+    provider = _linkable_target(datasette, target, linked_keys)
+    # A disabled OR unconfigured provider isn't a valid target — its whole
+    # user-facing surface is off (a configured=False provider's start route
+    # 503s). Same generic error/status as a disabled target: the non-admin
+    # surface never distinguishes "disabled" from "not configured".
+    if (
+        provider is None
+        or not await db.get_provider_enabled(internal, target)
+        or not await provider_configured(datasette, provider)
+    ):
+        return Response.json(
+            {"ok": False, "error": "That provider can't be linked."}, status=400
+        )
+
+    user = await db.get_user_by_id(internal, actor_id)
+    if not user:
+        return Response.json({"ok": False, "error": "Unknown account"}, status=401)
+    proof, error = await _prove_existing_method(
+        datasette,
+        request,
+        user,
+        linked_keys,
+        password=body.password,
+        step_up_provider=body.step_up_provider,
+    )
+    if error is not None:
+        return error
+    if proof == "password":
+        # Direct password link: start the target provider with intent=link.
+        return _step_up_start_response(
+            datasette,
+            request,
+            provider=target,
+            intent="link",
+            actor_id=actor_id,
+            step_up=None,
+        )
+    # Start the step-up provider with intent=step-up; the target rides in the
+    # state so the step-up callback knows where to forward once proof is shown.
+    return _step_up_start_response(
+        datasette,
+        request,
+        provider=proof,
+        intent="step-up",
+        actor_id=actor_id,
+        step_up={"target": target},
+    )
+
+
+async def _prove_existing_method(
+    datasette, request, user, linked_keys, *, password, step_up_provider
+):
+    """Fresh proof of an existing sign-in method (D7/D8) — the gate shared by
+    link-start and unlink, both of which change how an account can be signed
+    into. Returns ``(proof, error_response)``:
+
+    - a password account re-enters its password here. Same one-verify + lockout
+      discipline as the change-password re-auth: exactly one KDF verify, a
+      failure ticks the lockout counter and returns the generic error. Proof is
+      the string ``"password"``.
+    - a password-less account names an already-linked provider to re-complete
+      (the step-up leg, honored by ``_finish_step_up``). It must itself still be
+      enabled + configured, or its start route would dead-end the visitor —
+      same generic message either way. Proof is that provider's key; the caller
+      starts its flow with ``intent="step-up"``.
+    """
+    internal = datasette.get_internal_database()
+    if user["password_hash"] != UNUSABLE_PASSWORD:
+        ip = security.client_ip(datasette, request)
+        if user["locked_until"] and user["locked_until"] > db.now_iso():
+            return None, Response.json(
+                {"ok": False, "error": "Account locked"}, status=429
+            )
+        ok = await averify_password(password or "", user["password_hash"])
+        await db.record_login_attempt(
+            internal, user["username"], ip, ok, "reauth" if ok else "bad_password"
+        )
+        if not ok:
+            threshold = security.config(datasette, "lockout_threshold")
+            minutes = security.config(datasette, "lockout_minutes")
+            await db.register_failed_attempt(internal, user["id"], threshold, minutes)
+            return None, Response.json(
+                {"ok": False, "error": "Incorrect password"}, status=401
+            )
+        return "password", None
+    if (
+        not step_up_provider
+        or step_up_provider not in linked_keys
+        or not await db.get_provider_enabled(internal, step_up_provider)
+        or not await provider_configured(
+            datasette, get_registry(datasette)[step_up_provider]
+        )
+    ):
+        return None, Response.json(
+            {"ok": False, "error": "Choose a linked sign-in method to continue."},
+            status=400,
+        )
+    return step_up_provider, None
+
+
+def _step_up_start_response(datasette, request, *, provider, intent, actor_id, step_up):
+    """Build the ``{ok, start_url}`` response into ``provider``'s start, minting
+    the signed state cookie on it. The state's provider is the provider whose
+    start we point at, so read_state's provider-match check passes when that
+    flow calls finish_login."""
+    response = Response.json({"ok": True})
+    value = make_state(
+        datasette,
+        request,
+        response,
+        provider=provider,
+        next="/-/account",
+        intent=intent,
+        actor_id=actor_id,
+        step_up=step_up,
+    )
+    start = provider_start_path(datasette, provider)
+    response.body = json.dumps(
+        {"ok": True, "start_url": f"{start}?state={quote(value)}"}
+    )
+    return response
+
+
+@router.POST("/-/account/api/unlink$")
+@require_actor
+async def account_unlink(datasette, request, body: Annotated[UnlinkRequest, Body()]):
+    """Unlink one of the signed-in account's own identities (design §6).
+
+    Gated by the same fresh proof as linking: a password account re-enters its
+    password and the unlink happens here; a password-less account names
+    ANOTHER linked provider to re-complete, gets a ``start_url`` into its flow,
+    and ``_finish_step_up`` performs the unlink once that proof is shown. The
+    strand guard (no usable password + this is the only identity) runs in-tx in
+    db.unlink_identity whichever leg performs it.
+    """
+    internal = datasette.get_internal_database()
+    actor_id = request.actor["id"]
+    linked = await db.list_identities(internal, actor_id)
+    if not any(
+        r["provider"] == body.provider and r["subject"] == body.subject for r in linked
+    ):
+        # The pair isn't linked to this account. Generic 404 — never confirm
+        # whether it belongs to someone else — and no proof is spent on it.
+        return Response.json(
+            {"ok": False, "error": "Sign-in method not found"}, status=404
+        )
+    user = await db.get_user_by_id(internal, actor_id)
+    if not user:
+        return Response.json({"ok": False, "error": "Unknown account"}, status=401)
+    if user["password_hash"] == UNUSABLE_PASSWORD and len(linked) <= 1:
+        # Would strand the account — say so up front rather than asking for a
+        # proof that can't exist (the in-tx guard below stays authoritative).
+        return Response.json(
+            {"ok": False, "error": STRANDED_ACCOUNT_MESSAGE}, status=400
+        )
+    # The method being removed can't be the one that vouches for its removal.
+    linked_keys = {r["provider"] for r in linked} - {body.provider}
+    proof, error = await _prove_existing_method(
+        datasette,
+        request,
+        user,
+        linked_keys,
+        password=body.password,
+        step_up_provider=body.step_up_provider,
+    )
+    if error is not None:
+        return error
+    if proof != "password":
+        return _step_up_start_response(
+            datasette,
+            request,
+            provider=proof,
+            intent="step-up",
+            actor_id=actor_id,
+            step_up={"unlink": {"provider": body.provider, "subject": body.subject}},
+        )
+    try:
+        await db.unlink_identity(
+            internal, actor_id, actor_id, body.provider, body.subject, admin=False
+        )
+    except db.StrandedAccountError:
+        return Response.json(
+            {"ok": False, "error": STRANDED_ACCOUNT_MESSAGE}, status=400
+        )
+    except db.IdentityNotFoundError:
+        return Response.json(
+            {"ok": False, "error": "Sign-in method not found"}, status=404
+        )
     return Response.json({"ok": True})
 
 
@@ -598,6 +836,37 @@ async def admin_logout_everywhere(
 ):
     internal = datasette.get_internal_database()
     await db.logout_everywhere(internal, request.actor["id"], body.id)
+    return Response.json({"ok": True})
+
+
+@router.POST("/-/admin/api/unlink-identity$")
+@require_admin
+async def admin_unlink_identity(
+    datasette, request, body: Annotated[AdminUnlinkRequest, Body()]
+):
+    """Admin-unlink one of a target account's identities (design §6).
+
+    Same in-tx strand guard as the self route; the message tells the admin to
+    reset the account's password first (their fix, not the target's).
+    """
+    internal = datasette.get_internal_database()
+    try:
+        await db.unlink_identity(
+            internal,
+            request.actor["id"],
+            body.target_id,
+            body.provider,
+            body.subject,
+            admin=True,
+        )
+    except db.StrandedAccountError:
+        return Response.json(
+            {"ok": False, "error": "Reset their password first."}, status=400
+        )
+    except db.IdentityNotFoundError:
+        return Response.json(
+            {"ok": False, "error": "Sign-in method not found"}, status=404
+        )
     return Response.json({"ok": True})
 
 

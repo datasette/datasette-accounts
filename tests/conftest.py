@@ -47,3 +47,14 @@ def register_provider():
     for name in names:
         if pm.get_plugin(name) is not None:
             pm.unregister(name=name)
+
+
+@pytest.fixture
+def register_providers(register_provider):
+    """``register_provider`` for several descriptors at once (one module)."""
+
+    def _register(providers):
+        for provider in providers:
+            register_provider(provider)
+
+    return _register

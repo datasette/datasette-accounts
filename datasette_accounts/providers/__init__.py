@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypedDict
+from urllib.parse import quote
 
 from datasette import Response
 
@@ -434,6 +435,15 @@ def get_registry(datasette: Datasette) -> dict[str, AuthProvider]:
     return getattr(datasette, REGISTRY_ATTR, {})
 
 
+def provider_start_path(datasette: Datasette, key: str) -> str:
+    """The base_url-prefixed URL of a provider's own start route, read from its
+    descriptor's ``start_path``. Used to point the link/step-up forwards at the
+    target provider's route. Callers validate ``key`` against the registry
+    first; an unknown key is a bug and raises (KeyError) rather than pointing
+    the visitor at a path nothing serves."""
+    return datasette.urls.path(get_registry(datasette)[key].start_path)
+
+
 # --------------------------------------------------------------------------
 # Session cookie + the one db.create_session call
 # --------------------------------------------------------------------------
@@ -619,21 +629,38 @@ async def _finish_external(
         )
         return _refuse(response_mode)
 
+    existing = await db.get_identity(internal, provider_key, identity.subject)
+    intent = (state or {}).get("i") or "login"
+
     # Linking intents (design §6) are handled BEFORE the login mint — for a
     # matched identity as much as an unmatched one. A link / step-up callback
-    # must NEVER fall through to minting a session for the identity's owner:
-    # the user is already signed in throughout linking, and treating a link
-    # callback as a login would sign an attacker in as the victim who owns the
-    # already-linked identity. Nothing implements those intents yet, so both
-    # refuse here (an invalid-state refusal, no session, nothing provisioned).
-    intent = (state or {}).get("i") or "login"
-    if intent in ("link", "step-up"):
-        await db.record_login_attempt(
-            internal, None, ip, False, "provider_state_invalid", provider=provider_key
+    # must NEVER fall through to minting a session for the identity's owner: the
+    # user is already signed in throughout linking, and treating a link callback
+    # as a login would let an attacker who completes a link flow with a
+    # *victim's* already-linked identity be signed in as that victim. The
+    # found/not-found split is delegated so each intent decides explicitly.
+    if intent == "step-up":
+        return await _finish_step_up(
+            datasette,
+            request,
+            identity,
+            existing,
+            provider_key=provider_key,
+            response_mode=response_mode,
+            state=state,
         )
-        return _refuse(response_mode)
+    if intent == "link":
+        return await _finish_link(
+            datasette,
+            request,
+            identity,
+            existing,
+            provider_key=provider_key,
+            response_mode=response_mode,
+            state=state,
+        )
 
-    existing = await db.get_identity(internal, provider_key, identity.subject)
+    # intent == "login" from here down.
     if existing is not None:
         # Linked → load the account, run the same gates as a password login.
         user = await db.get_user_by_id(internal, existing["user_id"])
@@ -689,6 +716,165 @@ async def _finish_external(
         response_mode=response_mode,
         state=state,
     )
+
+
+# --------------------------------------------------------------------------
+# Linking + step-up (design §6) — reached only for link / step-up intents,
+# which never mint a session (the user is already signed in throughout linking).
+# --------------------------------------------------------------------------
+
+
+STRANDED_ACCOUNT_MESSAGE = "Set a password first — this is your only way to sign in."
+
+
+async def _finish_step_up(
+    datasette, request, identity, existing, *, provider_key, response_mode, state
+):
+    """Step-up proof: the acting user re-completed an ALREADY-linked provider's
+    flow (the password-less step-up path, design D8). The presented identity must
+    be found AND owned by the state's bound actor. On success we do NOT mint.
+    What the proof unlocks is in the state's ``u``: a ``target`` to link (we 302
+    into that provider's start with a fresh ``intent="link"`` state carrying the
+    step-up proof, ``step_up={provider, at}``, honored ≤ TTL) or an ``unlink``
+    ``{provider, subject}`` to remove from the account, performed right here.
+    """
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+    actor_id = (state or {}).get("a")
+    step_up = (state or {}).get("u") or {}
+    target = step_up.get("target")
+    unlink = step_up.get("unlink")
+    # The identity must belong to the acting account (proof of control of an
+    # existing method), the state must name exactly one thing to unlock, and —
+    # like the link leg — the state's bound actor must be the LIVE session's
+    # actor, so a step-up state lifted from another browser proves nothing there.
+    from .. import resolve_actor
+
+    live = await resolve_actor(datasette, request)
+    if (
+        not actor_id
+        or live is None
+        or live["id"] != actor_id
+        or existing is None
+        or existing["user_id"] != actor_id
+        or bool(target) == bool(unlink)
+    ):
+        await db.record_login_attempt(
+            internal, None, ip, False, "provider_state_invalid", provider=provider_key
+        )
+        return _refuse(response_mode)
+    if unlink:
+        # The proving method can't be the one being removed (the route never
+        # mints such a state; a forged one is refused rather than honored).
+        if unlink.get("provider") == provider_key:
+            await db.record_login_attempt(
+                internal,
+                None,
+                ip,
+                False,
+                "provider_state_invalid",
+                provider=provider_key,
+            )
+            return _refuse(response_mode)
+        try:
+            await db.unlink_identity(
+                internal,
+                actor_id,
+                actor_id,
+                unlink.get("provider"),
+                unlink.get("subject"),
+                admin=False,
+            )
+        except db.StrandedAccountError:
+            return _error_page(response_mode, STRANDED_ACCOUNT_MESSAGE, status=400)
+        except db.IdentityNotFoundError:
+            return _error_page(response_mode, "Sign-in method not found", status=404)
+        return Response.redirect(datasette.urls.path("/-/account"))
+    # Redirect into the target provider's start, minting the link-intent state.
+    response = Response.redirect(datasette.setting("base_url") or "/")
+    value = make_state(
+        datasette,
+        request,
+        response,
+        provider=target,
+        next="/-/account",
+        intent="link",
+        actor_id=actor_id,
+        step_up={"provider": provider_key, "at": db.now_iso()},
+    )
+    start = provider_start_path(datasette, target)
+    # Response.redirect wrote the "Location" header (capital L); overwrite that
+    # exact key so we don't emit a second, lowercase location header.
+    response.headers["Location"] = f"{start}?state={quote(value)}"
+    return response
+
+
+async def _finish_link(
+    datasette, request, identity, existing, *, provider_key, response_mode, state
+):
+    """Complete a link: attach ``identity`` to the state's bound actor, provided
+    that actor still matches the LIVE session (a stolen/forged state built for
+    user A cannot be redeemed under user B's session) and — for password-less
+    origins — the step-up proof is within TTL. An identity already linked to
+    ANYONE (including this account) yields a generic "already in use" page: a
+    link callback must never mint, so completing it with a victim's identity can
+    never sign the attacker in as the victim.
+    """
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+
+    if existing is not None:
+        # Already claimed (by this account or another) — generic, no disclosure,
+        # no session. This is the branch that defeats "link a victim's identity
+        # to get signed in as them": we return a 409 page, never a mint.
+        return _error_page(
+            response_mode, "That identity is already in use.", status=409
+        )
+
+    actor_id = (state or {}).get("a")
+    # The state's bound actor must equal the live session's actor. resolve_actor
+    # rebuilds identity straight from the session cookie (lazy import: __init__
+    # imports this module before resolve_actor is defined).
+    from .. import resolve_actor
+
+    live = await resolve_actor(datasette, request)
+    if not actor_id or live is None or live["id"] != actor_id:
+        await db.record_login_attempt(
+            internal, None, ip, False, "provider_state_invalid", provider=provider_key
+        )
+        return _refuse(response_mode)
+
+    # Password-less origin: the link state carries a step-up proof, honored only
+    # within provider_state_ttl_minutes of the step-up completion.
+    step_up = (state or {}).get("u") or {}
+    if step_up.get("at") is not None or step_up.get("provider") is not None:
+        ttl = security.config(datasette, "provider_state_ttl_minutes")
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=ttl)).isoformat(
+            timespec="milliseconds"
+        )
+        at = step_up.get("at")
+        if not at or at <= cutoff:
+            await db.record_login_attempt(
+                internal,
+                None,
+                ip,
+                False,
+                "provider_state_invalid",
+                provider=provider_key,
+            )
+            return _refuse(response_mode)
+
+    try:
+        await db.link_identity(internal, actor_id, actor_id, identity)
+    except db.AlreadyLinkedError:
+        # Lost the race to another writer (PK backstop) — same generic outcome.
+        return _error_page(
+            response_mode, "That identity is already in use.", status=409
+        )
+
+    response = Response.redirect(datasette.urls.path("/-/account"))
+    _clear_state_cookie(response)
+    return response
 
 
 async def _provision_pending(

@@ -400,6 +400,37 @@ class SetRegistrationRequest(BaseModel):
     enabled: bool
 
 
+# --- Identity linking / unlinking (see plans/auth-providers §6) ---
+
+
+class LinkStartRequest(BaseModel):
+    # Target external provider to link to the signed-in account.
+    provider: str
+    # Step-up proof for a password account: the account's current password.
+    password: Optional[str] = None
+    # Step-up proof for a password-less account: the key of an already-linked
+    # provider whose flow the user re-completes.
+    step_up_provider: Optional[str] = None
+
+
+class UnlinkRequest(BaseModel):
+    # The (provider, subject) to unlink from the signed-in account, plus the
+    # same fresh proof of an existing method link-start takes: the account's
+    # password, or (password-less) the key of ANOTHER linked provider whose
+    # flow the user re-completes.
+    provider: str
+    subject: str
+    password: Optional[str] = None
+    step_up_provider: Optional[str] = None
+
+
+class AdminUnlinkRequest(BaseModel):
+    # Same as UnlinkRequest plus the account whose identity is being unlinked.
+    target_id: str
+    provider: str
+    subject: str
+
+
 class AdminAuditRequest(BaseModel):
     # Exact-match filters; "" / omitted means unfiltered. `username` is the
     # target's username, resolved server-side to a target id (unknown → empty
