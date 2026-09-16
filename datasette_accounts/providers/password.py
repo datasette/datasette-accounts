@@ -1,18 +1,190 @@
 """The built-in username/password provider.
 
-The descriptor reserves the ``password`` key and holds the first, always-present
-slot in the registry (design §3/§8). Its ``start_path`` is the canonical
-``/-/login`` page: the built-in provider owns the real, documented password
-surface (``/-/login`` / ``/-/register`` / ``/-/set-password`` and their APIs in
-``routes/``), so it needs no separate start route.
+The password flow is *literally* a provider: this module owns the credential
+verify (login) and the self-registration submit. The canonical routes in
+``routes/api.py`` (`/-/login/api/authenticate`, `/-/register/api/submit`,
+`/-/set-password/api/complete`) keep their paths and delegate here; every
+successful sign-in terminates at ``finish_login``.
+
+The timing-discipline tests monkeypatch ``averify_dummy`` / ``averify_password``
+on this module to count KDF calls, so the verify half must call the names bound
+here rather than reach the KDF another way.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from datasette import NotFound, Response
+
+from .. import db, security
+from ..passwords import (
+    UNUSABLE_PASSWORD,
+    PasswordLengthError,
+    ahash_password,
+    averify_dummy,
+    averify_password,
+    check_password_length,
+)
 from . import AuthProvider
+
+if TYPE_CHECKING:
+    # Type-only imports (annotations are strings under `from __future__ import
+    # annotations`), so no runtime import cost or cycle risk.
+    from datasette.app import Datasette
+    from datasette.utils.asgi import Request
+
+    from ..page_data import RegisterRequest
+
+# The user-facing login error is deliberately generic — the specific reason
+# lives only in the admin-only login_audit.
+GENERIC_LOGIN_ERROR = "Invalid username or password"
 
 
 class PasswordProvider(AuthProvider):
+    """Built-in username/password provider — always first in the registry.
+
+    Its ``start_path`` is the canonical ``/-/login`` page itself: the built-in
+    provider owns the real, documented password surface (``/-/login`` /
+    ``/-/register`` / ``/-/set-password`` and their APIs in ``routes/``), so it
+    needs no separate start route. The login-page code never renders a button
+    for the password provider (it renders the form), so ``start_path`` is only a
+    truthful descriptor value here.
+    """
+
     key = "password"
     label = "Username & password"
-    # The login-page code never renders a button for the password provider (it
-    # renders the form), so start_path is only a truthful descriptor value.
     start_path = "/-/login"
+
+
+async def verify_credentials(
+    datasette: Datasette, request: Request, username: str, password: str
+) -> dict[str, Any] | Response:
+    """Run the login verify half: lockout, one-KDF discipline, audit + lockout
+    bookkeeping. Returns the authenticated user dict on success, or an error
+    ``Response`` (429/401) to send verbatim. The caller mints via finish_login.
+
+    The union return is load-bearing: the caller distinguishes the two by type
+    (``isinstance(result, Response)`` → send verbatim; otherwise it is the user
+    dict to mint).
+    """
+    internal = datasette.get_internal_database()
+    ip = security.client_ip(datasette, request)
+    threshold = security.config(datasette, "lockout_threshold")
+    minutes = security.config(datasette, "lockout_minutes")
+
+    user = await db.get_user_by_username(internal, username)
+
+    # 1. Locked account: refuse before hashing (the only hash-skipping path).
+    if user and user["locked_until"] and user["locked_until"] > db.now_iso():
+        await db.record_login_attempt(internal, username, ip, False, "locked")
+        return Response.json({"ok": False, "error": GENERIC_LOGIN_ERROR}, status=429)
+
+    # 2/3. Exactly one PBKDF2 verify on every remaining path (dummy on miss).
+    # The user-facing error stays generic; the specific reason lives only in the
+    # admin-only audit log. An invited account (no usable password yet), an
+    # expired account, and a self-registered account still awaiting approval
+    # all take the same dummy-verify branch as no-such-user/disabled — none of
+    # them may be distinguishable by response or timing. Telling the *visitor*
+    # their account is pending is the register page's job, not the login form's
+    # — the login form must not confirm account state to a third party.
+    expired = bool(user and user["expires_at"] and user["expires_at"] <= db.now_iso())
+    pending = bool(user and user["pending_approval"])
+    has_password = user and user["password_hash"] != UNUSABLE_PASSWORD
+    if user and not user["disabled"] and not expired and not pending and has_password:
+        ok = await averify_password(password, user["password_hash"])
+        reason = "success" if ok else "bad_password"
+    else:
+        await averify_dummy(password)
+        ok = False
+        # Precedence when more than one applies (e.g. a disabled account whose
+        # expiry has also passed): disabled > expired > pending_approval >
+        # no_password.
+        if not user:
+            reason = "no_such_user"
+        elif user["disabled"]:
+            reason = "disabled"
+        elif expired:
+            reason = "expired"
+        elif pending:
+            reason = "pending_approval"
+        else:
+            reason = "no_password"
+
+    await db.record_login_attempt(internal, username, ip, ok, reason)
+
+    if not ok:
+        if user:
+            await db.register_failed_attempt(internal, user["id"], threshold, minutes)
+        return Response.json({"ok": False, "error": GENERIC_LOGIN_ERROR}, status=401)
+
+    # Verify passed — hand the user back so the caller mints via finish_login.
+    return user
+
+
+async def register(
+    datasette: Datasette, request: Request, body: RegisterRequest
+) -> Response:
+    """Self-registration submit."""
+    internal = datasette.get_internal_database()
+    # Re-checked here, not just on the GET page — the toggle can flip between
+    # page load and submit. A disabled password provider means no password
+    # signups at all, regardless of the signups toggle — so refuse (404) when
+    # either is off (design §8). No audit row for this refusal: an
+    # unauthenticated probe against a closed endpoint isn't a registration
+    # attempt.
+    if not await db.get_provider_enabled(
+        internal, "password"
+    ) or not await db.get_registration_enabled(internal):
+        raise NotFound("Not found")
+
+    ip = security.client_ip(datasette, request)
+
+    # Abuse caps (fail generic and closed), checked before validation/hashing
+    # so a capped client can't spend our KDF time: a per-IP daily cap counted
+    # from the 'register' rows already in login_audit, and a global
+    # pending-queue cap. One message for both — which limit tripped is an
+    # abuse signal we don't reveal. 429 (not 400): the request itself is
+    # well-formed; the refusal is about volume/state, the same semantics as
+    # the lockout path's 429.
+    per_ip_cap = security.config(datasette, "registrations_per_ip_per_day")
+    queue_cap = security.config(datasette, "max_pending_registrations")
+    if (
+        await db.count_recent_registrations(internal, ip) >= per_ip_cap
+        or await db.count_pending_users(internal) >= queue_cap
+    ):
+        # Refused attempts are recorded too — repeat abuse counts toward the
+        # per-IP cap rather than probing it for free.
+        await db.record_login_attempt(internal, body.username, ip, False, "register")
+        return Response.json(
+            {
+                "ok": False,
+                "error": "Registration is currently closed — try again later.",
+            },
+            status=429,
+        )
+
+    error = security.validate_username(body.username)
+    if error:
+        return Response.json({"ok": False, "error": error}, status=400)
+    try:
+        check_password_length(
+            body.password, security.config(datasette, "password_min_length")
+        )
+    except PasswordLengthError as e:
+        return Response.json({"ok": False, "error": str(e)}, status=400)
+
+    password_hash = await ahash_password(body.password)
+    try:
+        await db.register_user(internal, body.username, password_hash, ip)
+    except db.UsernameTakenError:
+        # Yes, this confirms the username is taken — a signup form cannot
+        # avoid that. It's exactly why accounts stay pending and invisible
+        # until a human approves them.
+        await db.record_login_attempt(internal, body.username, ip, False, "register")
+        return Response.json(
+            {"ok": False, "error": "Username already taken"}, status=409
+        )
+    await db.record_login_attempt(internal, body.username, ip, True, "register")
+    # No session: the account is pending, so nothing to sign in to yet.
+    return Response.json({"ok": True})
