@@ -172,6 +172,93 @@ after disabling every other provider. `disable-provider` refuses to disable the
 last provider that could still sign someone in (the same guard applies in the
 UI).
 
+### For provider authors
+
+See [`examples/datasette-accounts-demo-auth`](examples/datasette-accounts-demo-auth/) —
+a tiny, installable demo provider whose README doubles as the provider-author
+tutorial (the hookspec contract, what core does for you, and a security
+checklist). It is development-only and deliberately insecure — sign-in is a
+subject plus a plaintext 4-digit PIN, claimed on first use — so it exercises the
+whole external path (a real verification step, provider-owned storage, an actual
+UI) without needing any external accounts; copy it as scaffolding for a real
+OAuth/OIDC provider. For real-world, non-toy examples see
+the `datasette-accounts-github`, `datasette-accounts-discord`, and
+`datasette-accounts-bluesky` sibling packages (an OAuth2 provider and, for
+Bluesky, atproto OAuth with PAR/DPoP/PKCE).
+
+#### Building a sign-in provider
+
+The **documented, stable API surface** a provider package may rely on (nothing
+else — reaching into undocumented internals is a plugin bug, not a supported
+extension point):
+
+- **The provider contract** (`datasette_accounts.providers`): `AuthProvider`
+  (`key` / `label` / `start_path`, optional `icon` / `brand_color`, optional
+  `configured(self, datasette)`), `provider_gate(key)` (the enabled-404 +
+  CSRF-on-POST + method-gate decorator for your routes), `finish_login(...)`
+  (the single termination point every flow returns from — see
+  `LocalIdentity`/`ExternalIdentity` below), `start_state` (the one state a
+  start route sends to its IdP: a core-minted link/step-up state carried
+  through, else a fresh login-intent one) and `make_state`/`read_state`
+  (core-owned, signed OAuth `state`). The demo package's README walks through
+  all of these with runnable snippets.
+
+  `configured()` is usually a plain sync method (a fixed set of env vars,
+  checked instantly — see the Discord provider). It may instead be `async def`
+  and return an awaited bool, for a provider whose readiness genuinely depends
+  on a runtime, DB-backed value that can't be read synchronously. Core awaits
+  the result only when it is itself awaitable, so an existing sync override
+  needs no change.
+
+- **Identity kinds**: hand `finish_login` either a `LocalIdentity(user_id)` —
+  you've already resolved an existing account (a password-flow completion) — or
+  an `ExternalIdentity(provider, subject, email=, email_verified=,
+  username_hint=, display_name=)` — you've proven control of a third-party
+  identity and let core map `(provider, subject)` to an account through the
+  identities table, applying the per-provider signups policy for a first-seen
+  identity. `subject` must be the IdP's stable id, **never** an email, and
+  never empty — `finish_login` refuses an empty subject so a provider that
+  lost the id can't map every visitor onto one account.
+
+- **Also public for provider tests** (`datasette_accounts.providers`):
+  `get_registry(datasette)` (the `{key: AuthProvider}` registry) and
+  `provider_source(provider)` (a provider's distribution package), plus the
+  `STATE_COOKIE` constant and, from `datasette_accounts.security`, the module
+  itself and its `COOKIE_NAME` / `SIGN_NAMESPACE` constants — enough to assert a
+  session was minted and to inspect the state cookie in an end-to-end test.
+  Everything else a provider's tests need is reachable the way an operator
+  reaches it: give each test an on-disk internal DB (`Datasette(internal=path)`),
+  enable the provider with `datasette accounts enable-provider KEY -i path` /
+  `set-signups` (click's `CliRunner`, on a worker thread from async tests),
+  create accounts with `datasette accounts create` and sign them in through
+  `POST /-/login/api/authenticate`, and assert on the
+  `datasette_accounts_users` / `_identities` / `_sessions` / `_login_audit`
+  tables with plain SQL. `datasette_accounts.db` / `passwords` / `sessions`
+  are internals and may change without notice.
+
+- **Token hygiene — patterns to copy, not a shared helper.** A magic-link-style
+  provider needs its own one-time token table (core's own invite/reset tokens
+  are **not** public API — don't import from `datasette_accounts.db`'s token
+  helpers, and don't share core's tables). Copy the pattern core itself uses:
+  - store a **sha256 hash** of the token, never the raw value;
+  - **single-use, claim-by-delete**: redeeming a token is a `DELETE` (with
+    `RETURNING`, or equivalent) inside your write transaction, so a double-
+    submit race or an expired-but-unpurged link both simply find nothing to
+    claim;
+  - a **TTL**, checked in the same delete (an expired row is indistinguishable
+    from a missing one to the caller);
+  - **one live token per target** — minting a new one invalidates whatever
+    the target already had, so an old, forgotten link can never be redeemed
+    alongside a fresh one.
+
+  A shared token helper may be extracted from core later once a second real
+  consumer exists; for now, treat this as a pattern to reimplement, not a
+  dependency to reach for.
+
+Read the demo package's README for the full security checklist (wrap every route
+in `provider_gate`, never match by email, never set cookies yourself, always
+`read_state` on a callback, verify the IdP's response before trusting it).
+
 ## Messages
 
 Admins can write optional help text under **`/-/admin/config`** — a sign-in prompt
