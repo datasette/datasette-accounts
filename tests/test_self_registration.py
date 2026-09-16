@@ -118,8 +118,8 @@ async def test_toggle_requires_admin():
     await insert_user(ds, "alice")  # not an admin
     _, cookies = await login(ds, "alice", "password123")
     r = await ds.client.post(
-        "/-/admin/api/set-registration",
-        content=json.dumps({"enabled": True}),
+        "/-/admin/api/set-provider",
+        content=json.dumps({"key": "password", "signups": "approval"}),
         headers=JSON,
         cookies=cookies,
     )
@@ -135,13 +135,13 @@ async def test_toggle_on_makes_page_live_immediately_off_kills_submit():
     _, cookies = await login(ds, "boss", "password123")
 
     on = await ds.client.post(
-        "/-/admin/api/set-registration",
-        content=json.dumps({"enabled": True}),
+        "/-/admin/api/set-provider",
+        content=json.dumps({"key": "password", "signups": "approval"}),
         headers=JSON,
         cookies=cookies,
     )
     assert on.status_code == 200
-    assert on.json() == {"ok": True, "enabled": True}
+    assert on.json() == {"ok": True, "enabled": True, "signups": "approval"}
 
     page = await ds.client.get("/-/register")
     assert page.status_code == 200
@@ -157,12 +157,12 @@ async def test_toggle_on_makes_page_live_immediately_off_kills_submit():
     # Flip off mid-session: the page 404s again and submit refuses, with no
     # restart in between.
     off = await ds.client.post(
-        "/-/admin/api/set-registration",
-        content=json.dumps({"enabled": False}),
+        "/-/admin/api/set-provider",
+        content=json.dumps({"key": "password", "signups": "off"}),
         headers=JSON,
         cookies=cookies,
     )
-    assert off.json() == {"ok": True, "enabled": False}
+    assert off.json() == {"ok": True, "enabled": True, "signups": "off"}
 
     page_again = await ds.client.get("/-/register")
     assert page_again.status_code == 404
@@ -646,19 +646,23 @@ async def test_config_page_data_carries_registration_state():
     await insert_user(ds, "boss", is_admin=True)
     _, cookies = await login(ds, "boss", "password123")
 
+    def password_signups(resp):
+        rows = {p["key"]: p for p in page_data_of(resp)["providers"]}
+        return rows["password"]["signups"]
+
     r = await ds.client.get("/-/admin/config", cookies=cookies)
-    assert page_data_of(r)["registration_enabled"] is False
+    assert password_signups(r) == "off"
 
     on = await ds.client.post(
-        "/-/admin/api/set-registration",
-        content=json.dumps({"enabled": True}),
+        "/-/admin/api/set-provider",
+        content=json.dumps({"key": "password", "signups": "approval"}),
         headers=JSON,
         cookies=cookies,
     )
     assert on.status_code == 200
 
     r = await ds.client.get("/-/admin/config", cookies=cookies)
-    assert page_data_of(r)["registration_enabled"] is True
+    assert password_signups(r) == "approval"
 
 
 @pytest.mark.asyncio
@@ -672,8 +676,8 @@ async def test_login_page_data_carries_allow_register():
 
     # Flip via the admin API — the login page reflects it on the next request.
     await ds.client.post(
-        "/-/admin/api/set-registration",
-        content=json.dumps({"enabled": True}),
+        "/-/admin/api/set-provider",
+        content=json.dumps({"key": "password", "signups": "approval"}),
         headers=JSON,
         cookies=cookies,
     )
@@ -681,8 +685,8 @@ async def test_login_page_data_carries_allow_register():
     assert page_data_of(r)["allow_register"] is True
 
     await ds.client.post(
-        "/-/admin/api/set-registration",
-        content=json.dumps({"enabled": False}),
+        "/-/admin/api/set-provider",
+        content=json.dumps({"key": "password", "signups": "off"}),
         headers=JSON,
         cookies=cookies,
     )

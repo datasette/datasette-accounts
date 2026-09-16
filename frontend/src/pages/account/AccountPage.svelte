@@ -2,6 +2,7 @@
   import type { AccountPageData } from "../../page_data/AccountPageData.types.ts";
   import { loadPageData } from "../../page_data/load.ts";
   import { postJSON } from "../../lib/api.ts";
+  import Modal from "../../lib/Modal.svelte";
 
   const pageData = loadPageData<AccountPageData>();
 
@@ -30,6 +31,88 @@
   let sessionsBusy = $state(false);
   const hasOthers = $derived(sessions.some((s) => !s.current));
 
+  // --- Sign-in methods (design §6). Password status + linked identities +
+  // the enabled external providers still available to link.
+  type Identity = NonNullable<AccountPageData["identities"]>[number];
+  type Linkable = NonNullable<AccountPageData["linkable_providers"]>[number];
+  const identities = pageData.identities ?? [];
+  const linkable = pageData.linkable_providers ?? [];
+  const hasPassword = pageData.has_password !== false;
+
+  // Proof modal, shared by link + unlink (both change how the account can be
+  // signed into): a password account confirms its password, a password-less
+  // account re-completes one already-linked provider's flow — for unlink,
+  // one OTHER than the method being removed.
+  type Pending =
+    | { kind: "link"; target: Linkable }
+    | { kind: "unlink"; identity: Identity };
+  let pending = $state<Pending | null>(null);
+  let proofPassword = $state("");
+  let proofStepUp = $state("");
+  let proofError = $state("");
+  let proofBusy = $state(false);
+
+  // The linked methods that can vouch for the pending action.
+  const proofChoices = $derived.by(() => {
+    const p = pending;
+    return p?.kind === "unlink"
+      ? identities.filter((i) => i.provider !== p.identity.provider)
+      : identities;
+  });
+  const pendingLabel = $derived(
+    pending?.kind === "link"
+      ? pending.target.label
+      : pending?.kind === "unlink"
+        ? pending.identity.label
+        : "",
+  );
+
+  function openProof(next: Pending) {
+    pending = next;
+    proofPassword = "";
+    proofError = "";
+    proofStepUp = proofChoices[0]?.provider ?? "";
+  }
+  const openLink = (p: Linkable) => openProof({ kind: "link", target: p });
+  const openUnlink = (i: Identity) =>
+    openProof({ kind: "unlink", identity: i });
+
+  async function submitProof(e: Event) {
+    e.preventDefault();
+    const p = pending;
+    if (!p) return;
+    proofError = "";
+    proofBusy = true;
+    const body: Record<string, unknown> =
+      p.kind === "link"
+        ? { provider: p.target.key }
+        : { provider: p.identity.provider, subject: p.identity.subject };
+    if (hasPassword) body.password = proofPassword;
+    else body.step_up_provider = proofStepUp;
+    const { ok, data } = await postJSON<{
+      ok: boolean;
+      start_url?: string;
+      error?: string;
+    }>(
+      p.kind === "link" ? "/-/account/api/link-start" : "/-/account/api/unlink",
+      body,
+    );
+    proofBusy = false;
+    if (!ok || !data.ok) {
+      // Render the server's refusal verbatim (wrong password, the strand
+      // guard's "Set a password first…", …).
+      proofError = data.error || "Could not continue.";
+    } else if (data.start_url) {
+      // Redirect-based proof — hand the browser off to the provider's start;
+      // its callback performs the link / unlink.
+      window.location.href = data.start_url;
+    } else {
+      // Done in the request (password proof + unlink). Reload so identities +
+      // linkable recompute server-side (the hash tab survives the reload).
+      window.location.reload();
+    }
+  }
+
   // Render a stored ISO timestamp in the viewer's locale; fall back to the raw
   // value if it can't be parsed.
   function fmtDate(iso: string | null | undefined): string {
@@ -37,7 +120,10 @@
     const d = new Date(iso);
     return isNaN(d.getTime())
       ? iso
-      : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+      : d.toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        });
   }
 
   async function refreshSessions() {
@@ -51,7 +137,10 @@
   async function sessionOp(path: string, body: Record<string, unknown>) {
     sessionsError = "";
     sessionsBusy = true;
-    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(path, body);
+    const { ok, data } = await postJSON<{ ok: boolean; error?: string }>(
+      path,
+      body,
+    );
     if (!ok || !data.ok) {
       sessionsError = data.error || "Operation failed";
     } else {
@@ -65,7 +154,9 @@
   }
 
   async function logoutOthers() {
-    if (!confirm("Log out all other sessions? Other devices will be signed out.")) {
+    if (
+      !confirm("Log out all other sessions? Other devices will be signed out.")
+    ) {
       return;
     }
     await sessionOp("/-/account/api/logout-others", {});
@@ -103,74 +194,152 @@
      own width instead. -->
 <div class="page">
   <h1>Your account</h1>
-  <p class="who">Signed in as <strong class="me">{pageData.username}</strong></p>
+  <p class="who">
+    Signed in as <strong class="me">{pageData.username}</strong>
+  </p>
 
   {#if pageData.must_change_password}
     <p class="msg msg-error">Set a new password before continuing.</p>
   {:else}
     <nav class="tabs" aria-label="Account sections">
-      <a href="#password" class:active={tab === "password"} aria-current={tab === "password" ? "page" : undefined}>Password</a>
-      <a href="#sessions" class:active={tab === "sessions"} aria-current={tab === "sessions" ? "page" : undefined}>Sessions</a>
+      <a
+        href="#password"
+        class:active={tab === "password"}
+        aria-current={tab === "password" ? "page" : undefined}>Password</a
+      >
+      <a
+        href="#sessions"
+        class:active={tab === "sessions"}
+        aria-current={tab === "sessions" ? "page" : undefined}
+        >Sign-in methods</a
+      >
     </nav>
   {/if}
 
   {#if pageData.must_change_password || tab === "password"}
-  <form class="card pw-card" onsubmit={submit}>
-    <h2>Change password</h2>
-    {#if message}<p class="msg msg-ok">{message}</p>{/if}
-    {#if error}<p class="msg msg-error">{error}</p>{/if}
-    <!-- Hidden username so password managers (1Password, Chrome, …) associate the
+    <form class="card pw-card" onsubmit={submit}>
+      <h2>Change password</h2>
+      {#if message}<p class="msg msg-ok">{message}</p>{/if}
+      {#if error}<p class="msg msg-error">{error}</p>{/if}
+      <!-- Hidden username so password managers (1Password, Chrome, …) associate the
          new password with this account and offer to update the saved entry. -->
-    <input
-      class="pw-username"
-      type="text"
-      name="username"
-      autocomplete="username"
-      value={pageData.username}
-      readonly
-      tabindex="-1"
-      aria-hidden="true"
-    />
-    {#if !pageData.must_change_password}
+      <input
+        class="pw-username"
+        type="text"
+        name="username"
+        autocomplete="username"
+        value={pageData.username}
+        readonly
+        tabindex="-1"
+        aria-hidden="true"
+      />
+      {#if !pageData.must_change_password}
+        <label class="field">
+          <span>Current password</span>
+          <input
+            id="current-password"
+            name="current-password"
+            type="password"
+            bind:value={current}
+            autocomplete="current-password"
+            required
+          />
+        </label>
+      {/if}
       <label class="field">
-        <span>Current password</span>
+        <span>New password</span>
         <input
-          id="current-password"
-          name="current-password"
+          id="new-password"
+          name="new-password"
           type="password"
-          bind:value={current}
-          autocomplete="current-password"
+          bind:value={next}
+          autocomplete="new-password"
           required
         />
       </label>
-    {/if}
-    <label class="field">
-      <span>New password</span>
-      <input
-        id="new-password"
-        name="new-password"
-        type="password"
-        bind:value={next}
-        autocomplete="new-password"
-        required
-      />
-    </label>
-    <label class="field">
-      <span>Confirm new password</span>
-      <input
-        id="confirm-password"
-        name="confirm-password"
-        type="password"
-        bind:value={confirmNext}
-        autocomplete="new-password"
-        required
-      />
-    </label>
-    <button type="submit" class="btn-primary" disabled={busy}>
-      {busy ? "Saving…" : "Change password"}
-    </button>
-  </form>
+      <label class="field">
+        <span>Confirm new password</span>
+        <input
+          id="confirm-password"
+          name="confirm-password"
+          type="password"
+          bind:value={confirmNext}
+          autocomplete="new-password"
+          required
+        />
+      </label>
+      <button type="submit" class="btn-primary" disabled={busy}>
+        {busy ? "Saving…" : "Change password"}
+      </button>
+    </form>
   {:else}
+    <div class="card methods-card">
+      <h2>Sign-in methods</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th>Identity</th>
+              <th>Last used</th>
+              <th><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="badge badge-pw">password</span></td>
+              <td>
+                {#if hasPassword}
+                  Set
+                  <span class="muted small"
+                    >· <a href="#password">change below</a></span
+                  >
+                {:else}
+                  <span class="muted">Not set</span>
+                {/if}
+              </td>
+              <td></td>
+              <td></td>
+            </tr>
+            {#each identities as i (i.provider + i.subject)}
+              <tr>
+                <td><span class="badge badge-provider">{i.label}</span></td>
+                <td>
+                  subject <code>{i.subject}</code>
+                  <span class="muted small"
+                    >· linked {fmtDate(i.created_at)}</span
+                  >
+                </td>
+                <td class="nowrap">
+                  {#if i.last_login_at}{fmtDate(i.last_login_at)}{:else}<span
+                      class="muted">—</span
+                    >{/if}
+                </td>
+                <td class="row-actions">
+                  <button
+                    class="btn-sm btn-danger"
+                    onclick={() => openUnlink(i)}>Unlink</button
+                  >
+                </td>
+              </tr>
+            {/each}
+            {#each linkable as p (p.key)}
+              <tr>
+                <td><span class="badge badge-provider">{p.label}</span></td>
+                <td class="muted">Not linked</td>
+                <td></td>
+                <td class="row-actions">
+                  <button class="btn-sm" onclick={() => openLink(p)}
+                    >Link…</button
+                  >
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="card">
       <h2>Sessions</h2>
       {#if sessionsError}<p class="msg msg-error">{sessionsError}</p>{/if}
@@ -180,8 +349,11 @@
         <div class="table-wrap">
           <table>
             <thead>
+              <!-- "Signed in via" is the new provenance column (design §7),
+                   beside the existing IP / created / last-seen columns. -->
               <tr>
                 <th>Device</th>
+                <th>Signed in via</th>
                 <th>IP</th>
                 <th>Signed in</th>
                 <th>Last seen</th>
@@ -193,12 +365,20 @@
                 <tr>
                   <td class="device">
                     {#if s.user_agent}
-                      <span class="ua" title={s.user_agent}>{s.user_agent}</span>
+                      <span class="ua" title={s.user_agent}>{s.user_agent}</span
+                      >
                     {:else}
                       <span class="muted">—</span>
                     {/if}
                     {#if s.current}
                       <span class="badge badge-current">This device</span>
+                    {/if}
+                  </td>
+                  <td>
+                    {#if s.provider === "password"}
+                      <span class="badge badge-pw">password</span>
+                    {:else}
+                      <span class="badge badge-provider">{s.provider}</span>
                     {/if}
                   </td>
                   <td>{s.ip ?? "—"}</td>
@@ -222,7 +402,11 @@
         </div>
         {#if hasOthers}
           <div class="sessions-foot">
-            <button class="btn-sm btn-danger" disabled={sessionsBusy} onclick={logoutOthers}>
+            <button
+              class="btn-sm btn-danger"
+              disabled={sessionsBusy}
+              onclick={logoutOthers}
+            >
               Log out other sessions
             </button>
           </div>
@@ -232,7 +416,114 @@
   {/if}
 </div>
 
+<!-- Proof modal (design §6): linking a provider or unlinking one. Password
+     accounts confirm their password (the unlink then happens right here);
+     password-less accounts pick another already-linked provider to
+     re-complete, and its callback performs the link / unlink. -->
+<Modal
+  open={pending !== null}
+  onclose={() => (pending = null)}
+  title={pending?.kind === "unlink"
+    ? `Unlink ${pendingLabel} from your account`
+    : pending
+      ? `Link ${pendingLabel} to your account`
+      : "Confirm"}
+>
+  <form id="proof-form" onsubmit={submitProof}>
+    {#if proofError}<p class="msg msg-error">{proofError}</p>{/if}
+    {#if hasPassword}
+      <p class="lead muted">
+        {#if pending?.kind === "unlink"}
+          Confirm your password to unlink {pendingLabel}. You'll no longer be
+          able to sign in with it.
+        {:else}
+          Confirm your password to continue. You'll then be sent to
+          {pendingLabel} to sign in once.
+        {/if}
+      </p>
+      <label class="field">
+        <span>Password</span>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          type="password"
+          name="password"
+          bind:value={proofPassword}
+          autocomplete="current-password"
+          required
+          autofocus
+        />
+      </label>
+    {:else if proofChoices.length > 0}
+      <p class="lead muted">
+        {#if pending?.kind === "unlink"}
+          Confirm another sign-in method to unlink {pendingLabel}. You'll
+          re-sign-in with it once; {pendingLabel} is then removed.
+        {:else}
+          Confirm an existing sign-in method to continue. You'll re-sign-in
+          with it once, then be sent to {pendingLabel}.
+        {/if}
+      </p>
+      <label class="field">
+        <span>Confirm with</span>
+        <select bind:value={proofStepUp}>
+          {#each proofChoices as i (i.provider + i.subject)}
+            <option value={i.provider}>{i.label}</option>
+          {/each}
+        </select>
+      </label>
+    {:else if pending?.kind === "unlink"}
+      <p class="lead muted">
+        {pendingLabel} is your only way to sign in. Set a password first, then
+        unlink it.
+      </p>
+    {:else}
+      <p class="lead muted">
+        This account has no other sign-in method to confirm with. Set a password
+        first, then link {pendingLabel}.
+      </p>
+    {/if}
+  </form>
+  {#snippet footer()}
+    <button class="btn-sm" onclick={() => (pending = null)}>Cancel</button>
+    {#if hasPassword || proofChoices.length > 0}
+      <button
+        class="btn-sm {pending?.kind === 'unlink' ? 'btn-danger' : 'btn-primary'}"
+        type="submit"
+        form="proof-form"
+        disabled={proofBusy}
+      >
+        {#if proofBusy}Continuing…{:else if pending?.kind === "unlink"}Unlink
+          {pendingLabel}{:else}Continue to {pendingLabel}{/if}
+      </button>
+    {/if}
+  {/snippet}
+</Modal>
+
 <style>
+  .lead {
+    margin: 0 0 1rem;
+  }
+  .small {
+    font-size: 0.85rem;
+  }
+  .methods-card {
+    margin-bottom: 1.25rem;
+  }
+  .badge-pw {
+    color: var(--ok);
+  }
+  .badge-provider {
+    color: var(--acc);
+  }
+  select {
+    width: 100%;
+    padding: 0.55rem 0.7rem;
+    font: inherit;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--ink);
+  }
   .who {
     margin: 0 0 1.25rem;
     color: var(--muted);
@@ -320,7 +611,9 @@
   }
   .ua {
     display: inline-block;
-    max-width: 340px;
+    /* Capped tighter now that the table carries an extra "Signed in via"
+       column, so the row's actions stay on-screen (full UA in the title). */
+    max-width: 220px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

@@ -11,6 +11,7 @@ import pytest
 from datasette import Response
 from datasette.app import Datasette
 from providers_util import (
+    page_data_of,
     JSON,
     FakeRequest,
     FakeResponse,
@@ -760,6 +761,26 @@ async def test_disable_provider_revokes_its_sessions_except_the_acting_one(
     assert await by_provider() == {"password": 1}
     still = await _set_provider(ds, cookies, key="password", enabled=True)
     assert still.status_code == 200  # the acting session still works
+
+
+@pytest.mark.asyncio
+async def test_config_page_counts_the_sessions_disabling_would_revoke(
+    register_provider,
+):
+    """`active_sessions` per provider row = what turning it off signs out: the
+    provider's live sessions minus the viewer's own (the confirm names it)."""
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    await _set_provider(ds, cookies, key="echo", enabled=True)
+    uid = await insert_user(ds, "alice")
+    for _ in range(2):
+        r = await ds.client.get(f"/-/echo-auth/finish?uid={uid}")
+        assert r.cookies.get(COOKIE_NAME)
+    r = await ds.client.get("/-/admin/config", cookies=cookies)
+    rows = {p["key"]: p for p in page_data_of(r)["providers"]}
+    assert rows["echo"]["active_sessions"] == 2
+    assert rows["password"]["active_sessions"] == 0  # only the admin's own
 
 
 @pytest.mark.asyncio
