@@ -31,10 +31,13 @@ def make_pending(db_path, username="applicant", password="password123"):
 
 
 def registration_setting(db_path):
+    # Self-registration migrated to the password provider's signups policy
+    # (auth-providers m009 / D5): the legacy 'registration_enabled' row became
+    # 'provider:password:signups', with 'approval' standing in for the old '1'.
     rows = query(
         db_path,
         "SELECT value FROM datasette_accounts_settings "
-        "WHERE key = 'registration_enabled'",
+        "WHERE key = 'provider:password:signups'",
     )
     return rows[0]["value"] if rows else None
 
@@ -88,7 +91,7 @@ def test_registration_on_off_flip_audit_and_liveness(tmp_path):
     result = run("registration", "on", "-y", "-i", db)
     assert result.exit_code == 0
     assert "Enabled self-registration." in result.output
-    assert registration_setting(db) == "1"
+    assert registration_setting(db) == "approval"
     assert "Self-registration is on." in run("registration", "status", "-i", db).output
 
     # The toggle is live: the register endpoint accepts a request end to end.
@@ -114,16 +117,21 @@ def test_registration_on_off_flip_audit_and_liveness(tmp_path):
     # ...and closed again: the page 404s.
     assert http(db, "GET", "/-/register").status_code == 404
 
-    # Both flips audited with the CLI actor attribution.
+    # Both flips audited with the CLI actor attribution. Self-registration is
+    # the password provider's signups policy (D5), so the toggle writes the
+    # unified set-provider-signups op with the mode carried in the detail.
     audit = query(
         db,
-        "SELECT operation, actor_id FROM datasette_accounts_admin_audit "
-        "WHERE operation IN ('enable-registration', 'disable-registration') "
-        "ORDER BY id",
+        "SELECT operation, actor_id, detail FROM datasette_accounts_admin_audit "
+        "WHERE operation = 'set-provider-signups' ORDER BY id",
     )
     assert [a["operation"] for a in audit] == [
-        "enable-registration",
-        "disable-registration",
+        "set-provider-signups",
+        "set-provider-signups",
+    ]
+    assert [json.loads(a["detail"]) for a in audit] == [
+        {"provider": "password", "mode": "approval"},
+        {"provider": "password", "mode": "off"},
     ]
     assert all(a["actor_id"] == f"cli:{getpass.getuser()}" for a in audit)
 
@@ -143,7 +151,7 @@ def test_registration_noop_flip_no_confirm_no_audit(tmp_path):
     audit = query(
         db,
         "SELECT operation FROM datasette_accounts_admin_audit "
-        "WHERE operation = 'enable-registration'",
+        "WHERE operation = 'set-provider-signups'",
     )
     assert len(audit) == 1
 

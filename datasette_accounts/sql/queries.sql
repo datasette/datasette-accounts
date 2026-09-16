@@ -238,15 +238,19 @@ WHERE actor_id = $actor_id::text
 ORDER BY last_seen_at DESC;
 
 -- Create a session that expires `ttl_days` from now.
+-- Create a session that expires `ttl_days` from now. `provider` records which
+-- sign-in provider minted the session (provenance, plans/auth-providers §7);
+-- 'password' for the built-in flow.
 -- name: insertSession
 INSERT INTO datasette_accounts_sessions
-    (token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip)
+    (token_sha256, actor_id, created_at, expires_at, last_seen_at, user_agent, ip,
+     provider)
 VALUES ($token_sha256::text, $actor_id::text,
         strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
         strftime('%Y-%m-%dT%H:%M:%f', 'now', printf('%+d days', $ttl_days::integer))
         || '+00:00',
         strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
-        $user_agent::text::, $ip::text::);
+        $user_agent::text::, $ip::text::, $provider::text);
 
 -- name: touchLastSeen
 UPDATE datasette_accounts_sessions
@@ -273,14 +277,60 @@ DELETE FROM datasette_accounts_sessions
 WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
 
 -- ============================================================================
+-- External sign-in identities (plans/auth-providers §7)
+--
+-- A (provider, subject) pair mapped to an account. Matching is by
+-- (provider, subject) ONLY — never email (decision D6). email/display_name are
+-- carried for audit detail + future use, never for account matching.
+-- ============================================================================
+
+-- name: selectIdentity :row -> IdentityRow
+SELECT provider, subject, user_id, email, display_name, created_at, last_login_at
+FROM datasette_accounts_identities
+WHERE provider = $provider::text AND subject = $subject::text;
+
+-- name: listIdentitiesForUser :rows -> IdentityRow
+SELECT provider, subject, user_id, email, display_name, created_at, last_login_at
+FROM datasette_accounts_identities
+WHERE user_id = $user_id::text
+ORDER BY created_at;
+
+-- Link a (provider, subject) to an account. last_login_at is NULL until the
+-- first sign-in *through* the link (touchIdentityLastLogin stamps it); a link
+-- created during a login mints the session and stamps it in the same flow.
+-- name: insertIdentity
+INSERT INTO datasette_accounts_identities
+    (provider, subject, user_id, email, display_name, created_at, last_login_at)
+VALUES ($provider::text, $subject::text, $user_id::text,
+        $email::text::, $display_name::text::,
+        strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00', NULL);
+
+-- name: touchIdentityLastLogin
+UPDATE datasette_accounts_identities
+SET last_login_at = strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00'
+WHERE provider = $provider::text AND subject = $subject::text;
+
+-- name: deleteIdentity
+DELETE FROM datasette_accounts_identities
+WHERE provider = $provider::text AND subject = $subject::text;
+
+-- Cascade: delete/reject of an account removes its identities in the same tx
+-- (like sessions/tokens). disable does NOT — re-enabling restores SSO.
+-- name: deleteIdentitiesForUser
+DELETE FROM datasette_accounts_identities WHERE user_id = $user_id::text;
+
+-- ============================================================================
 -- Login audit
 -- ============================================================================
 
+-- `provider` (nullable) records which sign-in provider the attempt was against
+-- (provenance, plans/auth-providers §7); NULL for password/legacy rows.
 -- name: insertLoginAttempt
-INSERT INTO datasette_accounts_login_audit (username, ip, timestamp, success, reason)
+INSERT INTO datasette_accounts_login_audit
+    (username, ip, timestamp, success, reason, provider)
 VALUES ($username::text::, $ip::text::,
         strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00',
-        $success::integer, $reason::text::);
+        $success::integer, $reason::text::, $provider::text::);
 
 -- Most-recent-first login-audit rows with optional exact username/ip filters
 -- (AND-combined). A NULL filter param disables that clause, collapsing the old

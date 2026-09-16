@@ -88,6 +88,7 @@ async def test_plugin_installed_and_tables_created():
     assert sorted(r[0] for r in tables.rows) == [
         "datasette_accounts_admin_audit",
         "datasette_accounts_capability_grants",
+        "datasette_accounts_identities",
         "datasette_accounts_login_audit",
         "datasette_accounts_password_tokens",
         "datasette_accounts_sessions",

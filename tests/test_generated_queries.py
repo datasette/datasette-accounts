@@ -91,10 +91,15 @@ def test_value_and_existence_helpers(conn):
 
 def test_optional_login_filters(conn):
     gen.insert_login_attempt(
-        conn, username="alice", ip="1.2.3.4", success=1, reason="success"
+        conn, username="alice", ip="1.2.3.4", success=1, reason="success", provider=None
     )
     gen.insert_login_attempt(
-        conn, username="bob", ip=None, success=0, reason="bad_password"
+        conn,
+        username="bob",
+        ip=None,
+        success=0,
+        reason="bad_password",
+        provider="echo",
     )
     assert len(gen.list_login_attempts(conn, username=None, ip=None, limit=10)) == 2
     only_alice = gen.list_login_attempts(conn, username="alice", ip=None, limit=10)
@@ -370,6 +375,7 @@ def test_insert_session_expiry_is_now_plus_days(conn):
         ttl_days=7,
         user_agent="UA",
         ip="1.2.3.4",
+        provider="password",
     )
     row = gen.select_session(conn, token_sha256="tok")
     assert row is not None
@@ -388,7 +394,9 @@ def test_purge_login_audit_respects_retention(conn):
         "INSERT INTO datasette_accounts_login_audit (username, ip, timestamp, success) "
         "VALUES ('old', NULL, '2000-01-01T00:00:00.000+00:00', 0)"
     )
-    gen.insert_login_attempt(conn, username="new", ip=None, success=1, reason=None)
+    gen.insert_login_attempt(
+        conn, username="new", ip=None, success=1, reason=None, provider=None
+    )
     gen.purge_login_audit(conn, retention_days=30)
     remaining = gen.list_login_attempts(conn, username=None, ip=None, limit=10)
     assert [r.username for r in remaining] == ["new"]
