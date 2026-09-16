@@ -323,8 +323,18 @@ class AccountsGroup(click.Group):
             ),
         ),
         (
+            "Sign-in providers",
+            (
+                "providers",
+                "enable-provider",
+                "disable-provider",
+                "set-signups",
+                "registration",
+            ),
+        ),
+        (
             "Inspection & utility",
-            ("registration", "audit", "login-attempts", "hash-password"),
+            ("audit", "login-attempts", "hash-password"),
         ),
     )
 

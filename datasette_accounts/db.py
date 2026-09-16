@@ -40,9 +40,6 @@ PASSWORD_TOKENS = "datasette_accounts_password_tokens"
 SETTINGS = "datasette_accounts_settings"
 IDENTITIES = "datasette_accounts_identities"
 
-# Self-registration is now the password provider's signups setting (decision
-# D5 / m009): the legacy 'registration_enabled' row is migrated to this key.
-
 # datasette-acl tables we reference (softly) for the "group" principal. We never
 # write them — acl owns them — but we join them to resolve group membership +
 # names when acl is installed. Absent → the group principal is simply disabled.
@@ -71,6 +68,14 @@ LAST_SEEN_THROTTLE_SECONDS = 60
 
 class LastAdminError(Exception):
     """Raised when an operation would remove the final enabled admin."""
+
+
+class LastProviderError(Exception):
+    """Raised when disabling a provider would leave no enabled sign-in provider.
+
+    The auth-surface sibling of ``LastAdminError`` (design D9): an instance must
+    always retain at least one enabled provider, or nobody could ever sign in.
+    Enforced in the same write tx as the disable so there is no last-two race."""
 
 
 class UsernameTakenError(Exception):
@@ -960,6 +965,109 @@ async def get_registration_enabled(db):
     open whenever password signups are anything other than ``off``.
     """
     return await get_provider_signups(db, "password") != "off"
+
+
+def _provider_enabled_in_conn(conn, key):
+    """In-tx read of ``provider:{key}:enabled`` with the absence default (design
+    §7): an absent row means the built-in password provider is enabled and every
+    external provider is disabled."""
+    raw = gen.select_setting(conn, key=f"provider:{key}:enabled")
+    if raw is None:
+        return key == "password"
+    return raw == "1"
+
+
+def _guard_last_provider(conn, disabling_key, installed_keys):
+    """Raise LastProviderError if disabling ``disabling_key`` would leave no
+    other enabled provider.
+
+    Counts, among the *other* installed keys, any that would remain enabled — an
+    explicit ``'1'`` row, or no row AND ``key == "password"`` (the built-in's
+    absence default). Runs inside the caller's write tx so count + write are
+    atomic (sibling of ``_guard_last_admin``)."""
+    for other in installed_keys:
+        if other == disabling_key:
+            continue
+        if _provider_enabled_in_conn(conn, other):
+            return
+    raise LastProviderError()
+
+
+async def count_sessions_for_provider(
+    db, key, *, keep_token_sha256=None, keep_admin_sessions=False
+):
+    """How many live sessions disabling ``key`` would revoke — the same WHERE as
+    the revoke in ``set_provider_enabled`` (same ``keep_*`` exemptions), so the
+    UI/CLI warning and the switch agree."""
+    return await db.execute_fn(
+        lambda conn: (
+            gen.count_sessions_for_provider(
+                conn,
+                provider=key,
+                keep_token_sha256=keep_token_sha256,
+                keep_admin_sessions=1 if keep_admin_sessions else 0,
+            )
+            or 0
+        )
+    )
+
+
+async def set_provider_enabled(
+    db,
+    actor_id,
+    key,
+    enabled,
+    *,
+    installed_keys,
+    keep_token_sha256=None,
+    keep_admin_sessions=False,
+):
+    """Enable or disable auth provider ``key``. Returns the new (bool) state.
+
+    One write tx. Writes an explicit ``'1'`` / ``'0'`` row both ways (never a
+    row-delete) so an admin's deliberate choice survives regardless of the key's
+    absence default and the audit trail reads unambiguously. No-op — no audit
+    row — when already in the requested state. Disabling runs the last-provider
+    guard (``LastProviderError``) in the same tx and then revokes every live
+    session the provider minted (the sibling of ``disable_user``'s revoke: an
+    admin turning off a compromised IdP expects its sign-ins to end, not to
+    outlive the switch) — except ``keep_token_sha256``, the session performing
+    the disable, so the acting admin isn't signed out mid-action, and, with
+    ``keep_admin_sessions``, every admin account's sessions (the CLI has no
+    acting session to spare, so it spares the admins instead — an operator at
+    the shell doesn't lock the admins out). ``installed_keys`` is the list of
+    provider keys that
+    could still sign someone in (installed AND configured), passed in because
+    ``db.py`` must not import ``__init__`` or ``providers``. Audit ops
+    ``enable-provider`` / ``disable-provider``, detail ``{provider}``.
+    """
+    enabled_key = f"provider:{key}:enabled"
+
+    def write(conn):
+        current = _provider_enabled_in_conn(conn, key)
+        if bool(enabled) == current:
+            return current
+        if not enabled:
+            _guard_last_provider(conn, key, installed_keys)
+            gen.delete_sessions_for_provider(
+                conn,
+                provider=key,
+                keep_token_sha256=keep_token_sha256,
+                keep_admin_sessions=1 if keep_admin_sessions else 0,
+            )
+        gen.upsert_setting(
+            conn, key=enabled_key, value="1" if enabled else "0", updated_by=actor_id
+        )
+        _audit(
+            conn,
+            "enable-provider" if enabled else "disable-provider",
+            actor_id,
+            None,
+            {"provider": key},
+        )
+        return bool(enabled)
+
+    return await db.execute_write_fn(write)
 
 
 SIGNUPS_MODES = ("off", "approval", "auto")

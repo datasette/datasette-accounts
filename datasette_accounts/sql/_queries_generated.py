@@ -545,6 +545,51 @@ WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
     return None
 
 
+def count_sessions_for_provider(
+    conn: sqlite3.Connection,
+    provider: str,
+    keep_token_sha256: str | None,
+    keep_admin_sessions: int,
+) -> Any | None:
+    sql = """\
+SELECT COUNT(*) FROM datasette_accounts_sessions
+WHERE provider = $provider::text
+  AND token_sha256 != COALESCE($keep_token_sha256::text::, '')
+  AND ($keep_admin_sessions::integer = 0 OR actor_id NOT IN
+       (SELECT id FROM datasette_accounts_users WHERE is_admin = 1));
+"""
+    params = {
+        "provider::text": provider,
+        "keep_token_sha256::text::": keep_token_sha256,
+        "keep_admin_sessions::integer": keep_admin_sessions,
+    }
+    cursor = conn.execute(sql, params)
+    row = cursor.fetchone()
+    return row[0] if row is not None else None
+
+
+def delete_sessions_for_provider(
+    conn: sqlite3.Connection,
+    provider: str,
+    keep_token_sha256: str | None,
+    keep_admin_sessions: int,
+) -> None:
+    sql = """\
+DELETE FROM datasette_accounts_sessions
+WHERE provider = $provider::text
+  AND token_sha256 != COALESCE($keep_token_sha256::text::, '')
+  AND ($keep_admin_sessions::integer = 0 OR actor_id NOT IN
+       (SELECT id FROM datasette_accounts_users WHERE is_admin = 1));
+"""
+    params = {
+        "provider::text": provider,
+        "keep_token_sha256::text::": keep_token_sha256,
+        "keep_admin_sessions::integer": keep_admin_sessions,
+    }
+    conn.execute(sql, params)
+    return None
+
+
 def select_identity(
     conn: sqlite3.Connection, provider: str, subject: str
 ) -> IdentityRow | None:

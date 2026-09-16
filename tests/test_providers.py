@@ -5,6 +5,8 @@ A test provider is registered through pluggy *before* make_ds() (the registry is
 built at startup), then enabled by writing its settings row directly.
 """
 
+import json
+
 import pytest
 from datasette import Response
 from datasette.app import Datasette
@@ -554,3 +556,224 @@ async def test_refuse_clears_state_but_not_session():
     assert cookie_cleared(resp, STATE_COOKIE)
     # ...but the session cookie is neither set nor cleared (no session touched).
     assert not any(h.startswith(COOKIE_NAME + "=") for h in resp._set_cookie_headers)
+
+
+# --------------------------------------------------------------------------
+# Admin set-provider endpoint (POST /-/admin/api/set-provider)
+# --------------------------------------------------------------------------
+
+
+async def _admin_cookies(ds, username="boss"):
+    """Create an admin, log in through the real endpoint, return its cookies."""
+    await insert_user(ds, username, is_admin=True)
+    r = await ds.client.post(
+        "/-/login/api/authenticate",
+        content=json.dumps({"username": username, "password": "password123"}),
+        headers=JSON,
+    )
+    cookie = r.cookies.get(COOKIE_NAME)
+    return {COOKIE_NAME: cookie} if cookie else {}
+
+
+async def _set_provider(ds, cookies, **body):
+    return await ds.client.post(
+        "/-/admin/api/set-provider",
+        content=json.dumps(body),
+        headers=JSON,
+        cookies=cookies,
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_provider_enables_and_takes_effect_next_request(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+
+    # Disabled at first: the provider's routes 404.
+    assert (await ds.client.get("/-/echo-auth/ping")).status_code == 404
+
+    on = await _set_provider(ds, cookies, key="echo", enabled=True)
+    assert on.status_code == 200
+    assert on.json() == {"ok": True, "enabled": True, "signups": "off"}
+
+    # Live on the very next request — no restart.
+    assert (await ds.client.get("/-/echo-auth/ping")).status_code == 200
+
+    off = await _set_provider(ds, cookies, key="echo", enabled=False)
+    assert off.json()["enabled"] is False
+    assert (await ds.client.get("/-/echo-auth/ping")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_set_provider_signups_only(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    r = await _set_provider(ds, cookies, key="echo", signups="approval")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "enabled": False, "signups": "approval"}
+    internal = ds.get_internal_database()
+    assert await db.get_provider_signups(internal, "echo") == "approval"
+
+
+@pytest.mark.asyncio
+async def test_set_provider_requires_admin(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    await insert_user(ds, "alice")  # not an admin
+    r = await ds.client.post(
+        "/-/login/api/authenticate",
+        content=json.dumps({"username": "alice", "password": "password123"}),
+        headers=JSON,
+    )
+    cookies = {COOKIE_NAME: r.cookies.get(COOKIE_NAME)}
+    resp = await _set_provider(ds, cookies, key="echo", enabled=True)
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_set_provider_unknown_key_400(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    resp = await _set_provider(ds, cookies, key="nope", enabled=True)
+    assert resp.status_code == 400
+    assert resp.json()["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_set_provider_invalid_signups_400(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    resp = await _set_provider(ds, cookies, key="echo", signups="sometimes")
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_set_provider_last_provider_guard(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+
+    # Only password is enabled → disabling it is refused.
+    refuse = await _set_provider(ds, cookies, key="password", enabled=False)
+    assert refuse.status_code == 400
+    assert refuse.json()["error"] == "Cannot disable the last sign-in provider."
+
+    # Enable echo, then password may be disabled...
+    await _set_provider(ds, cookies, key="echo", enabled=True)
+    ok = await _set_provider(ds, cookies, key="password", enabled=False)
+    assert ok.status_code == 200
+
+    # ...but now echo is the last one and cannot be disabled.
+    refuse2 = await _set_provider(ds, cookies, key="echo", enabled=False)
+    assert refuse2.status_code == 400
+
+
+class _UnconfiguredProvider(EchoProvider):
+    """Installed and enable-able, but its credentials aren't deployed."""
+
+    key = "unconf"
+    start_path = "/-/unconf-auth/start"
+    paths = ()
+
+    def configured(self, datasette):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_last_provider_guard_ignores_unconfigured_providers(
+    register_provider,
+):
+    # An enabled provider whose configured() is False can't sign anyone in, so
+    # it doesn't count as an alternative: disabling password would leave a
+    # login page with no form and no buttons.
+    register_provider(_UnconfiguredProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    await _set_provider(ds, cookies, key="unconf", enabled=True)
+    refuse = await _set_provider(ds, cookies, key="password", enabled=False)
+    assert refuse.status_code == 400
+    assert refuse.json()["error"] == "Cannot disable the last sign-in provider."
+    internal = ds.get_internal_database()
+    assert await db.get_provider_enabled(internal, "password") is True
+
+
+@pytest.mark.asyncio
+async def test_set_provider_password_auto_400(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    r = await _set_provider(ds, cookies, key="password", signups="auto")
+    assert r.status_code == 400
+    assert "auto-activate" in r.json()["error"]
+    internal = ds.get_internal_database()
+    assert await db.get_provider_signups(internal, "password") == "off"
+
+
+@pytest.mark.asyncio
+async def test_disable_provider_revokes_its_sessions_except_the_acting_one(
+    register_provider,
+):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    await _set_provider(ds, cookies, key="echo", enabled=True)
+    # Two sign-ins through echo (LocalIdentity finish, provider_key="echo"),
+    # one more password session besides the admin's own.
+    uid = await insert_user(ds, "alice")
+    echo1 = await ds.client.get(f"/-/echo-auth/finish?uid={uid}")
+    echo2 = await ds.client.get(f"/-/echo-auth/finish?uid={uid}")
+    assert echo1.cookies.get(COOKIE_NAME) and echo2.cookies.get(COOKIE_NAME)
+    other_pw = await ds.client.post(
+        "/-/login/api/authenticate",
+        content=json.dumps({"username": "alice", "password": "password123"}),
+        headers=JSON,
+    )
+    assert other_pw.status_code == 200
+    internal = ds.get_internal_database()
+
+    async def by_provider():
+        rows = await internal.execute(
+            f"SELECT provider, COUNT(*) FROM {db.SESSIONS} GROUP BY provider"
+        )
+        return dict(rows.rows)
+
+    assert await by_provider() == {"echo": 2, "password": 2}
+
+    # Disabling echo revokes exactly the echo sessions.
+    off = await _set_provider(ds, cookies, key="echo", enabled=False)
+    assert off.status_code == 200
+    assert await by_provider() == {"password": 2}
+    r = await ds.client.get(
+        "/-/account", cookies={COOKIE_NAME: echo1.cookies.get(COOKIE_NAME)}
+    )
+    assert r.status_code in (302, 401, 403)  # signed out
+
+    # Disabling password (echo re-enabled first) revokes the other password
+    # session but keeps the admin's own — they aren't signed out mid-action.
+    await _set_provider(ds, cookies, key="echo", enabled=True)
+    off2 = await _set_provider(ds, cookies, key="password", enabled=False)
+    assert off2.status_code == 200
+    assert await by_provider() == {"password": 1}
+    still = await _set_provider(ds, cookies, key="password", enabled=True)
+    assert still.status_code == 200  # the acting session still works
+
+
+@pytest.mark.asyncio
+async def test_set_provider_noop_writes_one_audit_row(register_provider):
+    register_provider(EchoProvider())
+    ds = await make_ds()
+    cookies = await _admin_cookies(ds)
+    await _set_provider(ds, cookies, key="echo", enabled=True)
+    await _set_provider(ds, cookies, key="echo", enabled=True)  # no-op
+    internal = ds.get_internal_database()
+    rows = (
+        await internal.execute(
+            f"SELECT operation FROM {db.ADMIN_AUDIT} "
+            "WHERE operation = 'enable-provider'"
+        )
+    ).rows
+    assert len(rows) == 1

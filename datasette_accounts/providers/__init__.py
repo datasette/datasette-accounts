@@ -56,6 +56,7 @@ __all__ = [
     "provider_gate",
     # Blessed for provider tests.
     "get_registry",
+    "provider_source",
     "STATE_COOKIE",
 ]
 
@@ -433,6 +434,26 @@ def _clear_state_cookie(response: Response) -> None:
 def get_registry(datasette: Datasette) -> dict[str, AuthProvider]:
     """The provider registry dict {key: AuthProvider} built at startup (§3)."""
     return getattr(datasette, REGISTRY_ATTR, {})
+
+
+async def usable_provider_keys(datasette: Datasette) -> list[str]:
+    """The installed provider keys that could still sign someone in — the ones
+    whose ``configured()`` holds. This is what the last-provider guard counts:
+    an enabled-but-unconfigured provider (no credentials deployed) is not an
+    alternative to the one being disabled."""
+    return [
+        key
+        for key, provider in get_registry(datasette).items()
+        if await provider_configured(datasette, provider)
+    ]
+
+
+def provider_source(provider: AuthProvider) -> str:
+    """The provider's source package — the top-level package of its class's
+    module (e.g. "datasette_accounts" for the built-in password provider, or the
+    third-party plugin's distribution package for an external provider). Shown in
+    the CLI `providers` listing."""
+    return (type(provider).__module__ or "").split(".")[0]
 
 
 def provider_start_path(datasette: Datasette, key: str) -> str:

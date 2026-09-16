@@ -120,6 +120,10 @@ datasette accounts unlock USERNAME        # clear lockout counters
 datasette accounts logout USERNAME        # revoke all of a user's sessions
 datasette accounts delete USERNAME --yes
 datasette accounts registration on|off|status  # open/close self-registration (runtime toggle)
+datasette accounts providers              # list installed sign-in providers + their state
+datasette accounts enable-provider KEY    # break-glass: turn a sign-in provider on
+datasette accounts disable-provider KEY   # turn one off (revokes its sessions, admins' kept; refuses the last usable provider)
+datasette accounts set-signups KEY off|approval|auto  # first-contact policy per provider
 datasette accounts audit                  # the admin-audit trail
 datasette accounts login-attempts         # the login-attempt audit
 datasette accounts hash-password [PASSWORD]
@@ -128,6 +132,45 @@ datasette accounts hash-password [PASSWORD]
 Run `datasette accounts COMMAND --help` for the full options of each. Generated
 passwords are printed once to stdout and never written to the audit trail or
 logs.
+
+## Sign-in providers
+
+The username/password login is the built-in **provider**. Other packages can add
+sign-in methods (GitHub, Google/OIDC, Discord, …) through the
+`datasette_accounts_auth_providers` hookspec, and every provider inherits the
+same account semantics: the disable/expire/pending gates, the shared approval
+queue and abuse caps, the session list, and the audit trail. A provider only
+proves control of an external identity — datasette-accounts owns identity,
+policy, and sessions. External identities map to accounts **only** by the IdP's
+stable subject id (never by email).
+
+### For admins
+
+Installing a provider package changes nothing until you enable it — external
+providers are **disabled by default**. From the CLI (the **Configuration**
+admin page offers the same switches):
+
+```bash
+datasette accounts providers -i accounts.db                 # list + state
+datasette accounts enable-provider github -i accounts.db    # turn it on
+datasette accounts set-signups github approval -i accounts.db  # off | approval | auto
+```
+
+Each provider has two runtime settings: **enabled** (on/off) and **signups**
+(`off` = only already-linked accounts may sign in; `approval` = first-time
+identities land in the approval queue; `auto` = first-time identities are
+activated immediately — for trusted external IdPs only, and not offered for
+the password provider, whose sign-ups always await approval). Disabling a
+provider also signs out everyone who signed in through it — the admin UI says
+how many sessions that is and keeps your own; the CLI keeps every admin
+account's sessions. Users link and unlink providers to their own account from
+`/-/account`, gated by fresh proof of an existing sign-in method.
+
+`enable-provider` is the **break-glass**: it works with only disk access and no
+web session, so a locked-out operator can always restore password login even
+after disabling every other provider. `disable-provider` refuses to disable the
+last provider that could still sign someone in (the same guard applies in the
+UI).
 
 ## Messages
 
