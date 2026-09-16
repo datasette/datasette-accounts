@@ -346,15 +346,15 @@ async def test_pending_account_login_is_generic_and_burns_dummy_verify(monkeypat
     )
 
     calls = {"n": 0}
-    import datasette_accounts.routes.api as api
+    import datasette_accounts.providers.password as password
 
-    real = api.averify_dummy
+    real = password.averify_dummy
 
     async def counting(password):
         calls["n"] += 1
         return await real(password)
 
-    monkeypatch.setattr(api, "averify_dummy", counting)
+    monkeypatch.setattr(password, "averify_dummy", counting)
 
     r, cookies = await login(ds, "newperson", "password123")
     assert r.status_code == 401

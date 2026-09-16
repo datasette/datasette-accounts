@@ -298,7 +298,7 @@ async def test_complete_sets_password_signs_in_and_redirects():
     )
     assert r.status_code == 200
     body = r.json()
-    assert body == {"ok": True, "redirect": "/"}
+    assert body == {"ok": True, "redirect": "/", "must_change_password": False}
     cookie = r.cookies.get(COOKIE_NAME)
     assert cookie
 
@@ -594,7 +594,7 @@ async def test_complete_reset_sets_password_revokes_other_sessions_signs_in_fres
         headers=JSON,
     )
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "redirect": "/"}
+    assert r.json() == {"ok": True, "redirect": "/", "must_change_password": False}
     new_cookie = r.cookies.get(COOKIE_NAME)
     assert new_cookie
 

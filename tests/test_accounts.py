@@ -155,15 +155,15 @@ async def test_unknown_and_wrong_password_are_indistinguishable():
 async def test_unknown_username_still_verifies_once(monkeypatch):
     ds = await make_ds()
     calls = {"n": 0}
-    import datasette_accounts.routes.api as api
+    import datasette_accounts.providers.password as password
 
-    real = api.averify_dummy
+    real = password.averify_dummy
 
     async def counting(password):
         calls["n"] += 1
         return await real(password)
 
-    monkeypatch.setattr(api, "averify_dummy", counting)
+    monkeypatch.setattr(password, "averify_dummy", counting)
     await login(ds, "ghost", "whatever")
     assert calls["n"] == 1  # dummy verify happened exactly once
 
@@ -194,15 +194,15 @@ async def test_invited_account_login_burns_dummy_verify_and_is_generic(monkeypat
     )
 
     calls = {"n": 0}
-    import datasette_accounts.routes.api as api
+    import datasette_accounts.providers.password as password
 
-    real = api.averify_dummy
+    real = password.averify_dummy
 
     async def counting(password):
         calls["n"] += 1
         return await real(password)
 
-    monkeypatch.setattr(api, "averify_dummy", counting)
+    monkeypatch.setattr(password, "averify_dummy", counting)
 
     r, cookies = await login(ds, "invitee", "whatever")
     assert r.status_code == 401
@@ -957,15 +957,15 @@ async def test_expired_account_cannot_log_in(monkeypatch):
     await insert_user(ds, "temp", expires_at=PAST)
 
     calls = {"n": 0}
-    import datasette_accounts.routes.api as api
+    import datasette_accounts.providers.password as password
 
-    real = api.averify_dummy
+    real = password.averify_dummy
 
     async def counting(password):
         calls["n"] += 1
         return await real(password)
 
-    monkeypatch.setattr(api, "averify_dummy", counting)
+    monkeypatch.setattr(password, "averify_dummy", counting)
 
     r, cookies = await login(ds, "temp", "password123")
     assert r.status_code == 401
