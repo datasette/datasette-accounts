@@ -32,6 +32,11 @@ DEFAULTS = {
     # is runtime DB state, deliberately NOT config.
     "max_pending_registrations": 20,  # refuse signups while the queue is at cap
     "registrations_per_ip_per_day": 5,  # per-IP daily cap (client_ip; proxy trust applies)
+    # --- Auth providers (see plans/auth-providers) ---
+    # Lifetime of the signed provider `state` cookie: the start→callback window
+    # (and, later, the link/step-up proof window). The only auth-provider config
+    # knob — enablement/signups are deliberately runtime DB state, not config.
+    "provider_state_ttl_minutes": 10,
     # --- Capability grants (F1) / acl bridge (F2) ---
     # Explicit allowlist of grantable global actions; None = auto-discover all
     # global (resource_class=None) actions minus the built-in denylist.
@@ -136,13 +141,15 @@ def validate_next(next_value, base_url="/"):
     """Return a safe same-origin path, or the default ('/', or base_url).
 
     Rejects protocol-relative (//host), backslash tricks (/\\host), any scheme
-    or authority, and CR/LF. Validates the URL-decoded value.
+    or authority, and any ASCII control character (browsers strip tab / CR / LF
+    from URLs, so ``/\\t/evil.com`` must not be judged on its literal form).
+    Validates the URL-decoded value.
     """
     default = base_url or "/"
     if not next_value:
         return default
     decoded = unquote(next_value)
-    if "\n" in decoded or "\r" in decoded:
+    if any(c < " " or c == "\x7f" for c in decoded):
         return default
     if "\\" in decoded:
         return default
