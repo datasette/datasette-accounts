@@ -28,6 +28,7 @@ from ..page_data import (
     RevokeSessionRequest,
     SessionRow,
     SetExpiryRequest,
+    SetProviderRequest,
     SetRegistrationRequest,
     SetSiteMessageRequest,
     TargetRequest,
@@ -52,6 +53,7 @@ from ..providers import (
     make_state,
     provider_configured,
     provider_start_path,
+    usable_provider_keys,
 )
 from ..providers import password
 from ..router import require_actor, require_admin, require_csrf, router
@@ -1018,3 +1020,54 @@ async def admin_set_registration(
         internal, request.actor["id"], body.enabled
     )
     return Response.json({"ok": True, "enabled": enabled})
+
+
+# --------------------------------------------------------------------------
+# Sign-in provider settings (enable/disable + signups — see plans/auth-providers)
+# --------------------------------------------------------------------------
+
+
+@router.POST("/-/admin/api/set-provider$")
+@require_admin
+async def admin_set_provider(
+    datasette, request, body: Annotated[SetProviderRequest, Body()]
+):
+    """Enable/disable a provider and/or set its signups policy (design §9).
+
+    ``key`` must be in the registry (an unknown key → 400). Either or both of
+    ``enabled`` / ``signups`` may be sent; a ``None`` field is left unchanged.
+    The last-provider guard surfaces as a 400 with its message. The write takes
+    effect on the very next request (nothing about it is cached)."""
+    registry = get_registry(datasette)
+    if body.key not in registry:
+        return Response.json({"ok": False, "error": "Unknown provider"}, status=400)
+    internal = datasette.get_internal_database()
+    try:
+        if body.enabled is not None:
+            await db.set_provider_enabled(
+                internal,
+                request.actor["id"],
+                body.key,
+                body.enabled,
+                installed_keys=await usable_provider_keys(datasette),
+                keep_token_sha256=current_token_sha(datasette, request),
+            )
+        if body.signups is not None:
+            await db.set_provider_signups(
+                internal, request.actor["id"], body.key, body.signups
+            )
+    except db.LastProviderError:
+        return Response.json(
+            {"ok": False, "error": "Cannot disable the last sign-in provider."},
+            status=400,
+        )
+    except ValueError as e:
+        # Invalid signups mode, or a mode the provider can't honour.
+        return Response.json({"ok": False, "error": str(e)}, status=400)
+    return Response.json(
+        {
+            "ok": True,
+            "enabled": await db.get_provider_enabled(internal, body.key),
+            "signups": await db.get_provider_signups(internal, body.key),
+        }
+    )

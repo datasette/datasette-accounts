@@ -276,6 +276,28 @@ WHERE actor_id = $actor_id::text AND token_sha256 != $token_sha256::text;
 DELETE FROM datasette_accounts_sessions
 WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%f', 'now') || '+00:00';
 
+-- Disabling a sign-in provider revokes every session it minted, in the same
+-- write tx as the settings flip (the sibling of disable_user's revoke) — except
+-- the session performing the disable (NULL keeps none), so an admin flipping
+-- the switch they signed in through isn't logged out mid-action.
+-- The sessions a provider minted, minus the acting one (`keep_token_sha256`)
+-- and — when `keep_admin_sessions` is 1 — every admin account's sessions.
+-- countSessionsForProvider answers "what would disabling revoke?" for the
+-- UI/CLI warning; deleteSessionsForProvider is the revoke itself (same WHERE).
+-- name: countSessionsForProvider :value
+SELECT COUNT(*) FROM datasette_accounts_sessions
+WHERE provider = $provider::text
+  AND token_sha256 != COALESCE($keep_token_sha256::text::, '')
+  AND ($keep_admin_sessions::integer = 0 OR actor_id NOT IN
+       (SELECT id FROM datasette_accounts_users WHERE is_admin = 1));
+
+-- name: deleteSessionsForProvider
+DELETE FROM datasette_accounts_sessions
+WHERE provider = $provider::text
+  AND token_sha256 != COALESCE($keep_token_sha256::text::, '')
+  AND ($keep_admin_sessions::integer = 0 OR actor_id NOT IN
+       (SELECT id FROM datasette_accounts_users WHERE is_admin = 1));
+
 -- ============================================================================
 -- External sign-in identities (plans/auth-providers §7)
 --

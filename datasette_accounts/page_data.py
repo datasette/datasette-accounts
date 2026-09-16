@@ -400,6 +400,15 @@ class SetRegistrationRequest(BaseModel):
     enabled: bool
 
 
+class SetProviderRequest(BaseModel):
+    # Admin toggle for one sign-in provider (design §9). `key` must be in the
+    # registry. Either or both of the two fields may be sent; each `None` field
+    # is left unchanged.
+    key: str
+    enabled: Optional[bool] = None
+    signups: Optional[str] = None  # "off" | "approval" | "auto"
+
+
 # --- Identity linking / unlinking (see plans/auth-providers §6) ---
 
 
