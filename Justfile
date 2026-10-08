@@ -22,9 +22,13 @@ frontend-dev *flags:
 # Datasette dev server with a persistent internal DB.
 # Grants datasette-user-profiles' `profile_access` to every signed-in account
 # ({"id": "*"} matches any actor with an id), so accounts can view/edit profiles.
+# datasette-otel-viewer (dev group) records this instance's traces + metrics,
+# ours included, to ./otel.db: browse them at /-/otel, open to any signed-in
+# account via the same {"id": "*"} grant.
 dev *flags:
     DATASETTE_SECRET=abc123 uv run datasette --root -p 8006 --internal accounts.db \
-      -s permissions.profile_access.id '*' {{flags}}
+      -s permissions.profile_access.id '*' \
+      -s permissions.datasette-otel-viewer.id '*' {{flags}}
 
 # Datasette + Vite HMR (auto-restart on .py/.html changes)
 dev-with-hmr *flags:

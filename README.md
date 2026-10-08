@@ -267,6 +267,48 @@ the login form. Blank hides a message. Bodies are admin-authored HTML rendered
 verbatim, so you can include links and `mailto:` contacts (only admins can edit
 them). The same page holds the self-registration toggle.
 
+## Observability
+
+datasette-accounts emits OpenTelemetry spans and metrics alongside Datasette
+core's own (Datasette 1.0a41+). It depends only on `opentelemetry-api`, so
+nothing is recorded until you install an SDK and run under it, the same way you
+turn on core's telemetry:
+
+```bash
+pip install opentelemetry-distro opentelemetry-exporter-otlp
+opentelemetry-instrument datasette mydata.db --internal accounts.db
+```
+
+For a look without running a collector, install
+[`datasette-otel-viewer`](https://github.com/datasette/datasette-otel-viewer),
+which stores this instance's spans and metrics in `otel.db` and browses them at
+`/-/otel` (`just dev` includes it).
+
+What you get, under the instrumentation scope `datasette_accounts`:
+
+- **Spans** for session resolution (`resolve_actor`), every sign-in
+  (`login`, with the provider, outcome and refusal reason), the password check
+  and each PBKDF2 run, provider-owned routes (`provider.route`), session minting,
+  retention housekeeping and the startup provider registry. They nest under
+  core's request span, and core's `db.query` spans for our internal-database
+  calls nest under them.
+- **Metrics**: sign-in outcomes by provider, password verifications by
+  refusal reason, lockouts, registrations, PBKDF2 duration (`verify` vs the
+  `dummy` timing decoy should match), session-resolution outcomes and cost,
+  forced-password-change bounces, provider `state` cookie failures, and rows
+  purged by retention.
+
+Every name, attribute, unit and allowed value is listed with a description in
+[`datasette_accounts/telemetry_registry.py`](datasette_accounts/telemetry_registry.py).
+Refusal reasons use the same words as the admin login audit log.
+
+**Privacy:** no signal carries a username, account id, email, IP address,
+user agent, session token, provider `state`, external subject, `next` URL or
+invite/reset token. Attributes are closed vocabularies, booleans or counts; the
+one open value, the provider key, is bounded by the providers you install.
+The test suite plants such values in a workload and checks that none of them
+appear in any emitted span or metric, including core's.
+
 ## Configuration
 
 All options live under the `datasette-accounts` plugin block and have safe

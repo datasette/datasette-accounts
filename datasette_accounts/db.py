@@ -143,21 +143,26 @@ def _as_dict(row):
 
 
 async def get_user_by_username(db, username):
-    row = await db.execute_fn(
-        lambda conn: gen.select_user_by_username(conn, username=username)
-    )
+    def read(conn):
+        return gen.select_user_by_username(conn, username=username)
+
+    row = await db.execute_fn(read)
     return _as_dict(row)
 
 
 async def get_user_by_id(db, user_id):
-    row = await db.execute_fn(lambda conn: gen.select_user_by_id(conn, user_id=user_id))
+    def read(conn):
+        return gen.select_user_by_id(conn, user_id=user_id)
+
+    row = await db.execute_fn(read)
     return _as_dict(row)
 
 
 async def get_session(db, token_sha):
-    row = await db.execute_fn(
-        lambda conn: gen.select_session(conn, token_sha256=token_sha)
-    )
+    def read(conn):
+        return gen.select_session(conn, token_sha256=token_sha)
+
+    row = await db.execute_fn(read)
     return _as_dict(row)
 
 
@@ -231,9 +236,10 @@ async def list_user_rows(db):
 
 
 async def list_sessions_for_user(db, actor_id):
-    rows = await db.execute_fn(
-        lambda conn: gen.list_sessions_for_user(conn, actor_id=actor_id)
-    )
+    def read(conn):
+        return gen.list_sessions_for_user(conn, actor_id=actor_id)
+
+    rows = await db.execute_fn(read)
     return [dataclasses.asdict(r) for r in rows]
 
 
@@ -255,14 +261,16 @@ async def list_admin_audit(db, target_id=None, operation=None, limit=200):
     ADMIN_AUDIT_MAX.
     """
     clamped = max(1, min(limit, ADMIN_AUDIT_MAX))
-    rows = await db.execute_fn(
-        lambda conn: gen.list_admin_audit(
+
+    def read(conn):
+        return gen.list_admin_audit(
             conn,
             target_id=target_id or None,
             operation=operation or None,
             limit=clamped,
         )
-    )
+
+    rows = await db.execute_fn(read)
     return [dataclasses.asdict(r) for r in rows]
 
 
@@ -272,13 +280,24 @@ async def list_admin_audit_operations(db):
     return [r.operation for r in rows]
 
 
+def _deleted(fn, conn, **params):
+    """Run a single-statement DELETE helper and return how many rows it removed
+    (the generated helpers return None, so measure ``total_changes``)."""
+    before = conn.total_changes
+    fn(conn, **params)
+    return conn.total_changes - before
+
+
 async def purge_admin_audit(db, retention_days):
+    """Delete admin audit rows past retention; returns the number deleted."""
     if not retention_days:
-        return
+        return 0
+
     # SQL computes the cutoff as `now - retention_days`.
-    await db.execute_write_fn(
-        lambda conn: gen.purge_admin_audit(conn, retention_days=retention_days)
-    )
+    def write(conn):
+        return _deleted(gen.purge_admin_audit, conn, retention_days=retention_days)
+
+    return await db.execute_write_fn(write)
 
 
 # --------------------------------------------------------------------------
@@ -287,8 +306,8 @@ async def purge_admin_audit(db, retention_days):
 
 
 async def record_login_attempt(db, username, ip, success, reason=None, provider=None):
-    await db.execute_write_fn(
-        lambda conn: gen.insert_login_attempt(
+    def write(conn):
+        return gen.insert_login_attempt(
             conn,
             username=username,
             ip=ip,
@@ -296,7 +315,8 @@ async def record_login_attempt(db, username, ip, success, reason=None, provider=
             reason=reason,
             provider=provider,
         )
-    )
+
+    await db.execute_write_fn(write)
 
 
 # Cap the admin login-attempts view so a large audit table can't be dumped in one
@@ -309,15 +329,13 @@ async def list_login_attempts(db, username=None, ip=None, limit=200):
     username and/or ip (AND-combined). `limit` is clamped to LOGIN_ATTEMPTS_MAX.
     """
     clamped = max(1, min(limit, LOGIN_ATTEMPTS_MAX))
-    rows = await db.execute_fn(
-        lambda conn: gen.list_login_attempts(
-            # Empty string means "no filter" (matches the old truthiness check).
-            conn,
-            username=username or None,
-            ip=ip or None,
-            limit=clamped,
+
+    def read(conn):
+        return gen.list_login_attempts(
+            conn, username=username or None, ip=ip or None, limit=clamped
         )
-    )
+
+    rows = await db.execute_fn(read)
     return [dataclasses.asdict(r) for r in rows]
 
 
@@ -340,9 +358,11 @@ async def register_failed_attempt(db, user_id, lockout_threshold, lockout_minute
 
 async def record_login_success(db, user_id):
     """Clear the lockout counters and stamp last_login_at on a successful login."""
-    await db.execute_write_fn(
-        lambda conn: gen.record_login_success(conn, user_id=user_id)
-    )
+
+    def write(conn):
+        return gen.record_login_success(conn, user_id=user_id)
+
+    await db.execute_write_fn(write)
 
 
 async def create_session(
@@ -350,8 +370,8 @@ async def create_session(
 ):
     # SQL stamps created_at/last_seen_at = now and expires_at = now + ttl_days.
     # `provider` records which sign-in provider minted the session (provenance).
-    await db.execute_write_fn(
-        lambda conn: gen.insert_session(
+    def write(conn):
+        return gen.insert_session(
             conn,
             token_sha256=token_sha,
             actor_id=actor_id,
@@ -360,7 +380,8 @@ async def create_session(
             ip=ip,
             provider=provider,
         )
-    )
+
+    await db.execute_write_fn(write)
 
 
 async def touch_last_seen(db, token_sha, stored_last_seen):
@@ -368,7 +389,8 @@ async def touch_last_seen(db, token_sha, stored_last_seen):
 
     The throttle stays in Python (comparing the already-loaded ``last_seen_at``
     against now) so a fresh session avoids touching the internal DB's single
-    write connection at all; the update itself stamps ``now`` in SQL.
+    write connection at all; the update itself stamps ``now`` in SQL. Returns
+    True when it wrote.
     """
     try:
         last = datetime.datetime.fromisoformat(stored_last_seen)
@@ -379,29 +401,41 @@ async def touch_last_seen(db, token_sha, stored_last_seen):
         if last.tzinfo is None:
             last = last.replace(tzinfo=datetime.timezone.utc)
         if (now - last).total_seconds() < LAST_SEEN_THROTTLE_SECONDS:
-            return
-    await db.execute_write_fn(
-        lambda conn: gen.touch_last_seen(conn, token_sha256=token_sha)
-    )
+            return False
+
+    def write(conn):
+        return gen.touch_last_seen(conn, token_sha256=token_sha)
+
+    await db.execute_write_fn(write)
+    return True
 
 
 async def delete_session(db, token_sha):
-    await db.execute_write_fn(
-        lambda conn: gen.delete_session(conn, token_sha256=token_sha)
-    )
+    def write(conn):
+        return gen.delete_session(conn, token_sha256=token_sha)
+
+    await db.execute_write_fn(write)
 
 
 async def delete_expired_sessions(db):
-    await db.execute_write_fn(gen.delete_expired_sessions)
+    """Delete expired sessions; returns the number deleted."""
+
+    def write(conn):
+        return _deleted(gen.delete_expired_sessions, conn)
+
+    return await db.execute_write_fn(write)
 
 
 async def purge_login_audit(db, retention_days):
+    """Delete login audit rows past retention; returns the number deleted."""
     if not retention_days:
-        return
+        return 0
+
     # SQL computes the cutoff as `now - retention_days`.
-    await db.execute_write_fn(
-        lambda conn: gen.purge_login_audit(conn, retention_days=retention_days)
-    )
+    def write(conn):
+        return _deleted(gen.purge_login_audit, conn, retention_days=retention_days)
+
+    return await db.execute_write_fn(write)
 
 
 # --------------------------------------------------------------------------
@@ -722,14 +756,21 @@ async def use_password_token(db, token_sha, password_hash):
 
 async def get_password_token(db, token_sha):
     """The live (non-expired) token row for the GET set-password page, or None."""
-    row = await db.execute_fn(
-        lambda conn: gen.select_password_token(conn, token_sha256=token_sha)
-    )
+
+    def read(conn):
+        return gen.select_password_token(conn, token_sha256=token_sha)
+
+    row = await db.execute_fn(read)
     return _as_dict(row)
 
 
 async def purge_expired_password_tokens(db):
-    await db.execute_write_fn(gen.purge_expired_password_tokens)
+    """Delete expired invite / reset tokens; returns the number deleted."""
+
+    def write(conn):
+        return _deleted(gen.purge_expired_password_tokens, conn)
+
+    return await db.execute_write_fn(write)
 
 
 # --------------------------------------------------------------------------
@@ -913,7 +954,11 @@ async def get_site_messages(db):
 
 async def get_site_message(db, key):
     """The stored body for one slot, or ``None`` when it has never been set."""
-    return await db.execute_fn(lambda conn: gen.select_site_message(conn, key=key))
+
+    def read(conn):
+        return gen.select_site_message(conn, key=key)
+
+    return await db.execute_fn(read)
 
 
 async def set_site_message(db, actor_id, key, body):
@@ -956,9 +1001,11 @@ async def get_provider_signups(db, key):
     external identity may provision an account, and whether ``/-/register`` is
     open for the built-in password provider (plans/auth-providers §4).
     """
-    value = await db.execute_fn(
-        lambda conn: gen.select_setting(conn, key=f"provider:{key}:signups")
-    )
+
+    def read(conn):
+        return gen.select_setting(conn, key=f"provider:{key}:signups")
+
+    value = await db.execute_fn(read)
     return value or "off"
 
 
@@ -1006,8 +1053,9 @@ async def count_sessions_for_provider(
     """How many live sessions disabling ``key`` would revoke — the same WHERE as
     the revoke in ``set_provider_enabled`` (same ``keep_*`` exemptions), so the
     UI/CLI warning and the switch agree."""
-    return await db.execute_fn(
-        lambda conn: (
+
+    def read(conn):
+        return (
             gen.count_sessions_for_provider(
                 conn,
                 provider=key,
@@ -1016,7 +1064,8 @@ async def count_sessions_for_provider(
             )
             or 0
         )
-    )
+
+    return await db.execute_fn(read)
 
 
 async def set_provider_enabled(
@@ -1143,9 +1192,11 @@ async def get_provider_enabled(db, key):
     ``providers.provider_gate`` and by ``finish_login``'s external re-check, a
     single-row PK lookup like the other runtime settings.
     """
-    value = await db.execute_fn(
-        lambda conn: gen.select_setting(conn, key=f"provider:{key}:enabled")
-    )
+
+    def read(conn):
+        return gen.select_setting(conn, key=f"provider:{key}:enabled")
+
+    value = await db.execute_fn(read)
     if value is None:
         return key == "password"
     return value == "1"
@@ -1200,7 +1251,11 @@ async def count_recent_registrations(db, ip):
     """
     if ip is None:
         return 0
-    return await db.execute_fn(lambda conn: gen.count_recent_registrations(conn, ip=ip))
+
+    def read(conn):
+        return gen.count_recent_registrations(conn, ip=ip)
+
+    return await db.execute_fn(read)
 
 
 async def approve_user(db, actor_id, target_id):
@@ -1316,17 +1371,21 @@ def derive_username(hint, provider_key, taken):
 async def get_identity(db, provider, subject):
     """The account linked to ``(provider, subject)``, or None. Matching is by
     ``(provider, subject)`` ONLY — never email (decision D6)."""
-    row = await db.execute_fn(
-        lambda conn: gen.select_identity(conn, provider=provider, subject=subject)
-    )
+
+    def read(conn):
+        return gen.select_identity(conn, provider=provider, subject=subject)
+
+    row = await db.execute_fn(read)
     return _as_dict(row)
 
 
 async def list_identities(db, user_id):
     """All external sign-in identities linked to one account (oldest first)."""
-    rows = await db.execute_fn(
-        lambda conn: gen.list_identities_for_user(conn, user_id=user_id)
-    )
+
+    def read(conn):
+        return gen.list_identities_for_user(conn, user_id=user_id)
+
+    rows = await db.execute_fn(read)
     return [dataclasses.asdict(r) for r in rows]
 
 
@@ -1341,11 +1400,11 @@ async def count_identities_by_provider(db):
 
 async def touch_identity_login(db, provider, subject):
     """Stamp ``last_login_at = now`` on one identity after a successful sign-in."""
-    await db.execute_write_fn(
-        lambda conn: gen.touch_identity_last_login(
-            conn, provider=provider, subject=subject
-        )
-    )
+
+    def write(conn):
+        return gen.touch_identity_last_login(conn, provider=provider, subject=subject)
+
+    await db.execute_write_fn(write)
 
 
 async def link_identity(db, actor_id, user_id, identity):

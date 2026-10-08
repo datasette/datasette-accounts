@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 import secrets
+import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -23,7 +25,9 @@ from urllib.parse import quote
 
 from datasette import Response
 
-from .. import db, security
+from .. import db, security, telemetry
+from .. import telemetry_registry as r
+from ..housekeeping import housekeeping
 from ..security import COOKIE_NAME, SIGN_NAMESPACE
 from ..sessions import mint_token, token_sha256
 
@@ -234,16 +238,23 @@ def provider_gate(key: str) -> Callable[[RouteHandler], RouteHandler]:
     def decorator(handler: RouteHandler) -> RouteHandler:
         @wraps(handler)
         async def wrapper(datasette: Datasette, request: Request) -> Response:
-            internal = datasette.get_internal_database()
-            if not await db.get_provider_enabled(internal, key):
-                return Response.text("Not found", status=404)
-            if request.method == "POST":
-                problem = security.csrf_error(request)
-                if problem:
-                    return Response.text(problem, status=403)
-            elif request.method not in ("GET", "HEAD"):
-                return Response.text("Method not allowed", status=405)
-            return await handler(datasette, request)
+            with telemetry.tracer.start_as_current_span(
+                r.S_PROVIDER_ROUTE, attributes={r.PROVIDER: key}
+            ) as span:
+                internal = datasette.get_internal_database()
+                if not await db.get_provider_enabled(internal, key):
+                    span.set_attribute(r.GATE, "disabled")
+                    return Response.text("Not found", status=404)
+                if request.method == "POST":
+                    problem = security.csrf_error(request)
+                    if problem:
+                        span.set_attribute(r.GATE, "csrf")
+                        return Response.text(problem, status=403)
+                elif request.method not in ("GET", "HEAD"):
+                    span.set_attribute(r.GATE, "method")
+                    return Response.text("Method not allowed", status=405)
+                span.set_attribute(r.GATE, "ok")
+                return await handler(datasette, request)
 
         return wrapper
 
@@ -368,25 +379,36 @@ def read_state(
     TTL window. Any failure → None (the caller shows the generic flow-failed
     page and clears the cookie).
     """
+    outcome, payload = _check_state(datasette, request, provider=provider)
+    telemetry.state_reads.add(1, {r.STATE: outcome})
+    telemetry.set_current_attribute(r.STATE, outcome)
+    return payload
+
+
+def _check_state(
+    datasette: Datasette, request: Request, *, provider: str
+) -> tuple[str, State | None]:
+    """The read_state ladder: ``(outcome, payload or None)``, where outcome
+    names the first check that failed (or ``ok``)."""
     cookie = request.cookies.get(STATE_COOKIE)
     if not cookie:
-        return None
+        return "missing", None
     try:
         payload = datasette.unsign(cookie, STATE_NAMESPACE)
     except Exception:
         # Any unsign failure (bad signature, malformed value, wrong type) is
         # treated as "no valid state" — never a 500. Mirrors resolve_actor's
         # broad guard around unsign in __init__.py.
-        return None
+        return "bad_signature", None
     if not isinstance(payload, dict):
-        return None
+        return "not_dict", None
     # Double-submit: the `state` query arg must equal the value in the cookie.
     if not secrets.compare_digest(
         request.args.get("state") or "", payload.get("s") or ""
     ):
-        return None
+        return "mismatch", None
     if payload.get("p") != provider:
-        return None
+        return "wrong_provider", None
     # `created` must be newer than ttl_minutes ago. The cutoff is formatted like
     # db.now_iso() (millisecond ISO + offset), so the comparison is lexicographic
     # — the repo-wide timestamp convention.
@@ -396,8 +418,8 @@ def read_state(
     )
     created = payload.get("c")
     if not created or created <= cutoff:
-        return None
-    return payload
+        return "expired", None
+    return "ok", payload
 
 
 def start_state(
@@ -417,7 +439,9 @@ def start_state(
     the validated ``next``. This is the only state a start route ever needs, so
     a provider never reads ``intent`` / ``actor_id`` from the query string.
     """
-    if read_state(datasette, request, provider=provider) is not None:
+    # Probes for a carried state without recording a read: a fresh login start
+    # has no state cookie by design, which is not a failure.
+    if _check_state(datasette, request, provider=provider)[1] is not None:
         return request.args.get("state") or ""
     return make_state(datasette, request, response, provider=provider, next=next)
 
@@ -544,17 +568,20 @@ async def mint_session(
     """
     internal = datasette.get_internal_database()
     ip = security.client_ip(datasette, request)
-    await db.record_login_success(internal, user["id"])
-    raw_token = mint_token()
-    await db.create_session(
-        internal,
-        user["id"],
-        token_sha256(raw_token),
-        security.config(datasette, "session_ttl_days"),
-        request.headers.get("user-agent"),
-        ip,
-        provider=provider,
-    )
+    with telemetry.tracer.start_as_current_span(
+        r.S_MINT_SESSION, attributes={r.PROVIDER: provider}
+    ):
+        await db.record_login_success(internal, user["id"])
+        raw_token = mint_token()
+        await db.create_session(
+            internal,
+            user["id"],
+            token_sha256(raw_token),
+            security.config(datasette, "session_ttl_days"),
+            request.headers.get("user-agent"),
+            ip,
+            provider=provider,
+        )
     _set_session_cookie(datasette, request, response, raw_token)
     clear_stale_core_actor_cookie(request, response)
 
@@ -582,6 +609,78 @@ async def finish_login(
     re-checks the provider enabled bit, and applies the per-provider signups
     policy for an unmatched identity.
     """
+    outcome = _LoginOutcome()
+    token = _login_outcome.set(outcome)
+    attributes = {r.PROVIDER: provider_key, r.RESPONSE_MODE: response_mode}
+    if isinstance(identity, (LocalIdentity, ExternalIdentity)):
+        attributes[r.IDENTITY] = (
+            "local" if isinstance(identity, LocalIdentity) else "external"
+        )
+        attributes[r.INTENT] = (state or {}).get("i") or "login"
+    started = time.perf_counter()
+    with telemetry.tracer.start_as_current_span(
+        r.S_LOGIN, attributes=attributes
+    ) as span:
+        try:
+            return await _finish(
+                datasette,
+                request,
+                identity,
+                provider_key=provider_key,
+                response_mode=response_mode,
+                state=state,
+            )
+        except BaseException as exception:
+            outcome.outcome, outcome.reason = "error", None
+            span.set_attribute(r.ERROR_TYPE, type(exception).__qualname__)
+            raise
+        finally:
+            _login_outcome.reset(token)
+            _record_login(span, attributes, outcome, started)
+
+
+@dataclass
+class _LoginOutcome:
+    """What finish_login's branches report for telemetry; first write wins."""
+
+    outcome: str | None = None
+    reason: str | None = None
+    signups: str | None = None
+
+
+_login_outcome: ContextVar[_LoginOutcome | None] = ContextVar(
+    "datasette_accounts_login_outcome", default=None
+)
+
+
+def _note(outcome: str, reason: str | None = None) -> None:
+    """Record how the current finish_login ended (no-op outside one). The
+    first call wins, so a specific refusal isn't overwritten by the generic
+    error page it renders, nor ``provisioned`` by the shared mint tail."""
+    current = _login_outcome.get()
+    if current is not None and current.outcome is None:
+        current.outcome = outcome
+        current.reason = reason
+
+
+def _record_login(span, attributes, outcome, started):
+    result = outcome.outcome or "error"
+    span.set_attribute(r.LOGIN_OUTCOME, result)
+    counted = {r.PROVIDER: attributes[r.PROVIDER], r.LOGIN_OUTCOME: result}
+    if outcome.reason is not None:
+        span.set_attribute(r.REASON, outcome.reason)
+        counted[r.REASON] = outcome.reason
+    if outcome.signups is not None:
+        span.set_attribute(r.SIGNUPS, outcome.signups)
+    telemetry.logins.add(1, counted)
+    if r.IDENTITY in attributes:
+        telemetry.login_duration.record(
+            time.perf_counter() - started,
+            {r.PROVIDER: attributes[r.PROVIDER], r.IDENTITY: attributes[r.IDENTITY]},
+        )
+
+
+async def _finish(datasette, request, identity, *, provider_key, response_mode, state):
     if isinstance(identity, LocalIdentity):
         return await _finish_local(
             datasette,
@@ -637,7 +736,7 @@ async def _finish_local(
         await db.record_login_attempt(
             internal, user["username"] if user else None, ip, False, reason
         )
-        return _refuse(response_mode)
+        return _refuse(response_mode, reason)
 
     return await _mint_and_respond(
         datasette,
@@ -670,7 +769,7 @@ async def _finish_external(
         await db.record_login_attempt(
             internal, None, ip, False, "provider_bad_subject", provider=provider_key
         )
-        return _refuse(response_mode)
+        return _refuse(response_mode, "provider_bad_subject")
 
     # PRIMARY enabled re-check (the load-bearing kill switch, design §4): the
     # provider_gate route already checked the enabled bit, but a provider could
@@ -680,7 +779,7 @@ async def _finish_external(
         await db.record_login_attempt(
             internal, None, ip, False, "provider_disabled", provider=provider_key
         )
-        return _refuse(response_mode)
+        return _refuse(response_mode, "provider_disabled")
 
     existing = await db.get_identity(internal, provider_key, identity.subject)
     intent = (state or {}).get("i") or "login"
@@ -727,7 +826,7 @@ async def _finish_external(
                 reason,
                 provider=provider_key,
             )
-            return _refuse(response_mode)
+            return _refuse(response_mode, reason)
         await db.touch_identity_login(internal, provider_key, identity.subject)
         return await _mint_external(
             datasette,
@@ -740,6 +839,9 @@ async def _finish_external(
 
     # Unmatched identity with intent == "login": consult the signups policy.
     signups = await db.get_provider_signups(internal, provider_key)
+    current = _login_outcome.get()
+    if current is not None:
+        current.signups = signups
     if signups == "off":
         # Generic — identical wording whether signups are off or the identity is
         # simply unknown, so a visitor can't probe which providers auto-link.
@@ -759,6 +861,8 @@ async def _finish_external(
 
     # signups == "auto" (auto-activate — for trusted IdPs): create active + mint.
     user_id = await db.provision_external_user(internal, identity, ip, pending=False)
+    telemetry.record_registration(provider_key, "ok")
+    _note("provisioned")
     user = await db.get_user_by_id(internal, user_id)
     await db.touch_identity_login(internal, provider_key, identity.subject)
     return await _mint_external(
@@ -803,7 +907,7 @@ async def _finish_step_up(
     # actor, so a step-up state lifted from another browser proves nothing there.
     from .. import resolve_actor
 
-    live = await resolve_actor(datasette, request)
+    live = await resolve_actor(datasette, request, caller="finish_login")
     if (
         not actor_id
         or live is None
@@ -815,7 +919,7 @@ async def _finish_step_up(
         await db.record_login_attempt(
             internal, None, ip, False, "provider_state_invalid", provider=provider_key
         )
-        return _refuse(response_mode)
+        return _refuse(response_mode, "provider_state_invalid")
     if unlink:
         # The proving method can't be the one being removed (the route never
         # mints such a state; a forged one is refused rather than honored).
@@ -828,7 +932,7 @@ async def _finish_step_up(
                 "provider_state_invalid",
                 provider=provider_key,
             )
-            return _refuse(response_mode)
+            return _refuse(response_mode, "provider_state_invalid")
         try:
             await db.unlink_identity(
                 internal,
@@ -842,6 +946,7 @@ async def _finish_step_up(
             return _error_page(response_mode, STRANDED_ACCOUNT_MESSAGE, status=400)
         except db.IdentityNotFoundError:
             return _error_page(response_mode, "Sign-in method not found", status=404)
+        _note("unlinked")
         return Response.redirect(datasette.urls.path("/-/account"))
     # Redirect into the target provider's start, minting the link-intent state.
     response = Response.redirect(datasette.setting("base_url") or "/")
@@ -859,6 +964,7 @@ async def _finish_step_up(
     # Response.redirect wrote the "Location" header (capital L); overwrite that
     # exact key so we don't emit a second, lowercase location header.
     response.headers["Location"] = f"{start}?state={quote(value)}"
+    _note("step_up")
     return response
 
 
@@ -890,12 +996,12 @@ async def _finish_link(
     # imports this module before resolve_actor is defined).
     from .. import resolve_actor
 
-    live = await resolve_actor(datasette, request)
+    live = await resolve_actor(datasette, request, caller="finish_login")
     if not actor_id or live is None or live["id"] != actor_id:
         await db.record_login_attempt(
             internal, None, ip, False, "provider_state_invalid", provider=provider_key
         )
-        return _refuse(response_mode)
+        return _refuse(response_mode, "provider_state_invalid")
 
     # Password-less origin: the link state carries a step-up proof, honored only
     # within provider_state_ttl_minutes of the step-up completion.
@@ -915,7 +1021,7 @@ async def _finish_link(
                 "provider_state_invalid",
                 provider=provider_key,
             )
-            return _refuse(response_mode)
+            return _refuse(response_mode, "provider_state_invalid")
 
     try:
         await db.link_identity(internal, actor_id, actor_id, identity)
@@ -925,6 +1031,7 @@ async def _finish_link(
             response_mode, "That identity is already in use.", status=409
         )
 
+    _note("linked")
     response = Response.redirect(datasette.urls.path("/-/account"))
     _clear_state_cookie(response)
     return response
@@ -947,8 +1054,10 @@ async def _provision_pending(
         await db.record_login_attempt(
             internal, audit_name, ip, False, "register", provider=provider_key
         )
+        telemetry.record_registration(provider_key, "refused", "capped")
         return _refuse_closed(response_mode)
     await db.provision_external_user(internal, identity, ip, pending=True)
+    telemetry.record_registration(provider_key, "pending")
     # Same 'register' reason as a password signup → one shared per-IP counter.
     await db.record_login_attempt(
         internal, audit_name, ip, True, "register", provider=provider_key
@@ -996,7 +1105,6 @@ async def _mint_and_respond(
     clear the state cookie. Does NOT write the success login_audit row — that is
     the caller's responsibility (password's verify half; _mint_external for
     external flows) so the row is written exactly once."""
-    internal = datasette.get_internal_database()
     base_url = datasette.setting("base_url") or "/"
     # `next` from the state was validated when the state was created; re-validate
     # on consumption (belt and braces).
@@ -1015,25 +1123,21 @@ async def _mint_and_respond(
         response = Response.redirect(redirect)
 
     await mint_session(datasette, request, response, user, provider=provider_key)
-    await db.delete_expired_sessions(internal)
-    await db.purge_expired_password_tokens(internal)
-    await db.purge_login_audit(
-        internal, security.config(datasette, "audit_retention_days")
-    )
-    await db.purge_admin_audit(
-        internal, security.config(datasette, "admin_audit_retention_days")
-    )
+    _note("ok")
+    await housekeeping(datasette, trigger="login")
     _clear_state_cookie(response)
     return response
 
 
-def _refuse(response_mode):
+def _refuse(response_mode, reason):
+    _note("refused", reason)
     return _error_page(response_mode, GENERIC_FLOW_ERROR, status=403)
 
 
 def _refuse_no_account(response_mode):
     # Deliberately identical whether signups are off or the identity is simply
     # unknown — never distinguishes the two (design §4).
+    _note("refused", "provider_no_account")
     return _error_page(
         response_mode, "No account is linked to that identity.", status=403
     )
@@ -1041,6 +1145,7 @@ def _refuse_no_account(response_mode):
 
 def _refuse_closed(response_mode):
     # Mirrors the password register over-cap message; never says which cap tripped.
+    _note("refused", "register")
     return _error_page(
         response_mode,
         "Registration is currently closed — try again later.",
@@ -1052,6 +1157,7 @@ def _pending(response_mode):
     """The 'awaiting approval' outcome — no session. Mirrors the register page:
     JSON callers get ``{"ok": True}``; redirect flows get a plain confirmation
     page."""
+    _note("pending")
     if response_mode == "json":
         response = Response.json({"ok": True})
     else:
@@ -1064,6 +1170,7 @@ def _pending(response_mode):
 
 
 def _error_page(response_mode, message, *, status):
+    _note("refused")
     if response_mode == "json":
         response = Response.json({"ok": False, "error": message}, status=status)
     else:

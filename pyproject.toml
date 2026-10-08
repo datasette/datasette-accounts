@@ -6,7 +6,8 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
-    "datasette>=1.0a23",
+    "datasette>=1.0a41",
+    "opentelemetry-api>=1.37",
     "datasette-plugin-router>=0.0.1a2",
     "datasette-user-profiles>=0.1.0a9",
     "datasette-vite>=0.0.1a3",
@@ -21,7 +22,9 @@ dev = [
     "datasette-acl",
     "datasette-acl-share",
     "datasette-accounts-demo-auth",
+    "datasette-otel-viewer",
     "datasette-paper",
+    "opentelemetry-sdk>=1.37",
     "pytest",
     "pytest-asyncio",
     "ruff>=0.15.0",

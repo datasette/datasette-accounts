@@ -46,6 +46,19 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
   account a step-up through another linked provider whose callback then
   performs the link/unlink (`providers._finish_step_up`, state `u` = `target`
   or `unlink`, never both).
+- `telemetry.py` / `telemetry_registry.py` — OpenTelemetry (plans/otel/):
+  API-only dep, scope `datasette_accounts`; the registry imports Datasette's
+  plugin telemetry kit (`datasette.telemetry_registry`, needs datasette
+  >=1.0a41) and declares every span/attribute/metric with closed `values=`
+  enums. `tests/test_telemetry_registry.py` runs one broad workload then the
+  kit's conformance + `assert_no_forbidden_values` checks (no username, id,
+  token, state, subject in any signal). Pass named callables (never lambdas)
+  to `execute_fn`/`execute_write_fn` — core labels `db.query` spans by
+  `__qualname__`. The viewer installs global OTel providers on import, so
+  `tests/conftest.py` installs the kit's first and unregisters the viewer
+  (else every telemetry test skips). `finish_login` reports its outcome via `_note()` (first
+  write wins); `resolve_actor` takes a required `caller=` label.
+  `housekeeping.py` is the shared retention purge (startup + every login).
 - `router.py` — shared Router + POST-only/CSRF/admin decorators.
 - `sessions.py` — session token mint/hash (`mint_token`, `token_sha256`).
 - `hookspecs.py` — the `datasette_accounts_auth_providers(datasette)` hookspec,
@@ -114,7 +127,9 @@ internal DB, an admin permission, and a Svelte/Vite/TS frontend.
   no `vite_dev_path` kwarg in the pinned version.
 
 ## Commands
-`just test` · `just check` · `just format` · `just dev`
+`just test` · `just check` · `just format` · `just dev` (includes the dev-group
+datasette-otel-viewer: traces/metrics at `/-/otel` for any signed-in account,
+stored in `./otel.db`)
 - `just codegen-queries` — regenerate `sql/_queries_generated.py` after editing
   `sql/queries.sql` or `internal_migrations.py`. `just check-queries-fresh` is
   the CI gate (fails when the checked-in helper is stale). The codegen IR
