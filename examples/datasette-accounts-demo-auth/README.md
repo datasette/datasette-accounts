@@ -283,12 +283,39 @@ dangerous parts wrong. The rules that remain your responsibility:
   response mode.
 - **Use the IdP's real, stable subject.** Not a display name, not a username —
   those change. If the IdP offers a numeric/opaque id, use it.
+- **Keep identities out of telemetry**: no subject, email, handle, token or
+  `state` value on any span or metric you add (see Telemetry below).
 - **Verify the IdP's response** (signature / token exchange / nonce) before
   building the `ExternalIdentity`. Core trusts that the subject you pass is
   proven; the proof is the provider's job. *This demo's proof is a deliberately
   toy one — a plaintext 4-digit PIN, first-come subject claiming, unlimited
   retries, and the PIN riding in the query string — which is exactly why it
   must never reach production.*
+
+## Telemetry
+
+You get OpenTelemetry coverage without writing any:
+
+- `provider_gate` wraps each route in a `datasette_accounts.provider.route`
+  span carrying your provider key and which gate check, if any, stopped the
+  request. It nests under Datasette's request span.
+- `read_state` records its result (`ok`, or the check that failed) on that span
+  and in the `datasette_accounts.state.reads` counter.
+- Your `finish_login` call produces a `datasette_accounts.login` span and
+  increments `datasette_accounts.logins` with your key, the outcome and the
+  refusal reason. You don't need your own "sign-in succeeded" span.
+
+Your calls out to the identity provider (token exchange, profile fetch) are
+yours to trace. The zero-code option is for the operator to install
+`opentelemetry-instrumentation-httpx`, which spans every `httpx` request as a
+`CLIENT` span. If you add spans yourself, use your own tracer named after your
+import package (`get_tracer("datasette_accounts_github", version)`), not
+`datasette_accounts`, and set only non-identifying attributes such as
+`server.address` and `http.request.method`.
+
+The same privacy rule as core applies: never put the external subject, email,
+handle, DID, username, authorization code, access token or `state` value on a
+span, event or metric.
 
 ## How the demo flow runs
 

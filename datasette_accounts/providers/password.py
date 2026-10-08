@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 from datasette import NotFound, Response
 
-from .. import db, security
+from .. import db, security, telemetry
+from .. import telemetry_registry as r
 from ..passwords import (
     UNUSABLE_PASSWORD,
     PasswordLengthError,
@@ -68,6 +69,24 @@ async def verify_credentials(
     (``isinstance(result, Response)`` → send verbatim; otherwise it is the user
     dict to mint).
     """
+    with telemetry.tracer.start_as_current_span(r.S_PASSWORD_VERIFY) as span:
+        result, reason, kdf = await _verify_credentials(
+            datasette, request, username, password
+        )
+        outcome = "refused" if isinstance(result, Response) else "ok"
+        attributes = {r.VERIFY_OUTCOME: outcome}
+        if outcome == "refused":
+            attributes[r.REASON] = reason
+        telemetry.password_verifications.add(1, attributes)
+        if kdf is not None:
+            attributes[r.VERIFY_KDF] = kdf
+        span.set_attributes(attributes)
+    return result
+
+
+async def _verify_credentials(datasette, request, username, password):
+    """verify_credentials' body: returns ``(user or Response, audit reason,
+    which KDF branch ran or None)``."""
     internal = datasette.get_internal_database()
     ip = security.client_ip(datasette, request)
     threshold = security.config(datasette, "lockout_threshold")
@@ -78,7 +97,10 @@ async def verify_credentials(
     # 1. Locked account: refuse before hashing (the only hash-skipping path).
     if user and user["locked_until"] and user["locked_until"] > db.now_iso():
         await db.record_login_attempt(internal, username, ip, False, "locked")
-        return Response.json({"ok": False, "error": GENERIC_LOGIN_ERROR}, status=429)
+        response = Response.json(
+            {"ok": False, "error": GENERIC_LOGIN_ERROR}, status=429
+        )
+        return response, "locked", None
 
     # 2/3. Exactly one PBKDF2 verify on every remaining path (dummy on miss).
     # The user-facing error stays generic; the specific reason lives only in the
@@ -94,8 +116,10 @@ async def verify_credentials(
     if user and not user["disabled"] and not expired and not pending and has_password:
         ok = await averify_password(password, user["password_hash"])
         reason = "success" if ok else "bad_password"
+        kdf = "verify"
     else:
         await averify_dummy(password)
+        kdf = "dummy"
         ok = False
         # Precedence when more than one applies (e.g. a disabled account whose
         # expiry has also passed): disabled > expired > pending_approval >
@@ -115,11 +139,19 @@ async def verify_credentials(
 
     if not ok:
         if user:
-            await db.register_failed_attempt(internal, user["id"], threshold, minutes)
-        return Response.json({"ok": False, "error": GENERIC_LOGIN_ERROR}, status=401)
+            count = await db.register_failed_attempt(
+                internal, user["id"], threshold, minutes
+            )
+            # The same comparison register_failed_attempt locks on.
+            if threshold and count >= threshold:
+                telemetry.lockouts.add(1)
+        response = Response.json(
+            {"ok": False, "error": GENERIC_LOGIN_ERROR}, status=401
+        )
+        return response, reason, kdf
 
     # Verify passed — hand the user back so the caller mints via finish_login.
-    return user
+    return user, reason, kdf
 
 
 async def register(
@@ -136,6 +168,7 @@ async def register(
     if not await db.get_provider_enabled(
         internal, "password"
     ) or not await db.get_registration_enabled(internal):
+        telemetry.record_registration("password", "refused", "closed")
         raise NotFound("Not found")
 
     ip = security.client_ip(datasette, request)
@@ -156,6 +189,7 @@ async def register(
         # Refused attempts are recorded too — repeat abuse counts toward the
         # per-IP cap rather than probing it for free.
         await db.record_login_attempt(internal, body.username, ip, False, "register")
+        telemetry.record_registration("password", "refused", "capped")
         return Response.json(
             {
                 "ok": False,
@@ -166,12 +200,14 @@ async def register(
 
     error = security.validate_username(body.username)
     if error:
+        telemetry.record_registration("password", "refused", "invalid")
         return Response.json({"ok": False, "error": error}, status=400)
     try:
         check_password_length(
             body.password, security.config(datasette, "password_min_length")
         )
     except PasswordLengthError as e:
+        telemetry.record_registration("password", "refused", "invalid")
         return Response.json({"ok": False, "error": str(e)}, status=400)
 
     password_hash = await ahash_password(body.password)
@@ -182,9 +218,11 @@ async def register(
         # avoid that. It's exactly why accounts stay pending and invisible
         # until a human approves them.
         await db.record_login_attempt(internal, body.username, ip, False, "register")
+        telemetry.record_registration("password", "refused", "taken")
         return Response.json(
             {"ok": False, "error": "Username already taken"}, status=409
         )
     await db.record_login_attempt(internal, body.username, ip, True, "register")
+    telemetry.record_registration("password", "pending")
     # No session: the account is pending, so nothing to sign in to yet.
     return Response.json({"ok": True})

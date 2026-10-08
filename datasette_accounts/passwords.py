@@ -12,6 +12,8 @@ import base64
 import hashlib
 import secrets
 
+from . import telemetry, telemetry_registry
+
 ALGORITHM = "pbkdf2_sha256"
 ITERATIONS = 480000
 
@@ -65,19 +67,29 @@ DUMMY_HASH = (
 )
 
 
+async def _kdf(operation, fn, *args):
+    """Run one PBKDF2 operation off the event loop, traced and timed."""
+    attributes = {telemetry_registry.KDF_OPERATION: operation}
+    with telemetry.tracer.start_as_current_span(
+        telemetry_registry.S_PASSWORD_KDF, attributes=attributes
+    ):
+        with telemetry.record_duration(telemetry.kdf_duration, attributes):
+            return await asyncio.to_thread(fn, *args)
+
+
 async def averify_password(password, password_hash):
     """Async wrapper — runs the KDF off the event loop."""
-    return await asyncio.to_thread(verify_password, password, password_hash)
+    return await _kdf("verify", verify_password, password, password_hash)
 
 
 async def ahash_password(password, salt=None, iterations=ITERATIONS):
     """Async wrapper — runs the KDF off the event loop."""
-    return await asyncio.to_thread(hash_password, password, salt, iterations)
+    return await _kdf("hash", hash_password, password, salt, iterations)
 
 
 async def averify_dummy(password):
     """Spend one verification against DUMMY_HASH (constant-timing decoy)."""
-    return await averify_password(password, DUMMY_HASH)
+    return await _kdf("dummy", verify_password, password, DUMMY_HASH)
 
 
 # A server-generated password is shown to the admin exactly once, so it needs

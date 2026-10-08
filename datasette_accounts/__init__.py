@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 import click
 import markupsafe
@@ -9,7 +10,9 @@ from datasette.plugins import pm
 from datasette_vite import vite_entry
 from sqlite_utils import Database as SqliteUtilsDatabase
 
-from . import db, hookspecs as _provider_hookspecs, messages, security
+from . import db, hookspecs as _provider_hookspecs, messages, security, telemetry
+from . import telemetry_registry as r
+from .housekeeping import housekeeping
 from .internal_migrations import internal_migrations
 from .passwords import hash_password
 from .router import ADMIN_ACTION, router
@@ -175,17 +178,7 @@ def startup(datasette):
                 err=True,
             )
 
-        # Startup housekeeping: purge expired sessions, expired password
-        # tokens, and old audit rows.
-        await db.delete_expired_sessions(internal)
-        await db.purge_expired_password_tokens(internal)
-        await db.purge_login_audit(
-            internal, security.config(datasette, "audit_retention_days")
-        )
-        await db.purge_admin_audit(
-            internal, security.config(datasette, "admin_audit_retention_days")
-        )
-
+        await housekeeping(datasette, trigger="startup")
         await _build_provider_registry(datasette)
 
     return inner
@@ -201,7 +194,6 @@ async def _build_provider_registry(datasette):
     per-request readers (``providers.get_registry``).
     """
     from . import providers as providers_mod
-    from .providers.password import PasswordProvider
 
     # The state TTL is arithmetic in make_state / read_state; a non-positive or
     # non-integer value would mint states that never validate (or 500), so fail
@@ -212,6 +204,16 @@ async def _build_provider_registry(datasette):
             f"datasette-accounts: provider_state_ttl_minutes must be a positive "
             f"integer, got {ttl!r}"
         )
+
+    with telemetry.tracer.start_as_current_span(r.S_REGISTRY_BUILD) as span:
+        registry = await _collect_providers(datasette)
+        span.set_attribute(r.PROVIDERS_INSTALLED, len(registry))
+    setattr(datasette, providers_mod.REGISTRY_ATTR, registry)
+
+
+async def _collect_providers(datasette):
+    from . import providers as providers_mod
+    from .providers.password import PasswordProvider
 
     collected = []
     for result in pm.hook.datasette_accounts_auth_providers(datasette=datasette):
@@ -240,41 +242,70 @@ async def _build_provider_registry(datasette):
         # values fail startup just like a bad start_path.
         providers_mod.validate_branding(provider)
         registry[provider.key] = provider
-    setattr(datasette, providers_mod.REGISTRY_ATTR, registry)
+    return registry
 
 
-async def resolve_actor(datasette, request):
+async def resolve_actor(datasette, request, *, caller):
     """Rebuild the actor from the session cookie + DB, or return None.
 
     Shared by the actor_from_request hook and the asgi_wrapper forced-change
     gate, so the wrapper never depends on Datasette exposing the resolved actor.
+    ``caller`` (``asgi_wrapper`` / ``actor_from_request`` / ``finish_login``)
+    only labels the telemetry.
     """
+    started = time.perf_counter()
     cookie = request.cookies.get(COOKIE_NAME)
     if not cookie:
+        # Anonymous traffic: a counter increment, never a span.
+        _record_resolution("no_cookie", caller, started)
         return None
+    with telemetry.tracer.start_as_current_span(
+        r.S_RESOLVE_ACTOR, attributes={r.CALLER: caller}
+    ) as span:
+        outcome, actor = await _resolve_session(datasette, cookie, span)
+        span.set_attribute(r.ACTOR_OUTCOME, outcome)
+        _record_resolution(outcome, caller, started)
+    return actor
+
+
+def _record_resolution(outcome, caller, started):
+    telemetry.actor_resolutions.add(1, {r.ACTOR_OUTCOME: outcome, r.CALLER: caller})
+    telemetry.actor_resolve_duration.record(
+        time.perf_counter() - started, {r.ACTOR_OUTCOME: outcome}
+    )
+
+
+async def _resolve_session(datasette, cookie, span):
+    """The resolve_actor ladder: returns ``(outcome, actor or None)``, where
+    outcome names the first check that failed (or ``ok``)."""
     try:
         raw_token = datasette.unsign(cookie, SIGN_NAMESPACE)
     except Exception:
-        return None
+        return "bad_signature", None
     internal = datasette.get_internal_database()
     session = await db.get_session(internal, token_sha256(raw_token))
     if not session:
-        return None
+        return "no_session", None
     if session["expires_at"] <= db.now_iso():
         await db.delete_session(internal, session["token_sha256"])
-        return None
+        return "session_expired", None
     user = await db.get_user_by_id(internal, session["actor_id"])
-    if not user or user["disabled"]:
-        return None
+    if not user:
+        return "no_user", None
+    if user["disabled"]:
+        return "disabled", None
     if user["expires_at"] and user["expires_at"] <= db.now_iso():
-        return None
+        return "user_expired", None
     # Defense in depth: a pending (self-registered, unapproved) account should
     # never hold a live session in the first place — see
     # plans/self-registration — but treat it like `disabled` here too.
     if user["pending_approval"]:
-        return None
-    await db.touch_last_seen(internal, session["token_sha256"], session["last_seen_at"])
-    return {
+        return "pending", None
+    touched = await db.touch_last_seen(
+        internal, session["token_sha256"], session["last_seen_at"]
+    )
+    span.set_attribute(r.LAST_SEEN_TOUCHED, touched)
+    return "ok", {
         "id": user["id"],
         "username": user["username"],
         "is_admin": bool(user["is_admin"]),
@@ -286,7 +317,7 @@ async def resolve_actor(datasette, request):
 @hookimpl
 def actor_from_request(datasette, request):
     async def inner():
-        return await resolve_actor(datasette, request)
+        return await resolve_actor(datasette, request, caller="actor_from_request")
 
     return inner
 
@@ -446,7 +477,7 @@ def asgi_wrapper(datasette):
             from datasette.utils.asgi import Request
 
             request = Request(scope, receive)
-            actor = await resolve_actor(datasette, request)
+            actor = await resolve_actor(datasette, request, caller="asgi_wrapper")
             if not actor or not actor.get("must_change_password"):
                 await app(scope, receive, send)
                 return
@@ -463,7 +494,11 @@ def asgi_wrapper(datasette):
 
             accept = _header(scope, b"accept")
             account_url = datasette.urls.path("/-/account")
-            if "application/json" in accept:
+            json_response = "application/json" in accept
+            telemetry.forced_change_blocked.add(
+                1, {r.RESPONSE_MODE: "json" if json_response else "redirect"}
+            )
+            if json_response:
                 await _send_json(
                     send, 403, {"ok": False, "error": "password change required"}
                 )
